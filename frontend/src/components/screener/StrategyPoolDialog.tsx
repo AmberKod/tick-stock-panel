@@ -245,7 +245,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
               {/* 右侧: 已选 (Reorder.Group 纵向拖拽) */}
               <div className="flex flex-col min-h-0">
                 <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border/60 shrink-0">
-                  <GripVertical className="h-3 w-3 text-muted/50" />
+                  <GripVertical className="h-3 w-3 text-muted/70" />
                   <span className="text-[10px] text-muted">已选 · 上下拖拽排序</span>
                 </div>
                 <div className="flex-1 overflow-y-auto px-2 py-2">

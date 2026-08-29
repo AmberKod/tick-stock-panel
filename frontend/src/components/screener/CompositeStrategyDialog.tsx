@@ -165,7 +165,7 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
               <span className="text-sm font-semibold text-foreground">
                 {isEdit ? '编辑叠加策略' : '创建叠加策略'}
               </span>
-              <span className="text-[10px] text-muted/60">
+              <span className="text-[10px] text-muted/80">
                 引用多个子策略, 合并选股与回测信号
               </span>
               <button onClick={onClose} className="ml-auto text-muted hover:text-foreground">
@@ -283,7 +283,7 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-foreground">可选策略</label>
                 <div className="relative mb-1.5">
-                  <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted/50" />
+                  <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted/70" />
                   <input
                     value={search}
                     onChange={e => setSearch(e.target.value)}
@@ -313,7 +313,7 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                           {SRC_MAP[s.source] ?? s.source}
                         </span>
                       )}
-                      <span className="font-mono text-[9px] text-muted/50">{s.id}</span>
+                      <span className="font-mono text-[9px] text-muted/70">{s.id}</span>
                     </button>
                   ))}
                 </div>

@@ -556,7 +556,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                   />
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
-                  <span className="text-[10px] text-muted/60 font-mono">
+                  <span className="text-[10px] text-muted/80 font-mono">
                     {new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                   </span>
                   {confirmTs === ev.ts ? (
@@ -767,7 +767,7 @@ function RulesList({ rulesQuery, onEdit }: {
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(meta.color).dot}`} />
                           <span className="truncate text-xs font-medium text-foreground hover:text-accent">{meta.name}</span>
                           <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">{meta.count}只</span>
-                          <span className="shrink-0 text-[9px] text-muted/60">· 分组作用域</span>
+                          <span className="shrink-0 text-[9px] text-muted/80">· 分组作用域</span>
                         </Link>
                       )
                     })()
@@ -1114,7 +1114,7 @@ function ExtFieldSection({ label, value, onChange, groups, loading }: {
             placeholder="不限"
             className="w-14 h-6 bg-elevated border border-border rounded text-[11px] text-foreground px-1.5 focus:outline-none focus:border-accent/50"
           />
-          <span className="text-[10px] text-muted/60">留空=全部</span>
+          <span className="text-[10px] text-muted/80">留空=全部</span>
         </div>
       )}
       {field && maxTags > 0 && (
@@ -1131,7 +1131,7 @@ function ExtFieldSection({ label, value, onChange, groups, loading }: {
               >{i + 1}</button>
             ))}
           </div>
-          <span className="text-[10px] text-muted/60">点数字划掉=隐藏该位置</span>
+          <span className="text-[10px] text-muted/80">点数字划掉=隐藏该位置</span>
         </div>
       )}
     </div>

@@ -1261,9 +1261,9 @@ export function Watchlist() {
             {/* 计数胶囊: 显示数/总数, mono 字体突出数字 */}
             <span className="inline-flex items-baseline gap-0.5 px-2 py-0.5 rounded-md bg-elevated/70 text-[11px]">
               <span className="font-mono font-semibold text-secondary tabular-nums">{sortedRows.length}</span>
-              <span className="text-muted/50">/</span>
+              <span className="text-muted/70">/</span>
               <span className="font-mono text-muted tabular-nums">{rowsInSelectedGroup.length}</span>
-              <span className="text-muted/60 ml-0.5">只</span>
+              <span className="text-muted/80 ml-0.5">只</span>
             </span>
             {/* 数据未就绪提示: 自选了但 enriched 缓存未覆盖 (新股/冷门/新用户未同步), 指标全为 null */}
             {pendingCount > 0 && (

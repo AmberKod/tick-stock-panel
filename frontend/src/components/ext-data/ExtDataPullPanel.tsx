@@ -142,7 +142,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
           <input
             value={url} onChange={e => setUrl(e.target.value)}
             placeholder="https://api.example.com/data"
-            className="flex-1 min-w-0 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[11px] font-mono text-foreground placeholder:text-muted/50"
+            className="flex-1 min-w-0 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[11px] font-mono text-foreground placeholder:text-muted/70"
           />
         </div>
 

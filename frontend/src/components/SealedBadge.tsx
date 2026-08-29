@@ -26,7 +26,7 @@ function SealedDirBlock({ title, color, counts, rawTotal }: {
         <span className={`text-[10px] font-medium text-${color}`}>{title}</span>
         <span className="tabular-nums text-[10px]">
           <span className="text-muted line-through">{original}</span>
-          <span className="text-muted/50 mx-1">→</span>
+          <span className="text-muted/70 mx-1">→</span>
           <span className={`font-bold text-${color}`}>{fixed}</span>
         </span>
       </div>

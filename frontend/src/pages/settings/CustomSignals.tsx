@@ -234,7 +234,7 @@ export function SettingsCustomSignalsPanel() {
                 <div className="mt-3 space-y-1">
                   {sig.conditions.map((c, i) => (
                     <div key={i} className="flex items-center gap-1.5 text-[11px] text-secondary">
-                      <span className="text-muted/50 w-6 text-right">{i === 0 ? '当' : '且'}</span>
+                      <span className="text-muted/70 w-6 text-right">{i === 0 ? '当' : '且'}</span>
                       <span className="font-mono text-foreground/80">{fieldWithDays(c.left, c.leftDays, fields)}</span>
                       <span className="font-mono text-muted">{c.op}</span>
                       <span className="font-mono text-foreground/80">

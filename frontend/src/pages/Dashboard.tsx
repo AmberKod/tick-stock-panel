@@ -170,7 +170,7 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
                         ? <span className="truncate text-[9px] font-medium text-amber-400">「{sname}」</span>
                         : ev.message && <span className="truncate text-[9px] text-muted">{ev.message}</span>}
                       <span className="flex-1" />
-                      <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                      <span className="text-[8px] text-muted/70 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                       </span>
                     </div>
@@ -178,7 +178,7 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
                       <span className="truncate text-[9px] text-muted">{ev.message}</span>
                       <span className="flex-1" />
-                      <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                      <span className="text-[8px] text-muted/70 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                       </span>
                     </div>
@@ -200,7 +200,7 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
                     {ev.message && (
                       <span className="text-[9px] text-muted truncate flex-1">{ev.message}</span>
                     )}
-                    <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                    <span className="text-[8px] text-muted/70 shrink-0 font-mono">
                       {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                     </span>
                   </div>
@@ -239,12 +239,12 @@ function IndexTicker({ item }: { item: OverviewMarket['indices'][number] }) {
   return (
     <Link
       to={`/indices?symbol=${encodeURIComponent(item.symbol)}`}
-      className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 gap-y-0.5 rounded-lg border border-border bg-elevated/45 px-1.5 py-1 shadow-[0_1px_1px_hsl(var(--border)/0.3)] backdrop-blur-sm transition-all hover:border-accent/40 hover:bg-elevated hover:shadow-[0_2px_6px_hsl(var(--accent)/0.15)]"
+      className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 gap-y-0.5 rounded-lg border border-border bg-elevated/60 px-2 py-1.5 shadow-[0_1px_1px_hsl(var(--border)/0.3)] backdrop-blur-sm transition-all hover:border-accent/40 hover:bg-elevated hover:shadow-[0_2px_6px_hsl(var(--accent)/0.15)]"
     >
-      <div className="truncate text-xs font-medium text-foreground">{item.name || item.symbol}</div>
-      <div className={`font-mono text-xs font-semibold ${pctClass(pct)}`}>{fmtIndexPct(pct)}</div>
+      <div className="truncate text-[13px] font-semibold text-foreground">{item.name || item.symbol}</div>
+      <div className={`font-mono text-sm font-bold tabular-nums ${pctClass(pct)}`}>{fmtIndexPct(pct)}</div>
       <div className="font-mono text-[10px] text-muted">{item.symbol}</div>
-      <div className={`flex items-center gap-1 font-mono text-[11px] ${pctClass(pct)}`}>
+      <div className={`flex items-center gap-1 font-mono text-xs tabular-nums ${pctClass(pct)}`}>
         {isUp ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
         {fmtPrice(item.last_price)}
       </div>
@@ -412,7 +412,7 @@ function StockList({ title, rows, mode, onStockClick }: {
   onStockClick?: (symbol: string, name?: string) => void;
 }) {
   return (
-    <div className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+    <div className="rounded-card border border-border/60 bg-surface/45 p-1.5 backdrop-blur-sm">
       <div className="mb-1 flex items-center justify-between">
         <h3 className="text-xs font-semibold text-foreground">{title}</h3>
         <span className="text-[9px] text-muted">TOP {Math.min(rows.length, 8)}</span>
@@ -513,7 +513,7 @@ function HotRankCard({ title, rank, configUrl, onStockClick }: {
 }) {
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   return (
-    <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+    <section className="rounded-card border border-border/60 bg-surface/45 p-1.5 backdrop-blur-sm">
       <SectionTitle icon={Flame} title={title} hint="领涨/领跌" />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
@@ -729,7 +729,17 @@ export function Dashboard() {
             <span className="font-mono text-secondary">—</span>
           )}
           <span className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
-          <span className={quoteRunning ? 'text-accent' : 'text-warning'}>{quoteRunning ? '实时' : '非实时'}</span>
+          <span
+            className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+              quoteRunning
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-warning/40 bg-warning/10 text-warning'
+            }`}
+            title={quoteRunning ? '行情实时更新中' : '当前为盘后快照数据, 非实时'}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${quoteRunning ? 'bg-accent animate-pulse' : 'bg-warning'}`} />
+            {quoteRunning ? '实时' : '非实时'}
+          </span>
           <button
             onClick={handleRefresh}
             disabled={manualFetching}
@@ -752,11 +762,12 @@ export function Dashboard() {
         </div>
       )}
 
-      <div className="mb-1.5 grid grid-cols-4 gap-1">
-        {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
-      </div>
-
-      <div className="mb-1.5 grid grid-cols-6 gap-1">
+      {/* 主数据区 — 指数 + 核心指标, 用独立容器/边框与次级卡片拉开视觉层级 (三层背景的第一层) */}
+      <section className="mb-1.5 rounded-card border border-border bg-surface/60 p-1.5 shadow-[0_1px_3px_hsl(var(--border)/0.5)]">
+        <div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
+          {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
+        </div>
+        <div className="mt-1.5 grid grid-cols-3 gap-1 sm:grid-cols-6">
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
         <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={{ real: data.limit.limit_up, fake: data.limit.fake_up ?? 0, pending: 0 }} sealedCountsDown={{ real: data.limit.limit_down, fake: data.limit.fake_down ?? 0, pending: 0 }} rawUp={data.limit.limit_up + (data.limit.fake_up ?? 0)} rawDown={data.limit.limit_down + (data.limit.fake_down ?? 0)} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
@@ -768,7 +779,8 @@ export function Dashboard() {
         })()} tone="accent" />
         <KpiCell label="成交额" value={fmtBigNum(data.amount.total)} sub={`均额 ${fmtBigNum(data.amount.avg)}`} />
         <KpiCell label="换手 / 量比" value={`${fmtPrice(data.activity.avg_turnover, 1)}% / ${fmtPrice(data.activity.vol_ratio, 2)}`} sub={`高换手 ${data.activity.high_turnover} · 放量占比 ${fmtPrice(data.activity.high_vol_ratio, 1)}%`} tone="accent" />
-      </div>
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <main className="min-w-0 space-y-1.5">
@@ -833,11 +845,11 @@ export function Dashboard() {
         </main>
 
         <aside className="min-w-0 space-y-1.5">
-          <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+          <section className="rounded-card border border-border/70 bg-surface/55 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
             <SectionTitle icon={Flame} title="涨停梯队" hint={<span className="inline-flex items-center gap-1">{`涨停 ${data.limit.limit_up}`}{isSealedDegrade && <span className="text-[9px] px-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500">{hasDepth ? '未修正' : '降级'}</span>}</span>} />
             <LadderMini limit={data.limit} />
           </section>
-          <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
+          <section className="rounded-card border border-border/70 bg-surface/55 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <BellRing className="h-3.5 w-3.5 text-accent" />

@@ -371,7 +371,7 @@ export function SettingsAIPanel() {
         icon={Settings2}
         title={configTitle}
         right={
-          <span className="inline-flex items-center gap-1.5 text-[10px] text-muted/60" title={isCodexProvider ? 'Use local Codex CLI via codex exec' : 'Use OpenAI-compatible Chat Completions API'}>
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-muted/80" title={isCodexProvider ? 'Use local Codex CLI via codex exec' : 'Use OpenAI-compatible Chat Completions API'}>
             <span className="rounded-full border border-border/40 bg-base/50 px-1.5 py-px font-mono">{isCodexProvider ? 'codex exec' : 'Chat Completions'}</span>
             {isCodexProvider ? 'CLI' : '接口'}
           </span>
@@ -558,7 +558,7 @@ function Field({ label, hint, inline, children }: {
     return (
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] text-muted/50 uppercase tracking-wider">{label}</div>
+          <div className="text-[10px] text-muted/70 uppercase tracking-wider">{label}</div>
           {hint && <div className="text-[10px] text-muted mt-0.5">{hint}</div>}
         </div>
         {children}
@@ -567,7 +567,7 @@ function Field({ label, hint, inline, children }: {
   }
   return (
     <div className="space-y-1.5">
-      <div className="text-[10px] text-muted/50 uppercase tracking-wider">{label}</div>
+      <div className="text-[10px] text-muted/70 uppercase tracking-wider">{label}</div>
       {children}
       {hint && <div className="text-[10px] text-muted">{hint}</div>}
     </div>

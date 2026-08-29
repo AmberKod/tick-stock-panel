@@ -176,7 +176,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                 <div className="space-y-2 rounded-card border border-border/70 bg-base/50 p-3">
                   {draft.conditions.map((c, i) => (
                     <div key={i} className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-muted/60 w-5 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
+                      <span className="text-[10px] text-muted/80 w-5 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
 
                       {/* 左操作数: 前N日 + 字段(弹出选择) */}
                       <DaysInput value={c.leftDays ?? 0} max={maxDays} onChange={v => updateCond(i, { leftDays: v })} />
@@ -235,7 +235,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                     )}
                   </div>
                 )}
-                <p className="text-[10px] text-muted/60 px-1">
+                <p className="text-[10px] text-muted/80 px-1">
                   每个操作数左侧的 <span className="text-foreground/70">最新</span> 按钮可点击切换为「前N日」(取 N 个交易日前的值)。例:收盘价(最新) &gt; 收盘价(前1日) = 上涨。带偏移的条件仅盘后/回测生效, 盘中实时跳过。
                 </p>
               </div>
@@ -335,7 +335,7 @@ function FieldPicker({ value, fields, groups, onChange }: {
                   {filteredGroups ? (
                     filteredGroups.length > 0 ? filteredGroups.map(g => (
                       <div key={g.key} className="mb-1">
-                        <div className="px-2 py-1 text-[10px] text-muted/60 font-medium">{g.label}</div>
+                        <div className="px-2 py-1 text-[10px] text-muted/80 font-medium">{g.label}</div>
                         {g.fields.map(f => (
                           <button
                             key={f.key}

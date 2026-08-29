@@ -903,6 +903,7 @@ export function StrategyBacktest() {
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
+  const [strategySearch, setStrategySearch] = useState('')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
@@ -958,9 +959,12 @@ export function StrategyBacktest() {
     queryFn: () => api.screenerStrategies(assetType),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
-  const filteredStrategyList = useMemo(() => (
-    strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
-  ), [strategyGroup, strategyList])
+  const filteredStrategyList = useMemo(() => {
+    const byGroup = strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
+    const q = strategySearch.trim().toLowerCase()
+    if (!q) return byGroup
+    return byGroup.filter(st => st.name.toLowerCase().includes(q) || st.id.toLowerCase().includes(q))
+  }, [strategyGroup, strategySearch, strategyList])
   // 校验 localStorage 里保存的上次选中策略是否仍存在(本地开发残留的自定义策略
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
@@ -1397,7 +1401,7 @@ export function StrategyBacktest() {
             <label className="text-xs font-medium text-secondary">选择策略</label>
             {/* 分钟K成交 */}
             <div className="flex items-center gap-1">
-              <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
+              <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/70'}`} />
               <button
                 onClick={toggleMinuteFill}
                 disabled={!hasMinuteBatch}
@@ -1415,7 +1419,7 @@ export function StrategyBacktest() {
                   highGranularity ? 'translate-x-[13px]' : 'translate-x-0.5'
                 }`} />
               </button>
-              <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟成交</span>
+              <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/70'}`}>分钟成交</span>
               {!hasMinuteBatch && (
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">分钟K</span>
               )}
@@ -1447,12 +1451,23 @@ export function StrategyBacktest() {
                 </button>
               ))}
             </div>
+            {/* 策略搜索 — 按名称/id 过滤当前分组内的策略 */}
+            <div className="relative border-b border-border/60">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                value={strategySearch}
+                onChange={e => setStrategySearch(e.target.value)}
+                placeholder="搜索策略…"
+                className="w-full bg-base/40 py-1.5 pl-7 pr-2 text-[11px] text-foreground placeholder:text-muted/70 focus:outline-none"
+              />
+            </div>
             <div className="flex max-h-[128px] flex-wrap gap-1 overflow-y-auto p-1">
             {strategies.isLoading && (
               <span className="text-xs text-muted px-2 py-1">加载中…</span>
             )}
             {!strategies.isLoading && filteredStrategyList.length === 0 && (
-              <span className="text-xs text-muted px-2 py-1">当前分组暂无策略</span>
+              <span className="text-xs text-muted px-2 py-1">{strategySearch.trim() ? '没有匹配的策略' : '当前分组暂无策略'}</span>
             )}
             {filteredStrategyList.map(st => (
               <button
@@ -1480,6 +1495,14 @@ export function StrategyBacktest() {
           <div className="rounded-btn border border-border bg-surface px-2.5 py-2 text-xs text-muted">加载策略配置…</div>
         )}
 
+        {!selectedStrategy ? (
+          /* 未选策略 — 虚线占位引导, 替代灰禁用态 */
+          <div className="flex flex-col items-center justify-center rounded-btn border border-dashed border-border/80 px-3 py-4 text-center">
+            <SlidersHorizontal className="h-5 w-5 text-muted/70" />
+            <p className="mt-1.5 text-[11px] text-secondary">先选择上方策略</p>
+            <p className="mt-0.5 text-[10px] text-muted">再配置参数 / 过滤 / 买卖触发器 / 评分 / 风控</p>
+          </div>
+        ) : (
         <button
           type="button"
           onClick={() => detail && setSettingsOpen(true)}
@@ -1502,6 +1525,7 @@ export function StrategyBacktest() {
           <span className="mt-1 block text-[10px] font-medium text-secondary">{stockPoolSummary}</span>
           <span className="mt-1 block text-[10px] leading-4 text-muted">{advancedSummary}</span>
         </button>
+        )}
 
         <div className="rounded-btn border border-border bg-surface p-2.5">
           <div className="flex items-center justify-between gap-2">
@@ -2084,7 +2108,7 @@ export function StrategyBacktest() {
                 <span className="mr-2 font-medium text-foreground">选择漏斗</span>
                 {selectionStages.map((stage, index) => (
                   <div key={stage.key} className="flex items-center">
-                    {index > 0 && <ChevronRight className="mx-1.5 h-3 w-3 text-muted/60" />}
+                    {index > 0 && <ChevronRight className="mx-1.5 h-3 w-3 text-muted/80" />}
                     <span>{stage.label} <b className="font-mono text-foreground">{stage.value}</b></span>
                   </div>
                 ))}

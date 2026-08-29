@@ -176,7 +176,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
         )}
         {!candidates.isLoading && !candidates.isError && visible.length === 0 && (
           <div className="px-4 py-12 text-center">
-            <BookmarkCheck className="mx-auto h-7 w-7 text-muted/50" />
+            <BookmarkCheck className="mx-auto h-7 w-7 text-muted/70" />
             <div className="mt-3 text-sm font-medium text-secondary">暂无候选方案</div>
           </div>
         )}

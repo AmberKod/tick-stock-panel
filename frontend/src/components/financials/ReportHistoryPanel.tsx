@@ -34,7 +34,7 @@ export function ReportHistoryPanel() {
       <div className="rounded-card border border-dashed border-border/50 bg-surface/50 px-6 py-8 text-center">
         <History className="mx-auto h-6 w-6 text-muted/40" />
         <div className="mt-2 text-xs text-muted">暂无历史分析报告</div>
-        <div className="mt-0.5 text-[10px] text-muted/60">选择个股后点击「AI 财务分析」生成,报告会自动保存在此</div>
+        <div className="mt-0.5 text-[10px] text-muted/80">选择个股后点击「AI 财务分析」生成,报告会自动保存在此</div>
       </div>
     )
   }
@@ -48,7 +48,7 @@ export function ReportHistoryPanel() {
           <span className="text-xs font-medium text-foreground">历史分析报告</span>
           <span className="text-[10px] text-muted">{reports.length}/20</span>
         </div>
-        <span className="text-[10px] text-muted/60">点击查看 · 报告最多保留 20 条</span>
+        <span className="text-[10px] text-muted/80">点击查看 · 报告最多保留 20 条</span>
       </div>
 
       {/* 列表 */}
@@ -90,7 +90,7 @@ export function ReportHistoryPanel() {
                     {fmtRelative(r.created_at)}
                   </span>
                   {r.summary && (
-                    <span className="text-[10px] text-muted/50 truncate">{r.summary}</span>
+                    <span className="text-[10px] text-muted/70 truncate">{r.summary}</span>
                   )}
                 </div>
               </div>

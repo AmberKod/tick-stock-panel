@@ -231,8 +231,8 @@ function EpRow({ ep, result, testing, isCurrent, isFree, canUsePremium, switchin
 
         {/* 第3行:URL(左) / min~max·成功率(右) —— 副信息始终占位,行数不变 */}
         <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-[10px] text-muted/50 font-mono truncate min-w-0" title={ep.url}>{ep.url.replace('https://', '')}</span>
-          <span className="ml-auto shrink-0 text-[9px] text-muted/50 font-mono whitespace-nowrap">
+          <span className="text-[10px] text-muted/70 font-mono truncate min-w-0" title={ep.url}>{ep.url.replace('https://', '')}</span>
+          <span className="ml-auto shrink-0 text-[9px] text-muted/70 font-mono whitespace-nowrap">
             {result && result.ok && result.min_ms != null
               ? `${result.min_ms}~${result.max_ms} · ${result.success}/${result.rounds}`
               : '\u00A0'}

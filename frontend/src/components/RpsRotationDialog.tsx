@@ -260,7 +260,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                   onChange={e => setFocus(e.target.value)}
                   placeholder="关注点(可选)"
                   disabled={analyzing}
-                  className="w-28 px-2 py-0.5 text-[11px] bg-elevated/50 border border-border rounded-btn text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/40 disabled:opacity-50"
+                  className="w-28 px-2 py-0.5 text-[11px] bg-elevated/50 border border-border rounded-btn text-foreground placeholder:text-muted/70 focus:outline-none focus:border-accent/40 disabled:opacity-50"
                 />
                 <button
                   onClick={() => runAnalysis(days, focus)}
@@ -300,7 +300,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                   )}
                 </div>
               ) : (
-                <div className="px-4 py-4 text-center text-[11px] text-muted/60">
+                <div className="px-4 py-4 text-center text-[11px] text-muted/80">
                   点击「生成分析」,AI 将从主线研判 / 新晋强势 / 退潮预警 / 机构vs游资 等角度分析最近 {days} 天的概念轮动
                 </div>
               )}

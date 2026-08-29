@@ -175,7 +175,7 @@ export function AlertToastContainer() {
                     {fmtPct(pct)}
                   </span>
                 )}
-                <button aria-label="关闭通知" onClick={(e) => { e.stopPropagation(); dismiss(item.id) }} className="shrink-0 p-0.5 rounded text-muted/50 hover:text-foreground hover:bg-elevated transition-colors cursor-pointer">
+                <button aria-label="关闭通知" onClick={(e) => { e.stopPropagation(); dismiss(item.id) }} className="shrink-0 p-0.5 rounded text-muted/70 hover:text-foreground hover:bg-elevated transition-colors cursor-pointer">
                   <X className="h-3 w-3" />
                 </button>
               </div>

@@ -490,7 +490,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 const realIdx = draft.conditions.indexOf(c)
                 return (
                   <div key={i} className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-muted/60 w-6 text-right shrink-0">{i === 0 && selectedSignals.length === 0 ? '当' : draft.logic === 'and' ? '且' : '或'}</span>
+                    <span className="text-[10px] text-muted/80 w-6 text-right shrink-0">{i === 0 && selectedSignals.length === 0 ? '当' : draft.logic === 'and' ? '且' : '或'}</span>
                     <select value={c.field} onChange={e => updateCond(realIdx, { field: e.target.value })} className="flex-1 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
                       {thresholdFields.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                     </select>
@@ -698,7 +698,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 value={sectorQuery}
                 onChange={event => setSectorQuery(event.target.value)}
                 placeholder={`搜索${SECTOR_KIND_OPTIONS.find(option => option.key === sectorKind)?.label ?? '板块'}`}
-                className="h-9 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                className="h-9 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
               />
             </label>
             <div className="grid max-h-48 grid-cols-1 gap-1 overflow-y-auto pr-1 sm:grid-cols-2">
@@ -1101,7 +1101,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             </div>
           )}
           {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有标的生效</span>}
-          {draft.scope === 'sector' && <span className="text-[11px] text-muted/60">板块精确过滤(开发中,当前等同全市场)</span>}
+          {draft.scope === 'sector' && <span className="text-[11px] text-muted/80">板块精确过滤(开发中,当前等同全市场)</span>}
         </div>
       </div>}
 
@@ -1150,7 +1150,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 const realIdx = draft.conditions.indexOf(c)
                 return (
                   <div key={i} className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-muted/60 w-6 text-right shrink-0">{i === 0 && selectedSignals.length === 0 ? '当' : draft.logic === 'and' ? '且' : '或'}</span>
+                    <span className="text-[10px] text-muted/80 w-6 text-right shrink-0">{i === 0 && selectedSignals.length === 0 ? '当' : draft.logic === 'and' ? '且' : '或'}</span>
                     <select value={c.field} onChange={e => updateCond(realIdx, { field: e.target.value })} className="w-32 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
                       {thresholdFields.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
                     </select>
@@ -1187,7 +1187,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   value={strategyQuery}
                   onChange={e => setStrategyQuery(e.target.value)}
                   placeholder="搜索名称、标签或策略 ID"
-                  className="h-9 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                  className="h-9 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
                 />
               </span>
             </label>
@@ -1272,7 +1272,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     score_min: event.target.value === '' ? null : Number(event.target.value),
                   }))}
                   placeholder="不限"
-                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
                 />
               </label>
               <span className="mt-5 text-xs text-muted">至</span>
@@ -1289,7 +1289,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     score_max: event.target.value === '' ? null : Number(event.target.value),
                   }))}
                   placeholder="不限"
-                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
                 />
               </label>
             </div>

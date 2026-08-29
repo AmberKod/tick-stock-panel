@@ -401,7 +401,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                     {item.display_name.replace(/（.*?）|\(.*?\)/g, '').trim() || item.display_name}
                   </span>
                   {item.kind === 'custom' ? (
-                    <span className="text-[9px] text-muted/50 tracking-wider shrink-0">自有</span>
+                    <span className="text-[9px] text-muted/70 tracking-wider shrink-0">自有</span>
                   ) : (
                     <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
                   )}

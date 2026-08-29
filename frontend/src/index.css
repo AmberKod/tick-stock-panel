@@ -14,7 +14,7 @@
   --border: 240 6% 90%;      /* #E4E4E7 */
   --fg-primary: 240 6% 10%;  /* #18181B */
   --fg-secondary: 240 4% 35%;/* #52525B */
-  --fg-muted: 240 5% 65%;    /* #A1A1AA */
+  --fg-muted: 240 4% 45%;    /* #72727A 提深 — 亮色下 muted 文字对比度 ≥ 4.5:1 (WCAG AA) */
   --accent: 217 91% 60%;     /* #3B82F6 电光蓝 */
   --bull: 4 87% 60%;         /* #F04438 红涨 */
   --bear: 152 67% 45%;       /* #12B76A 绿跌 */
@@ -29,12 +29,19 @@ html.dark {
   --border: 240 5% 22%;      /* #353539 边框加亮,易识别 */
   --fg-primary: 0 0% 98%;    /* #FAFAFA */
   --fg-secondary: 240 5% 78%;/* #C4C4CB 大幅提亮 — 子标题/导航非激活态 */
-  --fg-muted: 240 5% 58%;    /* #8E8E96 muted 提亮 — 辅助提示 */
+  --fg-muted: 240 5% 61%;    /* #9999A1 muted 再提亮 — 保证 elevated 卡片上 ≥ 4.5:1 */
   --accent: 217 91% 60%;
   --bull: 4 87% 60%;
   --bear: 152 67% 45%;
   --warning: 32 95% 50%;
   --danger: 4 87% 60%;
+}
+
+/* 键盘焦点可见性 (WCAG 2.4.7) — 所有可交互元素统一焦点环,
+ * 仅 :focus-visible (键盘导航) 时显示, 不影响鼠标点击体验 */
+:focus-visible {
+  outline: 2px solid hsl(var(--accent) / 0.9);
+  outline-offset: 2px;
 }
 
 /* 价格 / 数字一律等宽 */

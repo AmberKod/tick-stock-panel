@@ -94,6 +94,34 @@ const nav = [
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
+// 导航分组标签 — 只做视觉分区, 不改变 nav_order 自定义排序:
+// 渲染时按当前显示顺序检测分组变化, 在每组首项前插入组标题。
+const NAV_GROUP_OF: Record<string, string> = {
+  '/': '行情',
+  '/watchlist': '行情',
+  '/stock-analysis': '行情',
+  '/indices': '行情',
+  '/screener': '策略',
+  '/backtest': '策略',
+  '/mining': '策略',
+  '/limit-ladder': '市场',
+  '/concept-analysis': '市场',
+  '/industry-analysis': '市场',
+  '/financials': '市场',
+  '/regime': '市场',
+  '/monitor': '监控',
+  '/abnormal': '监控',
+  '/review': '监控',
+  '/data': '数据',
+}
+
+/** 取导航项的分组名: /analysis/* 扩展分析页归「市场」, 其余未知路由(前端扩展)不显示组标题 */
+function navGroupOf(to: string): string | undefined {
+  if (NAV_GROUP_OF[to]) return NAV_GROUP_OF[to]
+  if (to.startsWith('/analysis/')) return '市场'
+  return undefined
+}
+
 /** 亮/暗主题切换 — 状态存 localStorage, 生效见 lib/theme.ts */
 function ThemeToggle() {
   const theme = useTheme()
@@ -265,7 +293,7 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
       ) : (
         <>
           <span className="text-[11px] text-secondary group-hover:text-foreground transition-colors">AI 配置</span>
-          <span className="ml-auto text-[11px] font-mono leading-none text-muted">未配置</span>
+          <span className="ml-auto text-[11px] font-mono leading-none text-warning/80">未配置</span>
         </>
       )}
       <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${configured ? 'bg-bear' : 'bg-warning'}`} />
@@ -591,11 +619,21 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon, badge }) => {
+          {visibleNavItems.map(({ to, label, icon: Icon, badge }, idx) => {
+            // 组标题 — 该项所属分组与上一项不同(或为首项)时显示, 收起模式下隐藏
+            const group = navGroupOf(to)
+            const prevGroup = idx > 0 ? navGroupOf(visibleNavItems[idx - 1].to) : null
+            const showGroupLabel = !navCollapsed && group != null && group !== prevGroup
             // 「自选」项 — 开启分组侧栏且未整体收起时, 渲染为可展开父项 + 二级分组
             const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !navCollapsed && watchlistGroups.length > 0
             return (
               <div key={to}>
+                {showGroupLabel && (
+                  <div className={cn('flex items-center gap-2 px-3 pb-1 select-none', idx === 0 ? 'pt-0.5' : 'pt-3')} aria-hidden="true">
+                    <span className="text-[10px] font-medium tracking-wide text-muted/80">{group}</span>
+                    <span className="h-px flex-1 bg-border/50" />
+                  </div>
+                )}
                 {isWatchlistExpandable ? (
                   /* 可展开的自选父项 — 点击切换展开, 不直接跳页 */
                   <button
@@ -866,7 +904,7 @@ export function Layout() {
                   <Settings className={cn('h-4 w-4 shrink-0 transition-colors', isActive ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
                   {!navCollapsed && <span>设置</span>}
                   {!navCollapsed && version && (
-                    <span className="ml-auto font-mono text-[10px] text-muted/50 select-none shrink-0">
+                    <span className="ml-auto font-mono text-[10px] text-muted/70 select-none shrink-0">
                       {version}
                     </span>
                   )}

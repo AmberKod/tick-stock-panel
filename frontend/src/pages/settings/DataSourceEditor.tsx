@@ -270,7 +270,7 @@ export function DataSourceEditor({
                     <span className="flex-1 text-left">{DATASET_LABEL[key]}</span>
                     {enabled
                       ? <span className="text-[9px] text-accent">已配置</span>
-                      : <span className="text-[9px] text-muted/50">回退 TF</span>
+                      : <span className="text-[9px] text-muted/70">回退 TF</span>
                     }
                     <Toggle
                       checked={enabled}
@@ -359,7 +359,7 @@ function DatasetDetail({
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium text-foreground">{DATASET_LABEL[datasetKey]}</h3>
-          <span className="text-[10px] text-muted/50 font-mono">{datasetKey}</span>
+          <span className="text-[10px] text-muted/70 font-mono">{datasetKey}</span>
         </div>
         <Toggle checked={enabled} onChange={() => onToggle(!enabled)} />
       </div>
@@ -445,7 +445,7 @@ function DatasetDetail({
                 <span className="text-[10px] uppercase tracking-widest text-muted">请求参数字段映射</span>
                 <ChevronDown className={`h-3 w-3 text-muted transition-transform ${showParams ? 'rotate-180' : ''}`} />
               </button>
-              <div className="text-[10px] text-muted/50 mb-1.5">
+              <div className="text-[10px] text-muted/70 mb-1.5">
                 改外部接口的参数名（留空用默认）
               </div>
               <AnimatePresence initial={false}>
@@ -507,7 +507,7 @@ function DatasetDetail({
                         </>
                       )}
                       {datasetKey === 'realtime' && (
-                        <div className="col-span-full text-[10px] text-muted/50">
+                        <div className="col-span-full text-[10px] text-muted/70">
                           实时行情为全市场快照接口，不逐标的拉取，无需配置请求参数名。
                         </div>
                       )}
@@ -529,7 +529,7 @@ function DatasetDetail({
                   AI 帮你整理映射 →
                 </a>
               </div>
-              <div className="text-[10px] text-muted/50 mb-1.5">
+              <div className="text-[10px] text-muted/70 mb-1.5">
                 外部字段 → 内部字段 · 不知道怎么填? 点上方链接用 AI 整理
               </div>
               <FieldMapEditor
@@ -581,7 +581,7 @@ function DatasetDetail({
             className="py-12 text-center"
           >
             <div className="text-sm text-muted mb-1">{DATASET_LABEL[datasetKey]} 未启用</div>
-            <div className="text-[11px] text-muted/60">启用后此数据集将由该自定义源提供, 未启用则回退 TickFlow</div>
+            <div className="text-[11px] text-muted/80">启用后此数据集将由该自定义源提供, 未启用则回退 TickFlow</div>
             <button
               onClick={() => onToggle(true)}
               className="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors"
@@ -661,7 +661,7 @@ function FieldMapEditor({
   return (
     <div className="space-y-1.5">
       {!hasValid && (
-        <div className="text-[11px] text-muted/60 py-1">填写外部字段名后自动生效, 无需的字段可删除</div>
+        <div className="text-[11px] text-muted/80 py-1">填写外部字段名后自动生效, 无需的字段可删除</div>
       )}
       {rows.map((row) => (
         <div key={row.id} className="grid grid-cols-[1fr_auto_1.2fr_auto] gap-1.5 items-center">
@@ -671,7 +671,7 @@ function FieldMapEditor({
             placeholder="外部字段名"
             className={`${INPUT_CLS} text-xs`}
           />
-          <span className="text-muted/50 text-[10px]">→</span>
+          <span className="text-muted/70 text-[10px]">→</span>
           <select
             value={targets.includes(row.target) ? row.target : ''}
             onChange={e => updateRow(row.id, { target: e.target.value })}
@@ -707,7 +707,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
-        {hint && <span className="text-[9px] text-muted/50 normal-case">{hint}</span>}
+        {hint && <span className="text-[9px] text-muted/70 normal-case">{hint}</span>}
       </div>
       {children}
     </div>

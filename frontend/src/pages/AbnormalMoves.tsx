@@ -208,7 +208,7 @@ export function AbnormalMoves() {
       {!enabled && !stale ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
           <div className="m-auto rounded-card border border-border bg-surface p-8 text-center">
-            <FlaskConical className="mx-auto h-8 w-8 text-muted/50" />
+            <FlaskConical className="mx-auto h-8 w-8 text-muted/70" />
             <div className="mt-3 text-sm font-medium text-foreground">监控未开启</div>
             <p className="mx-auto mt-2 max-w-lg text-xs leading-relaxed text-muted">
               开启后按交易所异动规则实时计算全市场个股的涨跌幅偏离值 (个股 N 日累计涨跌 −
@@ -345,7 +345,7 @@ export function AbnormalMoves() {
                   {WINDOW_KEYS.map(w => (
                     <th key={w} className="px-2 py-2 text-right">
                       {WINDOW_LABELS[w]}
-                      <span className="ml-1 normal-case text-muted/60">(阈值)</span>
+                      <span className="ml-1 normal-case text-muted/80">(阈值)</span>
                     </th>
                   ))}
                   <th
@@ -353,7 +353,7 @@ export function AbnormalMoves() {
                     title="取 3日/10日/30日 三档中最高的 |偏离值|÷对应档阈值; ≥100% 已触发, ≥70% 边缘, ≥50% 观察"
                   >
                     接近度
-                    <span className="ml-1 normal-case text-muted/60">(最高档)</span>
+                    <span className="ml-1 normal-case text-muted/80">(最高档)</span>
                   </th>
                   <th className="px-2 py-2 text-center">状态</th>
                 </tr>
@@ -492,7 +492,7 @@ function AbnormalRowView({ row, rank, onPreview }: {
                 title={`阈值 ${sign}${fmtThreshold(info.threshold)} · 接近度 ${(info.closeness * 100).toFixed(0)}%${isDominant ? ' · 本行接近度来源' : ''}`}
               >
                 {fmtPct(info.value)}
-                <span className="ml-1 text-[9px] text-muted/60">/{sign}{fmtThreshold(info.threshold)}</span>
+                <span className="ml-1 text-[9px] text-muted/80">/{sign}{fmtThreshold(info.threshold)}</span>
               </span>
             ) : (
               <span className="text-muted/40">—</span>

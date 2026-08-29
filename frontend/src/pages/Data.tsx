@@ -735,7 +735,7 @@ export function Data() {
                 <div className="flex items-center justify-between text-[11px]">
                   <div className="flex items-center gap-1">
                     <span className="text-muted">盘前 · 个股维表</span>
-                    <span className="text-muted/50">·</span>
+                    <span className="text-muted/70">·</span>
                     <span className="font-mono text-secondary">
                       {`${String(instrumentsSched.hour).padStart(2, '0')}:${String(instrumentsSched.minute).padStart(2, '0')}`}
                     </span>
@@ -782,7 +782,7 @@ export function Data() {
                 <div className="flex items-center justify-between text-[11px]">
                   <div className="flex items-center gap-1">
                     <span className="text-muted">盘后 · 全量管道</span>
-                    <span className="text-muted/50">·</span>
+                    <span className="text-muted/70">·</span>
                     <span className="font-mono text-secondary">
                       {`${String(pipelineSched.hour).padStart(2, '0')}:${String(pipelineSched.minute).padStart(2, '0')}`}
                     </span>

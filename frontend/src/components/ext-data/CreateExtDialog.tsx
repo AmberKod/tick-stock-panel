@@ -628,7 +628,7 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
                   <><Loader2 className="h-5 w-5 text-accent animate-spin" /><span className="text-[11px] text-muted">检测字段中…</span></>
                 ) : (
                   <>
-                    <Upload className="h-5 w-5 text-muted/60" />
+                    <Upload className="h-5 w-5 text-muted/80" />
                     <span className="text-[11px] text-secondary">上传数据文件（CSV / Excel）自动识别数据格式</span>
                     <span className="text-[10px] text-amber-400/70">自动识别列名和类型，symbol/code 列自动匹配</span>
                   </>
@@ -761,7 +761,7 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex items-center justify-between px-6 py-4 border-t border-border/50 bg-elevated/20">
-          <div className="text-[10px] text-muted/60">
+          <div className="text-[10px] text-muted/80">
             {sourceMode === 'url'
               ? '创建后可在扩展数据卡片中继续调整拉取配置'
               : sourceMode === 'file'

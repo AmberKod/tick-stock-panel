@@ -226,7 +226,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           </div>
           <div className="flex items-baseline gap-2 shrink-0">
             <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
-            <span className="text-[10px] text-muted/60">·</span>
+            <span className="text-[10px] text-muted/80">·</span>
             <span className="text-[10px] text-muted">当前价</span>
             <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
               {curClose?.toFixed(2) ?? '—'}
@@ -270,7 +270,7 @@ function HistorySidebar() {
         ) : reports.length === 0 ? (
           <div className="px-3 py-10 text-center">
             <p className="text-xs text-muted">还没有任何个股分析报告</p>
-            <p className="text-[10px] text-muted/60 mt-1">选一只股票,点「AI 个股分析」生成</p>
+            <p className="text-[10px] text-muted/80 mt-1">选一只股票,点「AI 个股分析」生成</p>
           </div>
         ) : (
           <div className="max-h-[calc(100vh-220px)] overflow-y-auto p-2 space-y-1.5">
@@ -299,7 +299,7 @@ function HistorySidebar() {
                   </button>
                   <button
                     onClick={() => { deleteReport(r.id); toast('已删除', 'success') }}
-                    className="shrink-0 text-[10px] text-muted/60 hover:text-danger transition-colors px-1 py-0.5 opacity-0 group-hover:opacity-100"
+                    className="shrink-0 text-[10px] text-muted/80 hover:text-danger transition-colors px-1 py-0.5 opacity-0 group-hover:opacity-100"
                     title="删除"
                   >
                     删除

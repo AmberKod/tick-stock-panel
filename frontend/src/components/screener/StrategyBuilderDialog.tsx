@@ -476,7 +476,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                     className="w-full h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground placeholder:text-muted/30 focus:outline-none focus:ring-2 focus:ring-accent/30" />
                 </div>
                 <div>
-                  <span className="text-[10px] text-muted/50 uppercase tracking-wider mb-1.5 block">选股方向</span>
+                  <span className="text-[10px] text-muted/70 uppercase tracking-wider mb-1.5 block">选股方向</span>
                   <div className="flex gap-1">
                     {DIRECTIONS.map(d => (
                       <button key={d.value} onClick={() => setDirection(d.value)} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (direction === d.value ? 'border-amber-400/40 bg-amber-400/10 text-amber-400' : 'border-border bg-base text-muted hover:border-amber-400/30')}>{d.label}</button>
@@ -484,14 +484,14 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   </div>
                 </div>
                 <div>
-                  <span className="text-[10px] text-muted/50 uppercase tracking-wider mb-1.5 block">执行后端</span>
+                  <span className="text-[10px] text-muted/70 uppercase tracking-wider mb-1.5 block">执行后端</span>
                   <div className="flex gap-1">
                     <button onClick={() => selectExecutionBackend('polars_expr')} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (executionBackend === 'polars_expr' ? 'border-amber-400/40 bg-amber-400/10 text-amber-400' : 'border-border bg-base text-muted hover:border-amber-400/30')}>Polars 表达式</button>
                     <button onClick={() => selectExecutionBackend('matrix_native')} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (executionBackend === 'matrix_native' ? 'border-amber-400/40 bg-amber-400/10 text-amber-400' : 'border-border bg-base text-muted hover:border-amber-400/30')}>矩阵原生</button>
                   </div>
                 </div>
                 <div>
-                  <span className="text-[10px] text-muted/50 uppercase tracking-wider mb-1.5 block">策略规则</span>
+                  <span className="text-[10px] text-muted/70 uppercase tracking-wider mb-1.5 block">策略规则</span>
                   <textarea value={rules} onChange={e => setRules(e.target.value)}
                     placeholder="描述你的选股逻辑，AI 会自动提取参数。例如：\n前一交易日为明显阴线且跌幅不低于2%，今日阳线收盘反包前一日实体，收盘价接近或高于前一日高点，成交量较前一日放大1.2倍以上，当前 close > ma5 或 close > ma10；使用 filter_history，并优先用 Polars shift/with_columns/filter 实现。"
                     className="w-full h-28 px-3 py-2 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground placeholder:text-muted/30 resize-none focus:outline-none focus:ring-2 focus:ring-accent/30" />
@@ -519,7 +519,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                       <div className="divide-y divide-border/10">
                         {params.length > 0 && (
                           <div className="px-4 py-3 space-y-2">
-                            <div className="text-[10px] text-muted/50 uppercase tracking-wider">策略参数</div>
+                            <div className="text-[10px] text-muted/70 uppercase tracking-wider">策略参数</div>
                             {params.map((p: any) => (
                               <div key={p.id} className="flex items-center gap-2">
                                 <span className="text-[11px] text-secondary w-24 shrink-0 text-right">{p.label}</span>
@@ -537,7 +537,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                         )}
                         {(entrySignals.length > 0 || exitSignals.length > 0) && (
                           <div className="px-4 py-3 space-y-2">
-                            <div className="text-[10px] text-muted/50 uppercase tracking-wider">交易信号</div>
+                            <div className="text-[10px] text-muted/70 uppercase tracking-wider">交易信号</div>
                             {entrySignals.length > 0 && (
                               <div className="flex items-center gap-2">
                                 <span className="text-[10px] text-emerald-400 w-10 shrink-0">入场</span>
@@ -562,7 +562,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                         )}
                         {Object.keys(scoring).length > 0 && (
                           <div className="px-4 py-3 space-y-2">
-                            <div className="text-[10px] text-muted/50 uppercase tracking-wider">评分权重</div>
+                            <div className="text-[10px] text-muted/70 uppercase tracking-wider">评分权重</div>
                             {Object.entries(scoring).map(([k, v]) => (
                               <div key={k} className="flex items-center gap-2">
                                 <span className="text-[10px] text-muted w-24 shrink-0 text-right font-mono">{k}</span>
@@ -610,7 +610,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                     className="h-9 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground placeholder:text-muted/30 focus:outline-none focus:ring-2 focus:ring-accent/30" />
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="mr-2 text-[10px] text-muted/50 uppercase tracking-wider">执行后端</span>
+                  <span className="mr-2 text-[10px] text-muted/70 uppercase tracking-wider">执行后端</span>
                   <button onClick={() => selectExecutionBackend('polars_expr')} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (executionBackend === 'polars_expr' ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border bg-base text-muted')}>Polars 表达式</button>
                   <button onClick={() => selectExecutionBackend('matrix_native')} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (executionBackend === 'matrix_native' ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border bg-base text-muted')}>矩阵原生</button>
                 </div>

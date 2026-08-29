@@ -108,7 +108,7 @@ const GroupCard = React.memo(function GroupCard({
             </span>
           )}
         </span>
-        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted/60 transition-transform group-hover:translate-x-0.5" />
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted/80 transition-transform group-hover:translate-x-0.5" />
       </button>
 
       {/* 组内榜单: 按涨跌幅降序 */}

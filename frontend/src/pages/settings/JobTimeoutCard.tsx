@@ -117,7 +117,7 @@ export function JobTimeoutCard() {
               <option value="hour">小时</option>
             </select>
           </div>
-          <span className="block text-[10px] text-muted/60 mt-1.5">默认 20 分钟无进度，最小 1 分钟</span>
+          <span className="block text-[10px] text-muted/80 mt-1.5">默认 20 分钟无进度，最小 1 分钟</span>
         </label>
 
         <label className="rounded-lg border border-border/60 bg-elevated/20 px-3.5 py-3">
@@ -149,7 +149,7 @@ export function JobTimeoutCard() {
               <option value="hour">小时</option>
             </select>
           </div>
-          <span className="block text-[10px] text-muted/60 mt-1.5">默认 30 分钟无进度，最小 1 分钟</span>
+          <span className="block text-[10px] text-muted/80 mt-1.5">默认 30 分钟无进度，最小 1 分钟</span>
         </label>
       </div>
     </section>

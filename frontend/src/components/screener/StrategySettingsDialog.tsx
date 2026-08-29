@@ -389,21 +389,21 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                 <div className="flex items-end gap-4">
                   <div className="flex-1 space-y-2">
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-muted/50 uppercase tracking-wider w-8 shrink-0">名称</span>
+                      <span className="text-[10px] text-muted/70 uppercase tracking-wider w-8 shrink-0">名称</span>
                       <input type="text" value={strategyName} onChange={e => setStrategyName(e.target.value)}
                         className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-muted/50 uppercase tracking-wider w-8 shrink-0">描述</span>
+                      <span className="text-[10px] text-muted/70 uppercase tracking-wider w-8 shrink-0">描述</span>
                       <input type="text" value={strategyDesc} onChange={e => setStrategyDesc(e.target.value)}
                         className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 pb-0.5 shrink-0">
-                    <span className="text-[10px] text-muted/50">显示上限</span>
+                    <span className="text-[10px] text-muted/70">显示上限</span>
                     <input type="number" value={displayLimit ?? ''} onChange={e => setDisplayLimit(e.target.value ? Number(e.target.value) : null)} step={1} min={10} max={200} placeholder="不限"
                       className="w-14 h-8 px-1.5 rounded-lg bg-base border border-border/40 text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
-                    <span className="text-[10px] text-muted/50">只</span>
+                    <span className="text-[10px] text-muted/70">只</span>
                   </div>
                 </div>
 
@@ -454,7 +454,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                       <div className="space-y-1.5">
                         {compositeChildren.map((c, i) => (
                           <div key={c.id} className="flex items-center gap-2 rounded-lg bg-base/60 px-3 py-2">
-                            <span className="text-[10px] text-muted/50 font-mono w-5">{i + 1}</span>
+                            <span className="text-[10px] text-muted/70 font-mono w-5">{i + 1}</span>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5">
                                 <span className="text-xs font-medium text-foreground truncate">{c.name || c.id}</span>
@@ -462,7 +462,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                                   <span className={`rounded border px-1 text-[8px] shrink-0 ${SRC_CLS[c.source] ?? ''}`}>{SRC_LABEL[c.source] ?? c.source}</span>
                                 )}
                               </div>
-                              <div className="text-[10px] text-muted/50 font-mono">{c.id}</div>
+                              <div className="text-[10px] text-muted/70 font-mono">{c.id}</div>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               <input
@@ -481,7 +481,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         ))}
                       </div>
                     )}
-                    <div className="text-[10px] text-muted/60 pt-1 border-t border-border/30">
+                    <div className="text-[10px] text-muted/80 pt-1 border-t border-border/30">
                       提示: 权重建议归一为 1.0; 修改后点底部"保存设置"生效。
                     </div>
                   </div>
@@ -535,7 +535,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         </div>
                       </Section>
                     ) : (
-                      <div className="rounded-xl border border-border/15 bg-surface/20 px-3.5 py-4 text-[11px] text-muted/50 text-center">无策略参数</div>
+                      <div className="rounded-xl border border-border/15 bg-surface/20 px-3.5 py-4 text-[11px] text-muted/70 text-center">无策略参数</div>
                     )}
                   </div>
 

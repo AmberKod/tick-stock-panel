@@ -310,7 +310,7 @@ export function Review() {
                   onChange={(e) => setFocus(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !isGenerating) generate() }}
                   placeholder="可选:补充复盘关注点,如「半导体板块持续性如何」「量能是否持续」"
-                  className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted/60"
+                  className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted/80"
                 />
                 {focus && (
                   <button onClick={() => setFocus('')} className="text-xs text-muted transition-colors hover:text-foreground">清除</button>
@@ -760,7 +760,7 @@ function HistoryPanel({
           <div className="flex flex-col items-center justify-center gap-2 px-3 py-10 text-center">
             <History className="h-7 w-7 text-muted/40" strokeWidth={1.5} />
             <div className="text-[11px] text-muted">暂无历史复盘</div>
-            <div className="text-[10px] text-muted/60">生成完成后自动归档</div>
+            <div className="text-[10px] text-muted/80">生成完成后自动归档</div>
           </div>
         ) : (
           <div className="space-y-1">

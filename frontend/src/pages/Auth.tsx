@@ -185,7 +185,7 @@ export function Auth() {
           )}
         </div>
 
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] text-muted/60">
+        <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] text-muted/80">
           <Sparkles className="h-3 w-3" />
           自托管量化工作台 · 数据完全掌握在自己手里
         </div>

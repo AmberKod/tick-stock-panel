@@ -89,7 +89,7 @@ function DatasetChipRow({ datasets }: { datasets: string[] }) {
     <div className="flex flex-wrap items-center gap-1 ml-3.5 mt-1">
       <span className="text-[9px] font-medium text-accent bg-accent/10 px-1 py-0.5 rounded">已适配</span>
       {datasets.map(ds => (
-        <span key={ds} className="text-[9px] text-muted/60 bg-elevated/60 px-1 py-0.5 rounded">
+        <span key={ds} className="text-[9px] text-muted/80 bg-elevated/60 px-1 py-0.5 rounded">
           {DATASET_LABEL[ds] || ds}
         </span>
       ))}
@@ -130,7 +130,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
           <button
             onClick={onReset}
             disabled={pending}
-            className="text-[11px] text-muted/60 hover:text-accent transition-colors disabled:opacity-50"
+            className="text-[11px] text-muted/80 hover:text-accent transition-colors disabled:opacity-50"
           >
             恢复默认
           </button>
@@ -153,7 +153,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     {isDefault && <TierReqChip tier={TICKFLOW_TIER_REQ[ds]} currentLabel={caps.data?.label} />}
-                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] text-muted/50 bg-elevated/60">固定</span>
+                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] text-muted/70 bg-elevated/60">固定</span>
                   </div>
                 </div>
               </div>
@@ -276,7 +276,7 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
       <div className="flex items-center gap-2.5 mb-3">
         <KeyRound className="h-4 w-4 text-secondary" />
         <h3 className="text-sm font-medium text-foreground">API Key</h3>
-        <span className="text-[10px] text-muted/50 uppercase tracking-wider">{plugin.api_key_env}</span>
+        <span className="text-[10px] text-muted/70 uppercase tracking-wider">{plugin.api_key_env}</span>
       </div>
       <p className="text-xs text-secondary leading-relaxed mb-4">
         Key 保存为本地文件(secrets.json, 优先级高于 .env),不会上传任何第三方。保存前会先用该 Key
@@ -679,7 +679,7 @@ export function SettingsDataSourcesPanel() {
                   {pluginUnavailable ? (
                     plugin?.runtime === 'none' ? (
                       <span
-                        className="text-[10px] text-muted/50 shrink-0 cursor-help"
+                        className="text-[10px] text-muted/70 shrink-0 cursor-help"
                         title={plugin?.status || '未配置凭据'}
                       >
                         点击配置 Key
@@ -713,7 +713,7 @@ export function SettingsDataSourcesPanel() {
                         <button
                           onClick={(e) => { e.stopPropagation(); uninstallMut.mutate(item.name) }}
                           disabled={uninstallMut.isPending}
-                          className="text-[10px] text-muted/50 hover:text-danger transition-colors disabled:opacity-40"
+                          className="text-[10px] text-muted/70 hover:text-danger transition-colors disabled:opacity-40"
                           title="卸载依赖"
                         >
                           卸载
@@ -768,7 +768,7 @@ export function SettingsDataSourcesPanel() {
           </div>
         )}
 
-        <div className="mt-3 flex items-center gap-3 text-[10px] text-muted/50">
+        <div className="mt-3 flex items-center gap-3 text-[10px] text-muted/70">
           <span>单击查看各源能力</span>
           <span className="text-muted/30">·</span>
           <span>能力卡片上点标签,单独选择每个数据集的提供方</span>
@@ -917,7 +917,7 @@ function PluginDetail({ plugin, isActive, onSwitch, switching, route }: {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="text-base font-semibold text-foreground">{plugin.display_name}</h3>
-              <span className="text-[10px] text-muted/50 uppercase tracking-wider">插件 · {plugin.runtime}</span>
+              <span className="text-[10px] text-muted/70 uppercase tracking-wider">插件 · {plugin.runtime}</span>
             </div>
             {plugin.description && <p className="text-xs text-secondary leading-relaxed">{plugin.description}</p>}
           </div>

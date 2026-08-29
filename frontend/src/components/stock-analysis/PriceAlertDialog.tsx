@@ -317,7 +317,7 @@ export function PriceAlertDialog({
               </label>
               <label className="space-y-1.5">
                 <span className="text-[11px] text-muted">自定义提示</span>
-                <input value={message} onChange={event => updateMessage(event.target.value)} placeholder="留空使用默认内容" className="h-9 w-full rounded-md border border-border bg-base px-3 text-xs text-foreground placeholder:text-muted/50 focus:outline-none" />
+                <input value={message} onChange={event => updateMessage(event.target.value)} placeholder="留空使用默认内容" className="h-9 w-full rounded-md border border-border bg-base px-3 text-xs text-foreground placeholder:text-muted/70 focus:outline-none" />
               </label>
             </div>
 
@@ -331,7 +331,7 @@ export function PriceAlertDialog({
                   { key: 'feishu', label: '飞书', configured: !!prefs?.feishu_webhook_url },
                   { key: 'wecom', label: '企业微信', configured: !!prefs?.wecom_webhook_url },
                 ]).map(channel => (
-                  <label key={channel.key} className={`inline-flex items-center gap-2 text-xs ${channel.configured ? 'text-foreground' : 'text-muted/60'}`}>
+                  <label key={channel.key} className={`inline-flex items-center gap-2 text-xs ${channel.configured ? 'text-foreground' : 'text-muted/80'}`}>
                     <input type="checkbox" checked={channels.includes(channel.key)} disabled={!channel.configured} onChange={() => toggleChannel(channel.key)} className="h-3.5 w-3.5 accent-sky-500" />
                     {channel.label}
                     {!channel.configured && <span className="text-[9px]">未配置</span>}
@@ -352,7 +352,7 @@ export function PriceAlertDialog({
               <div className="flex justify-center py-16"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
             ) : pointRules.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
-                <Bell className="h-6 w-6 text-muted/50" />
+                <Bell className="h-6 w-6 text-muted/70" />
                 <span className="mt-2 text-xs text-muted">暂无点位提醒</span>
                 <button onClick={() => setTab('create')} className="mt-3 text-xs text-sky-400 hover:text-sky-300">新建提醒</button>
               </div>

@@ -131,7 +131,7 @@ function IntervalEditor({ min, max, value, onChange }: {
   return (
     <div className="mt-2 pt-2 border-t border-border/50">
       <div className="text-[10px] text-muted mb-1.5">
-        轮询间隔 <span className="text-muted/60">({min}s ~ {max}s)</span>
+        轮询间隔 <span className="text-muted/80">({min}s ~ {max}s)</span>
       </div>
       <div className="flex flex-wrap gap-1 mb-2">
         {presets.map(p => (

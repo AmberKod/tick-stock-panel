@@ -180,7 +180,7 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
     bg: 'opacity-75',
     bar: 'border-l border-purple-400/30',
     nameCls: 'text-foreground/70 text-xs',
-    codeCls: 'text-muted/60',
+    codeCls: 'text-muted/80',
     badge: 'text-purple-400',
     badgeText: d => d === 'down' ? '撬' : '炸',
   },
@@ -188,7 +188,7 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
     bg: 'opacity-75',
     bar: 'border-l border-purple-400/30',
     nameCls: 'text-foreground/70 text-xs',
-    codeCls: 'text-muted/60',
+    codeCls: 'text-muted/80',
     badge: 'text-purple-400',
     badgeText: '撬',
   },
@@ -196,7 +196,7 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
     bg: 'opacity-75',
     bar: 'border-l border-muted/25',
     nameCls: 'text-foreground/70 text-xs',
-    codeCls: 'text-muted/60',
+    codeCls: 'text-muted/80',
     badge: 'text-muted/80',
     badgeText: d => d === 'down' ? '止' : '断',
   },
@@ -867,9 +867,9 @@ function TagStats({ title, tiers, extFields, fieldKey, color, selectedTag, onSel
         className={`flex items-center gap-1.5 mb-1.5 w-full group ${needsExpand ? 'cursor-pointer' : 'cursor-default'}`}
       >
         <span className="text-[10px] tracking-wider text-muted">{title}</span>
-        <span className="text-[10px] text-muted/50">{stats.length}</span>
+        <span className="text-[10px] text-muted/70">{stats.length}</span>
         {needsExpand && (
-          <span className="text-[10px] text-muted/60 group-hover:text-muted ml-auto flex items-center gap-0.5 transition-colors">
+          <span className="text-[10px] text-muted/80 group-hover:text-muted ml-auto flex items-center gap-0.5 transition-colors">
             {expanded ? '收起' : '展开'}
             <ChevronDown className={`h-3 w-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
           </span>
@@ -996,7 +996,7 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
         <Flame className={`h-3.5 w-3.5 ${tier.boards >= 5 ? 'text-orange-500' : tier.boards >= 3 ? 'text-yellow-500' : 'text-muted'}`} />
         <span className={`text-sm font-bold tabular-nums ${tierTextCls(tier.boards)}`}>{tierLabel(tier.boards, direction)}<span className="text-muted/40 mx-1">·</span>{luCount}</span>
         {(showBroken && brCount > 0) || (showFailed && faCount > 0) ? (
-          <span className="text-[11px] text-muted/60">
+          <span className="text-[11px] text-muted/80">
             {showBroken && brCount > 0 && <span className="text-purple-400">{brCount}{brokenBadge}</span>}
             {showBroken && brCount > 0 && showFailed && faCount > 0 && <span className="text-muted/40"> · </span>}
             {showFailed && faCount > 0 && <span className="text-muted/80">{faCount}{failedBadge}</span>}

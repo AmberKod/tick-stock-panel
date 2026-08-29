@@ -229,7 +229,7 @@ export function Financials() {
                         ) : isThisSyncing ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
                         ) : isWaiting ? (
-                          <Hourglass className="h-3.5 w-3.5 text-muted/60" />
+                          <Hourglass className="h-3.5 w-3.5 text-muted/80" />
                         ) : (
                           <TIcon className={`h-3.5 w-3.5 ${hasData ? 'text-accent' : 'text-muted'}`} />
                         )}

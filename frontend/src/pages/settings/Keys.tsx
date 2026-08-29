@@ -357,7 +357,7 @@ function TierHelpPopover({ currentLabel }: { currentLabel: string }) {
   return (
     <div className="relative inline-flex items-center">
       <HelpCircle
-        className="h-4 w-4 text-muted/60 cursor-help hover:text-muted transition-colors"
+        className="h-4 w-4 text-muted/80 cursor-help hover:text-muted transition-colors"
         onClick={() => setOpen(v => !v)}
       />
       <AnimatePresence>
