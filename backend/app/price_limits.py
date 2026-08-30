@@ -1,5 +1,11 @@
-"""A-share price-limit rules shared by indicators, backtests, and APIs."""
+"""A-share price-limit rules shared by indicators, backtests, and APIs.
 
+[M0 已迁移] 标量判定 (board_limit_pct / price_limit_pct) 的单一事实源
+在 app/markets/cn.py; 本模块保留同名函数作兼容转发, 既有 import 不变。
+
+polars_* / numpy_* 向量化系列仍为本文件实现 — A 股专用,
+M1 随市场功能门控一起改造 (港股无涨跌停、美股无涨跌停)。
+"""
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -8,12 +14,14 @@ from datetime import date
 import numpy as np
 import polars as pl
 
-MAIN_BOARD_ST_LIMIT_CHANGE_DATE = date(2026, 7, 6)
-
-MAIN_BOARD_LIMIT = 0.10
-LEGACY_MAIN_BOARD_ST_LIMIT = 0.05
-GROWTH_BOARD_LIMIT = 0.20
-BEIJING_BOARD_LIMIT = 0.30
+from app.markets.cn import (
+    BEIJING_BOARD_LIMIT,
+    GROWTH_BOARD_LIMIT,
+    LEGACY_MAIN_BOARD_ST_LIMIT,
+    MAIN_BOARD_LIMIT,
+    MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
+    CN_PROFILE,
+)
 
 
 def is_risk_warning_name(name: str | None) -> bool:
@@ -21,11 +29,8 @@ def is_risk_warning_name(name: str | None) -> bool:
 
 
 def board_limit_pct(symbol: str) -> float:
-    if symbol.endswith(".BJ"):
-        return BEIJING_BOARD_LIMIT
-    if symbol.startswith(("300", "301", "688", "689")):
-        return GROWTH_BOARD_LIMIT
-    return MAIN_BOARD_LIMIT
+    """板块基础涨跌幅限制。 (转发 CN_PROFILE)"""
+    return CN_PROFILE.board_limit_pct(symbol)
 
 
 def price_limit_pct(
@@ -34,14 +39,8 @@ def price_limit_pct(
     *,
     is_risk_warning: bool = False,
 ) -> float:
-    base = board_limit_pct(symbol)
-    if (
-        base == MAIN_BOARD_LIMIT
-        and is_risk_warning
-        and trade_date < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
-    ):
-        return LEGACY_MAIN_BOARD_ST_LIMIT
-    return base
+    """个股某交易日的有效涨跌幅限制。 (转发 CN_PROFILE)"""
+    return CN_PROFILE.limit_pct(symbol, trade_date, is_risk_warning=is_risk_warning)
 
 
 def polars_price_limit_pct(
