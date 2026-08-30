@@ -1,19 +1,23 @@
 """市场档案注册表: market → profile, symbol → market。
 
-M0 仅注册 CN。HK/US 的后缀映射先行登记 (供 resolve_market 识别),
-但 profile 本体在 M1/M2 落地 — profile_for_symbol 对未注册市场
-显式 KeyError, 防止港美股标的静默套用 A 股规则。
+M0 注册 CN; M1 注册 HK; M2 注册 US。
+profile_for_symbol 对未注册市场显式 KeyError,
+防止港美股标的静默套用 A 股规则 (H1 之前是 M0 护栏)。
 """
 from __future__ import annotations
 
 from app.markets.cn import CN_PROFILE
+from app.markets.hk import HK_PROFILE
 from app.markets.profile import MarketProfile
+from app.markets.us import US_PROFILE
 
 _PROFILES: dict[str, MarketProfile] = {
     "CN": CN_PROFILE,
+    "HK": HK_PROFILE,
+    "US": US_PROFILE,
 }
 
-# 后缀 → 市场。M0 只登记映射, HK/US 的 profile 待 M1/M2 注册。
+# 后缀 → 市场。M0 登记所有映射, M1/M2 持续生效。
 _SUFFIX_TO_MARKET = {
     ".SH": "CN",
     ".SZ": "CN",
@@ -51,7 +55,6 @@ def resolve_market(symbol: str) -> str:
 def profile_for_symbol(symbol: str) -> MarketProfile:
     """按 symbol 解析市场档案。
 
-    M0 阶段遇到 .HK/.US 会抛 KeyError —— 这是防止港美股数据
-    误入 A 股链路的护栏, M1/M2 注册对应 profile 后自然放开。
+    M1 起 HK 已注册; US 仍抛 KeyError (M2 落地前保留护栏)。
     """
     return get_profile(resolve_market(symbol))

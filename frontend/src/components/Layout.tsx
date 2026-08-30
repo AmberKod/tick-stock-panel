@@ -564,7 +564,7 @@ export function Layout() {
 
   return (
     <div
-      className="h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
+      className="h-full grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
       style={{ gridTemplateColumns: navCollapsed ? '3.5rem 1fr' : '14rem 1fr' }}
     >
       <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">

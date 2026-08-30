@@ -48,7 +48,26 @@ def polars_price_limit_pct(
     trade_date: pl.Expr,
     is_risk_warning: pl.Expr,
 ) -> pl.Expr:
-    """Return a vectorized Polars expression for the effective daily limit."""
+    """Return a vectorized Polars expression for the effective daily limit.
+
+    H4 软门控: 非 CN 市场 (symbol 带 .HK/.US 后缀, 或不带后缀但非 6 位数字) → null。
+    A 股: 6 位数字代码 (含无后缀 / .SH / .SZ / .BJ) → 按板块规则。
+    """
+    # CN 判定: 有 .SH/.SZ/.BJ 后缀 → CN; .HK/.US 后缀 → 非 CN;
+    # 无后缀: 6 位纯数字 (裸代码) → CN; 其他 → 非 CN
+    has_cn_suffix = (
+        symbol.str.ends_with(".SH")
+        | symbol.str.ends_with(".SZ")
+        | symbol.str.ends_with(".BJ")
+    )
+    has_foreign_suffix = symbol.str.ends_with(".HK") | symbol.str.ends_with(".US")
+    is_bare_cn_code = (
+        ~has_cn_suffix
+        & ~has_foreign_suffix
+        & symbol.str.contains(r"^\d+$", literal=False)
+        & (symbol.str.len_chars().cast(pl.Int64) >= 6)
+    )
+    is_cn = has_cn_suffix | is_bare_cn_code
     is_growth = symbol.str.starts_with("300") | symbol.str.starts_with("301")
     is_star = symbol.str.starts_with("688") | symbol.str.starts_with("689")
     is_beijing = symbol.str.ends_with(".BJ")
@@ -64,7 +83,8 @@ def polars_price_limit_pct(
         & (trade_date < pl.lit(MAIN_BOARD_ST_LIMIT_CHANGE_DATE))
     )
     return (
-        pl.when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT)
+        pl.when(~is_cn).then(pl.lit(None))
+        .when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT)
         .otherwise(base)
         .cast(pl.Float64)
     )
@@ -87,7 +107,13 @@ def numpy_limit_pct_vectors(
     symbols: Sequence[str],
     names: Sequence[str],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return pre/post-change vectors once; callers select one per date."""
+    """Return pre/post-change vectors once; callers select one per date.
+
+    M1 H4 软门控: 对 has_price_limit()=False 的市场 (HK/US) 标的返回 NaN,
+    业务层 (回测矩阵、打板信号) 看到 NaN 自动跳过 — 不需要每个调用点单独过滤。
+    """
+    from app.markets.registry import resolve_market  # 局部 import 避免循环
+
     current = np.fromiter(
         (board_limit_pct(str(symbol)) for symbol in symbols),
         dtype=np.float64,
@@ -95,6 +121,11 @@ def numpy_limit_pct_vectors(
     )
     legacy = current.copy()
     for asset_id, (_symbol, name) in enumerate(zip(symbols, names, strict=True)):
+        # H4 软门控: 非 A 股 → NaN (无涨跌停)
+        if resolve_market(str(_symbol)) != "CN":
+            current[asset_id] = np.nan
+            legacy[asset_id] = np.nan
+            continue
         if current[asset_id] == MAIN_BOARD_LIMIT and is_risk_warning_name(name):
             legacy[asset_id] = LEGACY_MAIN_BOARD_ST_LIMIT
     return legacy, current

@@ -61,6 +61,14 @@ desktop = [
     "pywebview>=5.0",
 ]
 
+# 港股/美股多市场数据源 (M1 港股 + 后续美股)
+# 启用:`uv sync --extra multi-market`, 或在用户机器上 `pip install akshare yfinance`
+# 注: 保持可选 extra, 因为部分离线/Docker 部署不需要这层依赖
+multi-market = [
+    "akshare>=1.12",
+    "yfinance>=0.2.30",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -53,6 +53,8 @@ from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
+from app.api import hk as hk_api
+from app.api import us as us_api
 
 logging.basicConfig(
     level=settings.log_level,
@@ -450,6 +452,8 @@ app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(data.router)
+app.include_router(hk_api.router)
+app.include_router(us_api.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(stock_analysis.router)

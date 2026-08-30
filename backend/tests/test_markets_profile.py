@@ -112,12 +112,15 @@ def test_resolve_market():
 
 
 def test_profile_for_symbol_guard():
-    """M0 护栏: HK/US 未注册 profile, 显式 KeyError 而非静默套用 A 股规则。"""
+    """M0→M2 护栏演进: HK (M1) / US (M2) 均已注册。
+
+    三个市场解析正常, 无 KeyError (所有市场落地后可正常路由)。
+    """
+    from app.markets.hk import HK_PROFILE
+    from app.markets.us import US_PROFILE
     assert profile_for_symbol("600519.SH") is CN_PROFILE
-    with pytest.raises(KeyError):
-        profile_for_symbol("00700.HK")
-    with pytest.raises(KeyError):
-        profile_for_symbol("AAPL.US")
+    assert profile_for_symbol("00700.HK") is HK_PROFILE
+    assert profile_for_symbol("AAPL.US") is US_PROFILE
 
 
 def test_core_indices_match_legacy_hardcode():

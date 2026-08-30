@@ -1,6 +1,7 @@
 import { lazy } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { Layout } from './components/Layout'
+import { WorkspaceShell } from './components/WorkspaceShell'
 import { Onboarding } from './pages/Onboarding'
 import { Auth } from './pages/Auth'
 import { useSettings } from './lib/useSharedQueries'
@@ -36,6 +37,20 @@ const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regim
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 
+// ===== 多维工作台：新工作区（Phase 0 占位，Phase 2~5 逐个落地）=====
+const NewsWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.NewsWorkspace })))
+const ImageWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.ImageWorkspace })))
+const NovelWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.NovelWorkspace })))
+const VideoWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.VideoWorkspace })))
+
+// ===== M1 港股入口 (列表 + 详情) =====
+const HKStocks = lazy(() => import('./pages/HKStocks').then(m => ({ default: m.HKStocksPage })))
+const HKStockAnalysis = lazy(() => import('./pages/HKStockAnalysis').then(m => ({ default: m.HKStockAnalysisPage })))
+
+// ===== M2 美股入口 (列表 + 详情) =====
+const USStocks = lazy(() => import('./pages/USStocks').then(m => ({ default: m.USStocksPage })))
+const USStockAnalysis = lazy(() => import('./pages/USStockAnalysis').then(m => ({ default: m.USStockAnalysisPage })))
+
 const CORE_ROUTE_PATHS = new Set([
   '/',
   '/onboarding',
@@ -64,6 +79,15 @@ const CORE_ROUTE_PATHS = new Set([
   '/settings/keys',
   '/settings/ai',
   '/settings/queries',
+  // 多维工作台新工作区路由
+  '/news',
+  '/image',
+  '/novel',
+  '/video',
+  // M1 港股
+  '/hk',
+  // M2 美股
+  '/us',
 ])
 
 finalizeFrontendExtensions(CORE_ROUTE_PATHS)
@@ -108,10 +132,25 @@ export const router = createBrowserRouter([
     path: '/',
     element: (
       <OnboardingGuard>
-        <Layout />
+        <WorkspaceShell />
       </OnboardingGuard>
     ),
     children: [
+      // ===== 多维工作台：平行工作区（占位，Phase 2~5 落地）=====
+      { path: 'news', element: <NewsWorkspace /> },
+      { path: 'image', element: <ImageWorkspace /> },
+      { path: 'novel', element: <NovelWorkspace /> },
+      { path: 'video', element: <VideoWorkspace /> },
+      // ===== M1 港股：挂在工作区壳下, 平行于股票域 =====
+      { path: 'hk', element: <HKStocks /> },
+      { path: 'hk/:symbol', element: <HKStockAnalysis /> },
+      // ===== M2 美股：平行工作区 =====
+      { path: 'us', element: <USStocks /> },
+      { path: 'us/:symbol', element: <USStockAnalysis /> },
+      // ===== 股票工作区：原有 Layout 与全部子路由零改动 =====
+      {
+        element: <Layout />,
+        children: [
       { index: true, element: <Dashboard /> },
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
@@ -150,6 +189,8 @@ export const router = createBrowserRouter([
           ),
         }
       }),
+        ],
+      },
     ],
   },
 ])

@@ -384,10 +384,12 @@ def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) ->
     """将 symbol 列标准化为 代码.交易所 格式。
 
     优先使用 instruments 维表查找 code → symbol，确保 100% 准确。
-    查不到时按规则兜底（单一事实源在 app/markets/cn.py：
-    6 开头 → .SH，其余 → .SZ）。
+    查不到时按规则兜底（单一事实源在各 market profile）：
+    - 6 位数字 → CN 兜底 (CN_PROFILE.fallback_suffix: 6开头 .SH, 其余 .SZ)
+    - 5 位数字 → HK 兜底 (HK_PROFILE.fallback_suffix: 一律 .HK)
     含市场后缀的输入（.SH/.SZ/.BJ/.HK/.US）直接透传，不做市场改写。
     """
+    from app.markets.hk import HK_PROFILE  # 局部 import 避免循环 + 仅按需
     _lookup = lookup or {}
 
     def _fix_one(val: str) -> str:
@@ -397,14 +399,18 @@ def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) ->
         # 已经是标准格式（含 .），直接返回
         if "." in val:
             return val
-        # 纯6位数字代码 → 优先查维表
+        # 6 位数字代码 → A 股 (走维表或 CN 兜底)
         if len(val) == 6 and val.isdigit():
             mapped = _lookup.get(val)
             if mapped:
                 return mapped
-            # A 股代码兜底 (仅当无市场后缀, 即 resolve_market 判定为 CN)
             if resolve_market(val) == "CN":
                 return f"{val}{CN_PROFILE.fallback_suffix(val)}"
+        # 5 位数字代码 → 港股 (M1 起 HK 已注册, 走 HK 兜底)
+        if len(val) == 5 and val.isdigit():
+            suffix = HK_PROFILE.fallback_suffix(val)
+            if suffix:
+                return f"{val}{suffix}"
         return val
 
     return series.map_elements(_fix_one, return_dtype=pl.Utf8)

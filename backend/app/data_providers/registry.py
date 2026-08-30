@@ -1,26 +1,36 @@
 """Provider registry.
 
 [M0] 新增市场维度路由: 同名 provider 按市场注册, symbol 侧入口
-resolve_provider_for_symbol 供 M1 港股/M2 美股接入。M0 阶段仅
-CN → tickflow 一条链路, 默认调用路径行为与历史完全一致。
+resolve_provider_for_symbol 供 M1 港股/M2 美股接入。
+[M1] HK → hk_quickquote (腾讯/新浪 HTTP) 已注册。
 """
 from __future__ import annotations
 
 from app.data_providers.base import MarketDataProvider
+from app.data_providers.hk_quickquote_provider import HKQuickQuoteProvider
 from app.data_providers.tickflow_provider import TickFlowProvider
+from app.data_providers.yfinance_provider import YFinanceProvider
 from app.markets.registry import resolve_market
 
-# market → provider 注册表 (M0: 仅 A 股 tickflow 独占;
-# M1: "HK" → quickquote/akshare; M2: "US" → yfinance)
+# market → provider 注册表
+# CN: tickflow 独占 (含 tick 级能力)
+# HK: hk_quickquote 走腾讯/美股 HTTP (日级 + 实时; 分钟/tick 不可用)
+# US: yfinance (日K + 延迟 15min 实时; 全市场池不可用 → 热门池)
 _MARKET_PROVIDERS: dict[str, dict[str, type]] = {
     "CN": {"tickflow": TickFlowProvider},
+    "HK": {"hk_quickquote": HKQuickQuoteProvider},
+    "US": {"yfinance": YFinanceProvider},
 }
 
 # 兼容旧入口: 无市场维度的按名取 provider (默认 CN)
 _PROVIDERS = _MARKET_PROVIDERS["CN"]
 
 # 各市场默认数据源 (get_provider 未指定 name 时使用)
-_MARKET_DEFAULT_PROVIDER = {"CN": "tickflow"}
+_MARKET_DEFAULT_PROVIDER = {
+    "CN": "tickflow",
+    "HK": "hk_quickquote",
+    "US": "yfinance",
+}
 
 
 def get_provider(name: str = "tickflow", market: str = "CN") -> MarketDataProvider:
@@ -43,13 +53,13 @@ def get_provider(name: str = "tickflow", market: str = "CN") -> MarketDataProvid
 def resolve_provider_for_symbol(symbol: str) -> MarketDataProvider:
     """按 symbol 的市场后缀路由到对应 provider。
 
-    M0 护栏: 非 CN 市场 (HK/US) 显式 NotImplementedError,
-    防止港美股标的静默走 A 股数据链路。M1/M2 注册后自然放开。
+    M0 护栏已就位: 非注册市场显式 NotImplementedError,
+    防止港美股标的静默走 A 股数据链路。M2 之后三个市场全部注册。
     """
     market = resolve_market(symbol)
     if market not in _MARKET_PROVIDERS:
         raise NotImplementedError(
             f"Market {market} not yet available (symbol={symbol!r}); "
-            "M1: HK, M2: US. See app/markets/registry.py"
+            f"registered: {sorted(_MARKET_PROVIDERS)}. See app/markets/registry.py"
         )
     return get_provider(_MARKET_DEFAULT_PROVIDER[market], market=market)
