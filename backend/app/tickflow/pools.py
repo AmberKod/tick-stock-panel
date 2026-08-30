@@ -1,4 +1,4 @@
-"""标的池(Universe)定义(§6.3)。
+"""标的池(Universe)定义(§6.3)。 [A 股专用 — 多市场 universe 见 M1]
 
 Phase 1 实现:
   - 常用指数成份(沪深 300 / 中证 500 / 上证 50)用 TickFlow `quote.pool` 端点拉取并缓存
