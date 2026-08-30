@@ -11,6 +11,9 @@ from typing import Literal
 
 import polars as pl
 
+from app.markets.cn import CN_PROFILE
+from app.markets.registry import resolve_market
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -381,7 +384,9 @@ def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) ->
     """将 symbol 列标准化为 代码.交易所 格式。
 
     优先使用 instruments 维表查找 code → symbol，确保 100% 准确。
-    查不到时按规则兜底：6开头 → .SH，其余 → .SZ。
+    查不到时按规则兜底（单一事实源在 app/markets/cn.py：
+    6 开头 → .SH，其余 → .SZ）。
+    含市场后缀的输入（.SH/.SZ/.BJ/.HK/.US）直接透传，不做市场改写。
     """
     _lookup = lookup or {}
 
@@ -397,11 +402,9 @@ def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) ->
             mapped = _lookup.get(val)
             if mapped:
                 return mapped
-            # 兜底规则
-            if val.startswith(("6",)):
-                return f"{val}.SH"
-            else:
-                return f"{val}.SZ"
+            # A 股代码兜底 (仅当无市场后缀, 即 resolve_market 判定为 CN)
+            if resolve_market(val) == "CN":
+                return f"{val}{CN_PROFILE.fallback_suffix(val)}"
         return val
 
     return series.map_elements(_fix_one, return_dtype=pl.Utf8)

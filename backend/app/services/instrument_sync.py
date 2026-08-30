@@ -13,6 +13,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.markets.registry import resolve_market
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,10 @@ def sync_instruments(data_dir: Path) -> int:
 
     df = pl.DataFrame(all_rows)
     df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    # M0: 派生 market 列 (symbol 后缀 → CN/HK/US), 多市场路由的命名空间主键
+    df = df.with_columns(
+        pl.col("symbol").map_elements(resolve_market, return_dtype=pl.Utf8).alias("market")
+    )
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)

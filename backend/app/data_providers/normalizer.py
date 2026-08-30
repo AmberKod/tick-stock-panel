@@ -4,10 +4,11 @@ from __future__ import annotations
 import polars as pl
 
 from app.indicators.pipeline import filter_halt_days
+from app.markets.registry import resolve_market
 
 DAILY_COLS = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
 ADJ_FACTOR_COLS = ["symbol", "trade_date", "ex_factor"]
-INSTRUMENT_COLS = ["symbol", "name", "code", "exchange", "asset_type", "source"]
+INSTRUMENT_COLS = ["symbol", "name", "code", "exchange", "asset_type", "source", "market"]
 
 
 def to_polars(data) -> pl.DataFrame:
@@ -100,4 +101,10 @@ def normalize_instruments(rows: list[dict], asset_type: str, source: str = "tick
         })
     if not out:
         return pl.DataFrame()
-    return pl.DataFrame(out).select(INSTRUMENT_COLS).unique(subset=["symbol"], keep="last").sort("symbol")
+    return (
+        pl.DataFrame(out)
+        .with_columns(pl.col("symbol").map_elements(resolve_market, return_dtype=pl.Utf8).alias("market"))
+        .select(INSTRUMENT_COLS)
+        .unique(subset=["symbol"], keep="last")
+        .sort("symbol")
+    )
