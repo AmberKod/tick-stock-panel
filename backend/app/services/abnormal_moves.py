@@ -28,6 +28,7 @@ from typing import Any
 import polars as pl
 
 from app.indicators.pipeline import DEVIATION_WINDOWS
+from app.markets.cn import CN_PROFILE
 
 # ── 规则表 ────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ RULES_META: list[dict[str, Any]] = [
      "note": "30%涨跌幅板块, 3日±40%"},
 ]
 
-_BENCH_RT_CANDIDATES = ["000002.SH", "000001.SH", "399107.SZ", "399001.SZ", "899050.BJ"]
+_BENCH_RT_CANDIDATES = list(CN_PROFILE.bench_rt_candidates)
 
 
 def board_of(symbol: str) -> str:

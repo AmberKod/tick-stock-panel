@@ -11,15 +11,12 @@ from typing import Any
 
 import polars as pl
 
+from app.markets.cn import CN_PROFILE
 from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 
-CORE_INDICES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
+# 核心指数 (M0: 单一事实源在 app/markets/cn.py)
+CORE_INDICES = {r.symbol: r.name for r in CN_PROFILE.core_indices}
 SECTOR_KINDS = {"index", "concept", "industry"}
 _VALUE_SEP = re.compile(r"[\u3001,\uff0c;\uff1b|]+")
 _NULL_VALUES = {"nan", "none", "null", "<na>", "n/a", "-"}

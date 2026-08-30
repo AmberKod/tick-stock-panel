@@ -11,6 +11,7 @@ from typing import Any
 import polars as pl
 from fastapi import APIRouter, Request
 
+from app.markets.cn import CN_PROFILE
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.screener import ScreenerService
 
@@ -37,12 +38,8 @@ def invalidate_overview_cache() -> None:
         _cache_ts = 0.0
 
 
-CORE_INDEX_NAMES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
+# 核心指数 (M0: 单一事实源在 app/markets/cn.py)
+CORE_INDEX_NAMES = {r.symbol: r.name for r in CN_PROFILE.core_indices}
 CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")

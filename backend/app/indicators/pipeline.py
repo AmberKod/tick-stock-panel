@@ -22,6 +22,7 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
+from app.markets.cn import CN_PROFILE
 from app.enriched_generation import (
     EnrichedPublication,
     enriched_publication_incomplete,
@@ -1046,11 +1047,8 @@ def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
 DEVIATION_WINDOWS: tuple[int, ...] = (3, 10, 30)
 
 # 各交易所基准指数 (偏离值规则的「对应指数」近似): 优先分类指数, 缺失时回退
-_BENCHMARK_PREFERENCE: dict[str, list[str]] = {
-    "SH": ["000002.SH", "000001.SH"],   # 上证A指 → 上证指数
-    "SZ": ["399107.SZ", "399001.SZ"],   # 深证A指 → 深证成指
-    "BJ": ["899050.BJ", "000001.SH"],   # 北证50 → 上证指数
-}
+# (M0: 单一事实源在 app/markets/cn.py, 拷贝防止外部修改污染档案)
+_BENCHMARK_PREFERENCE: dict[str, list[str]] = dict(CN_PROFILE.benchmark_fallbacks)
 
 _benchmark_cache: dict[str, tuple[float, pl.DataFrame | None]] = {}
 _BENCHMARK_CACHE_TTL = 600.0

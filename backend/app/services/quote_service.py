@@ -32,6 +32,7 @@ from datetime import date, time as dt_time
 
 import polars as pl
 
+from app.markets.cn import CN_PROFILE
 from app.market_time import cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
@@ -165,7 +166,7 @@ def _monitor_name_map(repo) -> dict[str, str]:
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
-    CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
+    CORE_INDEX_SYMBOLS = tuple(r.symbol for r in CN_PROFILE.core_indices)
 
     # 档位 → 最小轮询间隔 (秒)
     TIER_MIN_INTERVAL = {

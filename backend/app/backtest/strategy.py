@@ -43,6 +43,7 @@ from app.indicators.pipeline import (
     LIMIT_SIGNAL_OUTPUTS,
     get_signal_dependencies,
 )
+from app.markets.cn import CN_PROFILE
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
@@ -56,7 +57,7 @@ from app.strategy.scoring import (
 
 logger = logging.getLogger(__name__)
 
-BENCHMARK_SYMBOL = "000001.SH"
+BENCHMARK_SYMBOL = CN_PROFILE.benchmark_symbol
 _EXECUTION_COLUMNS = frozenset({
     "symbol", "date", "open", "high", "low", "close", "volume",
     "name", "score", "signal_limit_up", "signal_limit_down",

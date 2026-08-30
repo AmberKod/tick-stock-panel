@@ -11,6 +11,8 @@ import logging
 import re
 from pathlib import Path
 
+from app.markets.cn import CN_PROFILE
+
 logger = logging.getLogger(__name__)
 
 # 进程内缓存: 行情轮询线程一轮会调用 8~12 次 getter, 每次读盘+parse 是纯重复;
@@ -670,7 +672,7 @@ SSE_REFRESH_PAGES_DEFAULT = {
     "limit-ladder": False,
 }
 
-SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["000001.SH", "399001.SZ", "399006.SZ", "000680.SH"]
+SIDEBAR_INDEX_SYMBOLS_DEFAULT = [r.symbol for r in CN_PROFILE.core_indices]
 
 
 # ===== 盘中实时行情范围 (独立于盘后管道范围) =====

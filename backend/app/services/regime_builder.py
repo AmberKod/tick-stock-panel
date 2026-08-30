@@ -19,6 +19,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.markets.cn import CN_PROFILE
+
 logger = logging.getLogger(__name__)
 
 # ───────────────────────── 状态分类阈值(可调) ─────────────────────────
@@ -416,7 +418,7 @@ def _scan_enriched_fallback(repo, start: date, end: date) -> pl.DataFrame | None
         return None
 
 
-def _load_index_pct(repo, start: date, end: date, symbol: str = "000001.SH") -> dict:
+def _load_index_pct(repo, start: date, end: date, symbol: str = CN_PROFILE.benchmark_symbol) -> dict:
     """读取主力指数日K, 算每日涨幅 → {date: pct}。指数数量少, 单次读取可接受。"""
     try:
         df = repo.get_index_daily(symbol, start, end, columns=["date", "change_pct"])
