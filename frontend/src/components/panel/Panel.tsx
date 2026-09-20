@@ -10,7 +10,9 @@ import { cn } from '@/lib/cn'
 //           可展开判据(evidence) / 刷新失败降级提示(stale)。
 //
 // 项目铁律: 数据不可得时必须显示「不可用」, **绝不能渲染成一片风平浪静的 0**。
-// 因此 `unavailable` 命中时本组件**完全不渲染 children** —— 调用方不需要自己判空。
+// 因此 `unavailable` 命中时本组件**完全不渲染 children 与 footer** —— 调用方不需要自己判空。
+// footer 常承载「分母 x/4」「口径 as-of」「时效 xh」这类**对数据的解读**, 与 children
+// 同状态门控: 数据还没回来时它们会落成 0/4、— 等假定案数字, 必须一并隐藏。
 //
 // 刻意不做(架构评估 §2 / §3 已明确否决): 拖拽、resize、折叠、span 调整、布局持久化。
 // 那是为多租户 SaaS 设计的, 我们是单用户本地终端, 做这些是零业务价值的框架成本。
@@ -20,7 +22,7 @@ import { cn } from '@/lib/cn'
 export const PANEL_SHELL_CLASS =
   'rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]' as const
 
-/** 面板状态。`ok` 之外都不渲染 children(除 loading 骨架外)。 */
+/** 面板状态。`ok` 之外都不渲染 children 与 footer(除 loading 骨架外)。 */
 export type PanelStatus = 'ok' | 'loading' | 'error' | 'unavailable' | 'empty'
 
 /** 可展开判据: 面板 1 用它回答「为什么判防守」。 */
@@ -62,7 +64,14 @@ export interface PanelProps {
   className?: string
   /** 附加在内容区上的 class */
   bodyClassName?: string
-  /** 底部固定区(图例 / 口径说明) */
+  /**
+   * 底部固定区(图例 / 口径说明)。
+   *
+   * 与 `children` **同状态门控**: 只有 `ok` 才渲染。footer 里通常是「分母 3/4」
+   * 「口径 2026-05-01」「时效 2.3h」这类对数据的解读 —— loading / error /
+   * unavailable 时它们会退化成 `0/4`、`—`, 语义上就是假定案, 必须一起隐藏。
+   * `stale` 态 resolved 仍是 `ok`(有上一次成功数据), footer 照常显示。
+   */
   footer?: ReactNode
   /** 面板内容。unavailable / error / empty / loading 态下不渲染 */
   children?: ReactNode
@@ -84,7 +93,7 @@ function toErrorText(error: Error | string | null | undefined): string | null {
  * 面板容器。
  *
  * 状态优先级: 显式 `status` > `loading` > `error` > `unavailable` > `empty` > `ok`。
- * 只有 `ok` 才渲染 `children` —— 保证「不可用」永远不会被误渲染成 0。
+ * 只有 `ok` 才渲染 `children` 与 `footer` —— 保证「不可用」永远不会被误渲染成 0。
  */
 export function Panel({
   title,
@@ -203,7 +212,11 @@ export function Panel({
         </details>
       )}
 
-      {footer && <div className="mt-2 border-t border-border pt-1.5">{footer}</div>}
+      {/* ---- footer: 与 children 同状态门控(铁律) ----
+           footer 放的是对数据的解读, 非 ok 态下一律不渲染 —— 否则 loading 期间会
+           输出「分母 0/4 · 口径 — · 时效 —」这种看起来像定案、实际是缺省值的假信息。
+           注意 stale 态 resolved 仍为 ok, 这里不会被误伤。 */}
+      {footer && resolved === 'ok' && <div className="mt-2 border-t border-border pt-1.5">{footer}</div>}
     </section>
   )
 }
