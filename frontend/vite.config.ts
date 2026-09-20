@@ -15,10 +15,10 @@ export default defineConfig({
     },
   },
   server: {
-    host: '0.0.0.0',   // dev.sh / dev.ps1 会用 CLI --host 覆盖
+    host: '0.0.0.0',   // dev.py uses CLI --host to override this value
     port: 3011,
     proxy: {
-      // dev 时 /api 转发到与启动脚本相同的 FastAPI 地址
+      // In dev, proxy /api to the FastAPI address selected by dev.py.
       '/api': {
         target: backendTarget,
         // SSE 端点需要禁用缓冲

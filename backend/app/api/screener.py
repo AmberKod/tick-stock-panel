@@ -1,20 +1,21 @@
 """Screener API。"""
 from __future__ import annotations
 
+import contextlib
 import glob as _glob
 import logging
 import math
 import os
-import re
 import time
 from dataclasses import asdict
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
+from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services import strategy_cache
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
@@ -26,20 +27,20 @@ router = APIRouter(prefix="/api/screener", tags=["screener"])
 
 class CustomRequest(BaseModel):
     conditions: list[str]
-    order_by: Optional[str] = None
+    order_by: str | None = None
     limit: int = 30
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
+    pool: list[str] | None = None
+    as_of: date | None = None
+    ext_columns: str | None = None
     asset_type: str = "stock"
 
 
 class PresetRequest(BaseModel):
     strategy_id: str
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
-    asset_type: str = "stock"
+    pool: list[str] | None = None
+    as_of: date | None = None
+    ext_columns: str | None = None
+    asset_type: Literal["stock", "etf", "index", "hk", "us"] = "stock"
     timeframe: str = "1d"
 
 
@@ -88,7 +89,7 @@ def _safe_ext_value(value: Any) -> Any:
 _ext_value_map_cache: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
 
 
-def _ext_parquet_signature(cfg, data_dir) -> Optional[tuple]:
+def _ext_parquet_signature(cfg, data_dir) -> tuple | None:
     """该扩展配置底层 parquet 文件的 (路径, mtime) 签名; 出错返回 None (禁用缓存)。"""
     try:
         from app.api.ext_data import _parquet_glob
@@ -97,11 +98,11 @@ def _ext_parquet_signature(cfg, data_dir) -> Optional[tuple]:
         if not files:
             return None
         return tuple((f, os.path.getmtime(f)) for f in files)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
-def _load_ext_value_maps(repo, ext_columns: Optional[str]) -> dict[str, dict[str, Any]]:
+def _load_ext_value_maps(repo, ext_columns: str | None) -> dict[str, dict[str, Any]]:
     """按请求加载扩展列，返回 {输出列名: {symbol: value}}。
 
     策略结果缓存是共享文件，不能被不同 ext_columns 组合污染；因此扩展列只在
@@ -156,13 +157,13 @@ def _load_ext_value_maps(repo, ext_columns: Optional[str]) -> dict[str, dict[str
             value_maps[out_col] = vmap
             if cfg and sig is not None:
                 _ext_value_map_cache[cache_key] = (sig, vmap)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("screener ext column join skipped for %s.%s: %s", config_id, field_name, e)
 
     return value_maps
 
 
-def _row_with_ext(row: dict, ext_values: dict[str, dict[str, Any]], symbol: Optional[str] = None) -> dict:
+def _row_with_ext(row: dict, ext_values: dict[str, dict[str, Any]], symbol: str | None = None) -> dict:
     next_row = dict(row)
     sym = symbol or next_row.get("symbol")
     for out_col, value_map in ext_values.items():
@@ -221,6 +222,7 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             "total": safe_data.get("total", 0),
             "as_of": as_of,
             "rows": safe_data.get("rows", []),
+            **_result_diagnostics(safe_data),
         }
         strategy_cache.write_cache(data_dir, as_of, results)
 
@@ -279,7 +281,10 @@ def run_custom(req: CustomRequest, request: Request):
 def run_preset(req: PresetRequest, request: Request):
     repo = request.app.state.repo
     svc = ScreenerService(repo, asset_type=req.asset_type)
-    as_of = req.as_of or svc.latest_date()
+    try:
+        as_of = req.as_of or svc.latest_date()
+    except EnrichedGenerationUnavailableError as e:
+        raise HTTPException(status_code=503, detail="指标数据正在更新, 请稍后重试") from e
     if not as_of:
         raise HTTPException(status_code=400, detail="无可用数据日期")
 
@@ -312,18 +317,31 @@ def run_preset(req: PresetRequest, request: Request):
             params=params,
             overrides=overrides or None,
         )
+    except EnrichedGenerationUnavailableError as e:
+        raise HTTPException(status_code=503, detail="指标数据正在更新, 请稍后重试") from e
     except ValueError as e:
         status_code = 404 if "unknown strategy" in str(e) else 400
         raise HTTPException(status_code=status_code, detail=str(e)) from e
 
     safe_data = _safe(asdict(result))
-    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+    # The persisted dashboard cache is A-share based; HK/US use their request result.
+    if req.asset_type not in ("hk", "us"):
+        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
     return _result_with_ext(safe_data, ext_values)
 
 
+def _result_diagnostics(result: dict) -> dict:
+    """Keep business warnings and their input version through cached responses."""
+    return {
+        key: result[key] for key in ("warnings", "industry_mapping_version", "concept_heat_metadata") if result.get(key)
+    }
+
+
 def _cached_with_realtime(request: Request) -> dict:
     """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
+    from app.strategy.concept_heat import concept_cache_identity, concept_cache_unavailable
+
     data_dir = request.app.state.repo.store.data_dir
     cached = strategy_cache.read_cache(data_dir)
     if cached is None:
@@ -335,20 +353,68 @@ def _cached_with_realtime(request: Request) -> dict:
         realtime_results = monitor_engine.latest_strategy_results()
         if realtime_results:
             results = dict(cached.get("results") or {})
+            replaced_versions = {
+                sid for sid, result in realtime_results.items()
+                if isinstance(result, dict)
+                and concept_cache_identity(result.get("concept_heat_metadata"))
+                != concept_cache_identity((results.get(sid) or {}).get("concept_heat_metadata"))
+            }
             results.update(realtime_results)
             cached = dict(cached)
             cached["results"] = results
+            for key in ("today_ever_rows", "today_ever_matched"):
+                if replaced_versions:
+                    cached[key] = {
+                        sid: value for sid, value in (cached.get(key) or {}).items()
+                        if sid not in replaced_versions
+                    }
             # 有实时数据时, 以最新时间戳为准
             import time as _time
             cached["updated_at"] = int(_time.time() * 1000)
 
+    from app.strategy.portfolio_constraints import industry_mapping_version
+
+    current_version = industry_mapping_version(data_dir, "cn")
+    stale = {
+        sid for sid, result in (cached.get("results") or {}).items()
+        if isinstance(result, dict)
+        and result.get("industry_mapping_version")
+        and result["industry_mapping_version"] != current_version
+    }
+    if stale:
+        cached = dict(cached)
+        for key in ("results", "today_ever_rows", "today_ever_matched"):
+            cached[key] = {sid: value for sid, value in (cached.get(key) or {}).items() if sid not in stale}
+    engine = getattr(request.app.state, "strategy_engine", None)
+    results = dict(cached.get("results") or {})
+    invalidated: set[str] = set()
+    for sid, result in results.items():
+        if not isinstance(result, dict):
+            continue
+        fingerprint = None
+        resolver = getattr(engine, "concept_config_fingerprint", None)
+        if callable(resolver) and engine.has(sid):
+            fingerprint = resolver(sid, overrides=strategy_config.load_override(data_dir, sid))
+        elif not result.get("concept_heat_metadata"):
+            continue
+        metadata = concept_cache_unavailable(data_dir, result, market="cn", config_fingerprint=fingerprint)
+        if metadata is not None:
+            invalidated.add(sid)
+            results[sid] = {
+                **result, "total": 0, "rows": [], "scores": {},
+                "warnings": [metadata["reason"]], "concept_heat_metadata": metadata,
+            }
+    if invalidated:
+        cached = {**cached, "results": results}
+        for key in ("today_ever_rows", "today_ever_matched"):
+            cached[key] = {sid: value for sid, value in (cached.get(key) or {}).items() if sid not in invalidated}
     return cached
 
 
 @router.get("/cached")
 def get_cached(
     request: Request,
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """读取策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
 
@@ -376,6 +442,7 @@ def get_cached_summary(request: Request):
         sid: {
             "total": int(result.get("total") or 0),
             "as_of": result.get("as_of"),
+            **_result_diagnostics(result),
         }
         for sid, result in results.items()
         if isinstance(result, dict)
@@ -405,7 +472,7 @@ def get_cached_summary(request: Request):
 def get_cached_result(
     strategy_id: str,
     request: Request,
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """按需返回单个策略的完整明细及其今日失效行。"""
     cached = _cached_with_realtime(request)
@@ -425,6 +492,7 @@ def get_cached_result(
         "rows": _rows_with_ext(raw_result.get("rows") or [], ext_values),
         "total": int(raw_result.get("total") or 0),
         "elapsed_ms": 0.0,
+        **_result_diagnostics(raw_result),
     }
 
     ever_rows = None
@@ -495,7 +563,7 @@ def market_snapshot(request: Request):
 
 
 @router.post("/run_all")
-def run_all(request: Request, body: Optional[dict] = None):
+def run_all(request: Request, body: dict | None = None):
     """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
     from datetime import date as date_type
 
@@ -505,7 +573,10 @@ def run_all(request: Request, body: Optional[dict] = None):
     repo = request.app.state.repo
     asset_type = str(body.get("asset_type") or "stock")
     timeframe = str(body.get("timeframe") or "1d")
-    svc = ScreenerService(repo, asset_type=asset_type)
+    try:
+        svc = ScreenerService(repo, asset_type=asset_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     engine = getattr(request.app.state, "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
@@ -515,7 +586,10 @@ def run_all(request: Request, body: Optional[dict] = None):
     if raw_date:
         as_of = date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
     else:
-        as_of = svc.latest_date()
+        try:
+            as_of = svc.latest_date()
+        except EnrichedGenerationUnavailableError as e:
+            raise HTTPException(status_code=503, detail="指标数据正在更新, 请稍后重试") from e
     if not as_of:
         return {"as_of": None, "results": {}}
 
@@ -568,33 +642,34 @@ def run_all(request: Request, body: Optional[dict] = None):
             overrides_map=overrides_map,
             strategy_ids=all_ids,
         )
+    except EnrichedGenerationUnavailableError as e:
+        raise HTTPException(status_code=503, detail="指标数据正在更新, 请稍后重试") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     results: dict[str, dict] = {}
     for sid, result in engine_results.items():
-        safe_rows = _safe(asdict(result)).get("rows", [])
+        safe_result = _safe(asdict(result))
         results[sid] = {
             "total": result.total,
             "as_of": str(as_of),
-            "rows": safe_rows,
+            "rows": safe_result.get("rows", []),
+            **_result_diagnostics(safe_result),
         }
 
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
     # 写入策略缓存 (供页面秒加载)
-    if results:
-        try:
+    if results and asset_type not in ("hk", "us"):
+        with contextlib.suppress(Exception):
             strategy_cache.write_cache(data_dir, str(as_of), results)
-        except Exception:  # noqa: BLE001
-            pass
 
     if body.get("summary_only"):
         return {
             "as_of": str(as_of),
             "results": {
-                sid: {"total": result["total"], "as_of": result["as_of"]}
+                sid: {"total": result["total"], "as_of": result["as_of"], **_result_diagnostics(result)}
                 for sid, result in results.items()
             },
         }
@@ -606,9 +681,9 @@ def run_all(request: Request, body: Optional[dict] = None):
 @router.get("/limit-ladder")
 def limit_ladder(
     request: Request,
-    as_of: Optional[date] = None,
+    as_of: date | None = None,
     direction: str = Query("up", description="up=涨停梯队 | down=跌停梯队"),
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """连板/连跌梯队 — 按连板数分组, 含三状态。
     返回: tiers = [{ boards, count, stocks: [{symbol,name,change_pct,status,...}] }]
@@ -750,7 +825,7 @@ def limit_ladder(
                         & (pl.col("_sealed") == True)  # noqa: E712
                     ).then(pl.lit("real"))
                     .when(
-                        (pl.col("_sealed") == False)  # noqa: E712
+                        pl.col("_sealed") == False  # noqa: E712
                     ).then(pl.lit("fake"))
                     .when(
                         (pl.col("status") == status_main)
@@ -814,7 +889,7 @@ def limit_ladder(
                         pass
 
     # 选择输出列
-    cols = ["symbol", "name", "close", "change_pct", "boards", "status", consec_col, "sealed_status", "sealed_vol", "is_one_word"] + ext_col_names
+    cols = ["symbol", "name", "close", "change_pct", "boards", "status", consec_col, "sealed_status", "sealed_vol", "is_one_word", *ext_col_names]
     df = df.select([c for c in cols if c in df.columns])
     # 排序: boards 降序, status 按主状态→炸/翘→断/止
     status_order = pl.when(pl.col("status") == status_main).then(0)

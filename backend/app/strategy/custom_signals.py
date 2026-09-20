@@ -114,7 +114,7 @@ def _parse_days(c: dict, key: str, i: int) -> int:
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(f"第 {i+1} 个条件: {key} 必须是整数: {raw!r}")
+        raise ValueError(f"第 {i+1} 个条件: {key} 必须是整数: {raw!r}") from None
     if n < 0 or n > MAX_DAYS:
         raise ValueError(f"第 {i+1} 个条件: {key} 必须在 0..{MAX_DAYS} 之间: {n}")
     return n

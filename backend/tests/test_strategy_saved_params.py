@@ -98,3 +98,89 @@ def test_save_config_rejects_invalid_scoring_direction(tmp_path):
             strategy_id="saved_params",
             overrides={"scoring_directions": {"rsi_14": "sideways"}},
         ), request)
+
+
+def test_strategy_detail_includes_saved_portfolio_config(tmp_path):
+    engine, _ = _make_engine()
+    engine._strategies["saved_params"].meta["portfolio"] = {
+        "enabled": False,
+        "max_same_industry": 2,
+        "concentration_penalty": 0.0,
+        "industry_level": 1,
+    }
+    detail = strategy_api._strategy_detail(
+        engine.get("saved_params"),
+        overrides={"portfolio": {"enabled": True, "max_same_industry": 3}},
+        engine=engine,
+    )
+
+    assert detail["portfolio"] == {
+        "enabled": True,
+        "max_same_industry": 3,
+        "concentration_penalty": 0.0,
+        "industry_level": 1,
+    }
+
+
+def test_save_config_validates_and_strips_default_portfolio(tmp_path):
+    engine, _ = _make_engine()
+    engine._strategies["saved_params"].meta["portfolio"] = {
+        "enabled": False,
+        "max_same_industry": 2,
+        "concentration_penalty": 0.0,
+        "industry_level": 1,
+    }
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        strategy_engine=engine,
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+    )))
+
+    strategy_api.save_config(strategy_api.SaveConfigRequest(
+        strategy_id="saved_params",
+        overrides={
+            "portfolio": {
+                "enabled": True,
+                "max_same_industry": 3,
+                "concentration_penalty": 0.25,
+                "industry_level": 2,
+            },
+        },
+    ), request)
+    saved = strategy_config.load_override(tmp_path, "saved_params")
+    assert saved["portfolio"] == {
+        "enabled": True,
+        "max_same_industry": 3,
+        "concentration_penalty": 0.25,
+        "industry_level": 2,
+    }
+
+    strategy_api.save_config(strategy_api.SaveConfigRequest(
+        strategy_id="saved_params",
+        overrides={"portfolio": {
+            "enabled": False,
+            "max_same_industry": 2,
+            "concentration_penalty": 0.0,
+            "industry_level": 1,
+        }},
+    ), request)
+    assert "portfolio" not in strategy_config.load_override(tmp_path, "saved_params")
+
+
+def test_save_config_rejects_invalid_portfolio_config(tmp_path):
+    engine, _ = _make_engine()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        strategy_engine=engine,
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+    )))
+
+    with pytest.raises(HTTPException, match="同行业最大数"):
+        strategy_api.save_config(strategy_api.SaveConfigRequest(
+            strategy_id="saved_params",
+            overrides={"portfolio": {"max_same_industry": 0}},
+        ), request)
+
+    with pytest.raises(HTTPException, match="集中度惩罚"):
+        strategy_api.save_config(strategy_api.SaveConfigRequest(
+            strategy_id="saved_params",
+            overrides={"portfolio": {"concentration_penalty": 1.1}},
+        ), request)

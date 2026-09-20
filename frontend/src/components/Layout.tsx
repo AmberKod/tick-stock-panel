@@ -5,6 +5,7 @@ import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
+import { DataFreshnessBar } from '@/components/DataFreshnessBar'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
@@ -37,6 +38,7 @@ import {
   Flame,
   BarChart3,
   Gauge,
+  Globe,
   Sparkles,
   Layers3,
   Landmark,
@@ -54,6 +56,7 @@ import {
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
+import { marketFromLocation } from '@/lib/backtestMarket'
 import { cn } from '@/lib/cn'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
@@ -75,8 +78,11 @@ const CORE_INDEXES = [
 
 type CoreIndex = (typeof CORE_INDEXES)[number]
 
-const nav = [
+export const STOCK_NAV = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
+  // 跨市场总览: 一屏并置三市场, 不是默认首页(盘中主战场仍是 A股深度看板),
+  // 但必须有一级入口且靠前 —— 做出来却找不到等于没做。
+  { to: '/markets',    label: '跨市场', icon: Globe },
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测', icon: History },
@@ -89,6 +95,7 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/regime', label: '市场环境', icon: Gauge },
   { to: '/abnormal', label: '异动监控', icon: Siren },
+  { to: '/hotspots', label: '热点', icon: Sparkles },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },
@@ -98,6 +105,7 @@ const nav = [
 // 渲染时按当前显示顺序检测分组变化, 在每组首项前插入组标题。
 const NAV_GROUP_OF: Record<string, string> = {
   '/': '行情',
+  '/markets': '行情',
   '/watchlist': '行情',
   '/stock-analysis': '行情',
   '/indices': '行情',
@@ -111,14 +119,16 @@ const NAV_GROUP_OF: Record<string, string> = {
   '/regime': '市场',
   '/monitor': '监控',
   '/abnormal': '监控',
+  '/hotspots': '监控',
   '/review': '监控',
   '/data': '数据',
 }
 
 /** 取导航项的分组名: /analysis/* 扩展分析页归「市场」, 其余未知路由(前端扩展)不显示组标题 */
 function navGroupOf(to: string): string | undefined {
-  if (NAV_GROUP_OF[to]) return NAV_GROUP_OF[to]
-  if (to.startsWith('/analysis/')) return '市场'
+  const normalized = to.split('?')[0].replace(/^\/(hk|us)/, '') || '/'
+  if (NAV_GROUP_OF[normalized]) return NAV_GROUP_OF[normalized]
+  if (normalized.startsWith('/analysis/')) return '市场'
   return undefined
 }
 
@@ -302,6 +312,22 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 }
 
 export function Layout() {
+  const location = useLocation()
+  const market = marketFromLocation(location.pathname, location.search)
+  const marketPrefix = market === 'cn' ? '' : '/' + market
+  const nav = useMemo(
+    () => STOCK_NAV.map(item => ({
+      ...item,
+      to: item.to === '/backtest' && marketPrefix
+        ? '/backtest?tab=strategy&market=' + marketPrefix.slice(1)
+        : item.to === '/' ? (marketPrefix || '/')
+          // 跨市场总览天然跨市场, 不加 hk/us 前缀: 加了会落到 /hk/markets(被
+          // `hk/:symbol` 当成个股代码)而不是总览页。
+          : item.to === '/markets' ? '/markets'
+            : `${marketPrefix}${item.to}`,
+    })),
+    [marketPrefix],
+  )
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: caps } = useCapabilities()
   const { data: settingsState } = useSettings()
@@ -322,7 +348,6 @@ export function Layout() {
 
   // 自选分组 — 仅当用户开启「显示在侧边栏」时拉取
   const groupsInNav = prefs?.watchlist_groups_in_nav ?? false
-  const location = useLocation()
   const { data: watchlistGroupsData } = useQuery({
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
@@ -331,7 +356,7 @@ export function Layout() {
   })
   const watchlistGroups = watchlistGroupsData?.groups ?? []
   // 自选二级菜单展开状态 — 默认当前在自选页时展开
-  const [watchlistNavExpanded, setWatchlistNavExpanded] = useState(location.pathname === '/watchlist')
+  const [watchlistNavExpanded, setWatchlistNavExpanded] = useState(location.pathname.replace(/^\/(hk|us)/, '') === '/watchlist')
 
   // 侧边栏收起状态 — 持久化到 localStorage
   const [navCollapsed, setNavCollapsed] = useState(() => {
@@ -506,8 +531,10 @@ export function Layout() {
     badge: item.badge,
   }))
 
-  const allNav: NavItem[] = [...nav, ...analysisNav, ...extensionNav]
-  const savedOrder = prefs?.nav_order ?? []
+  const allNav: NavItem[] = marketPrefix ? [...nav] : [...nav, ...analysisNav, ...extensionNav]
+  const savedOrder = marketPrefix ? [] : (prefs?.nav_order ?? [])
+  const navBasePath = (to: string) => to.split('?')[0].replace(/^\/(hk|us)/, '') || '/'
+  const isPath = (to: string, base: string) => navBasePath(to) === base
 
   const navItems = savedOrder.length > 0
     ? (() => {
@@ -625,7 +652,7 @@ export function Layout() {
             const prevGroup = idx > 0 ? navGroupOf(visibleNavItems[idx - 1].to) : null
             const showGroupLabel = !navCollapsed && group != null && group !== prevGroup
             // 「自选」项 — 开启分组侧栏且未整体收起时, 渲染为可展开父项 + 二级分组
-            const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !navCollapsed && watchlistGroups.length > 0
+            const isWatchlistExpandable = isPath(to, '/watchlist') && groupsInNav && !navCollapsed && watchlistGroups.length > 0
             return (
               <div key={to}>
                 {showGroupLabel && (
@@ -640,7 +667,7 @@ export function Layout() {
                     onClick={() => setWatchlistNavExpanded(v => !v)}
                     className={cn(
                       'group relative flex w-full items-center gap-3 rounded-btn px-3 py-2 text-sm transition-all duration-150 ease-smooth',
-                      location.pathname === '/watchlist'
+                      isPath(location.pathname, '/watchlist')
                         ? 'bg-elevated text-foreground font-medium'
                         : 'text-foreground/75 hover:bg-elevated/70 hover:text-foreground',
                     )}
@@ -648,7 +675,7 @@ export function Layout() {
                     <span
                       className={cn(
                         'pointer-events-none absolute left-0 top-1/2 h-4 -translate-y-1/2 w-[2.5px] rounded-full bg-accent transition-opacity duration-150',
-                        location.pathname === '/watchlist' ? 'opacity-100 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'opacity-0',
+                        isPath(location.pathname, '/watchlist') ? 'opacity-100 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'opacity-0',
                       )}
                     />
                     <Icon className={cn('h-4 w-4 shrink-0 transition-colors', location.pathname === '/watchlist' ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
@@ -690,14 +717,14 @@ export function Layout() {
                           </span>
                         )}
                         {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                        {to === '/data' && isDataSyncing && !navCollapsed && (
+                        {isPath(to, '/data') && isDataSyncing && !navCollapsed && (
                           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
                         )}
-                        {to === '/data' && !isDataSyncing && dataSyncJustDone && !navCollapsed && (
+                        {isPath(to, '/data') && !isDataSyncing && dataSyncJustDone && !navCollapsed && (
                           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
                         )}
                         {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                        {to === '/monitor' && !navCollapsed && <MonitorBadge active={isActive} />}
+                        {isPath(to, '/monitor') && !navCollapsed && <MonitorBadge active={isActive} />}
                       </>
                     )}
                   </NavLink>
@@ -940,6 +967,8 @@ export function Layout() {
         >
           <Outlet />
         </Suspense>
+        {/* 底部常驻: sticky 保留文档流位置, 长页面滚动时始终贴底且不遮挡内容 */}
+        <DataFreshnessBar />
       </motion.main>
       <ToastContainer />
       <AlertToastContainer />

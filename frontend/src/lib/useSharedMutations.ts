@@ -32,14 +32,15 @@ export function useUpdateQuoteInterval() {
 interface WatchlistBatchAddInput {
   symbols: string[]
   groupId?: string | null
+  market?: 'cn' | 'hk' | 'us'
 }
 
 /** 批量添加自选 — Screener / 截图导入共用 */
 export function useWatchlistBatchAdd() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ symbols, groupId }: WatchlistBatchAddInput) =>
-      api.watchlistBatchAdd(symbols, '', groupId),
+    mutationFn: ({ symbols, groupId, market }: WatchlistBatchAddInput) =>
+      api.watchlistBatchAdd(symbols, '', groupId, market),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
       // 前缀匹配: 实际 key 为 ['watchlist-enriched', extColumnsParam],

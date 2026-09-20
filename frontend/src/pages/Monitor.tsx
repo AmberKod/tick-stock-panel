@@ -2,9 +2,10 @@ import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags } from 'lucide-react'
+import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags, Layers, ChevronDown } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import { Panel } from '@/components/panel'
 import { Skeleton } from '@/components/data/Skeleton'
 import { api, type MonitorRule, type AlertEvent, type MonitorCondition, type MonitorExtFieldItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -39,6 +40,140 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   market:   'bg-purple-500/10 text-purple-400 border-purple-500/20',
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
   abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
+}
+
+// ============================================================================
+// 面板 3 · 告警汇聚
+// ----------------------------------------------------------------------------
+// 回答「这堆告警里真正值得看的是哪几条」(PRD §3.2 面板 3)。
+// 纯规则、非打分:
+//   ① 按 symbol + 60 分钟窗口合并;
+//   ② 窗内被 ≥2 类不同 source 命中 → 升级为「汇聚告警」, 展示被哪几类同时命中;
+//   ③ 单类命中**不删除**, 只是不升级 (仍在下方原始列表按时间平铺);
+//   ④ 同一 (symbol, source, type) 窗内重复触发只保留最新一条 + 计数 (去重防疲劳)。
+// 「≥2 类」阈值: PRD 定 2 —— 我们只有 6 类 source, 取 3 会漏太多。
+//
+// 字段依据 (前端 api.ts / 后端 alerts): `AlertEvent.source` = 告警源类
+// (signal / price / market / strategy / sector / abnormal), `AlertEvent.symbol`,
+// `AlertEvent.ts` (毫秒)。没有 symbol 的告警 (全市场类) 不参与汇聚。
+// ============================================================================
+
+/** 汇聚时间窗: 60 分钟 */
+const CONVERGE_WINDOW_MS = 60 * 60 * 1000
+/** 升级为汇聚告警所需的不同 source 类数 */
+const CONVERGE_MIN_SOURCES = 2
+/** 严重级别排序, 汇聚后取窗内最高 */
+const SEVERITY_RANK: Record<string, number> = { info: 0, warn: 1, critical: 2 }
+
+/** 一个「标的 × 60 分钟窗口」的合并簇 */
+interface ConvergedAlert {
+  /** `${symbol}|${firstTs}` */
+  key: string
+  symbol: string
+  name: string | null
+  /** 命中的 source 类(去重, 按窗内首次出现顺序) */
+  sources: string[]
+  /** 每个 source 类的原始命中条数 */
+  sourceCounts: Record<string, number>
+  /** 窗内原始条数 */
+  count: number
+  /** 去重后条数 (同一 source+type 只留最新) */
+  dedupedCount: number
+  /** 窗内最高严重级别 */
+  severity: string
+  firstTs: number
+  lastTs: number
+  /** 去重后保留的事件 (按时间倒序) */
+  events: AlertEvent[]
+  changePct: number | null
+}
+
+/** 由窗口内的原始告警构造一个合并簇 (去重防疲劳在这里做)。 */
+function buildCluster(symbol: string, window: AlertEvent[]): ConvergedAlert {
+  // 去重: 同一 (source, type) 只保留最新一条; 计数仍按原始条数
+  const latestByKey = new Map<string, AlertEvent>()
+  const sourceCounts: Record<string, number> = {}
+  const sources: string[] = []
+  for (const ev of window) {
+    const key = `${ev.source}|${ev.type ?? ''}`
+    const prev = latestByKey.get(key)
+    if (!prev || ev.ts >= prev.ts) latestByKey.set(key, ev)
+    sourceCounts[ev.source] = (sourceCounts[ev.source] ?? 0) + 1
+    if (!sources.includes(ev.source)) sources.push(ev.source)
+  }
+  const deduped = [...latestByKey.values()].sort((a, b) => b.ts - a.ts)
+
+  let severity = 'info'
+  for (const ev of deduped) {
+    const rank = SEVERITY_RANK[ev.severity ?? 'info'] ?? 0
+    if (rank > (SEVERITY_RANK[severity] ?? 0)) severity = ev.severity ?? 'info'
+  }
+
+  return {
+    key: `${symbol}|${window[0].ts}`,
+    symbol,
+    name: deduped.find(e => e.name)?.name ?? null,
+    sources,
+    sourceCounts,
+    count: window.length,
+    dedupedCount: deduped.length,
+    severity,
+    firstTs: window[0].ts,
+    lastTs: window[window.length - 1].ts,
+    events: deduped,
+    changePct: deduped.find(e => e.change_pct != null)?.change_pct ?? null,
+  }
+}
+
+/**
+ * 按 symbol + 时间窗合并原始告警。
+ * @returns 汇聚簇(≥2 类 source) / 单类簇个数 / 因无 symbol 被跳过的条数
+ */
+function buildConvergence(events: AlertEvent[], windowMs: number): {
+  converged: ConvergedAlert[]
+  singleCount: number
+  skippedNoSymbol: number
+} {
+  const bySymbol = new Map<string, AlertEvent[]>()
+  let skippedNoSymbol = 0
+  for (const ev of events) {
+    if (!ev.symbol) {
+      skippedNoSymbol += 1
+      continue
+    }
+    const list = bySymbol.get(ev.symbol)
+    if (list) list.push(ev)
+    else bySymbol.set(ev.symbol, [ev])
+  }
+
+  const clusters: ConvergedAlert[] = []
+  for (const [symbol, list] of bySymbol) {
+    const asc = [...list].sort((a, b) => a.ts - b.ts)
+    let window: AlertEvent[] = []
+    const flush = () => {
+      if (window.length > 0) clusters.push(buildCluster(symbol, window))
+      window = []
+    }
+    for (const ev of asc) {
+      // 窗口锚定在簇内第一条: 超出 60 分钟就另起一簇 (确定性, 不依赖遍历顺序)
+      if (window.length === 0 || ev.ts - window[0].ts <= windowMs) window.push(ev)
+      else {
+        flush()
+        window = [ev]
+      }
+    }
+    flush()
+  }
+
+  const converged = clusters.filter(c => c.sources.length >= CONVERGE_MIN_SOURCES)
+  // 命中类数多 > 条数多 > 最近
+  converged.sort((a, b) => b.sources.length - a.sources.length || b.count - a.count || b.lastTs - a.lastTs)
+  return { converged, singleCount: clusters.length - converged.length, skippedNoSymbol }
+}
+
+/** 简短时间: MM-DD HH:mm */
+function fmtShortTs(ts: number): string {
+  return new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 /**
@@ -230,7 +365,7 @@ export function Monitor() {
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-3.5">
-              <AlertsList alertsQuery={alertsQuery} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} />
+              <AlertsList alertsQuery={alertsQuery} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} sourceFilter={filter} />
             </div>
           </section>
 
@@ -304,13 +439,15 @@ function SectionHeader({ icon: Icon, title }: { icon: any; title: string }) {
 }
 
 // ── 触发记录列表 ──────────────────────────────────────
-function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs, monitorExtFields }: {
+function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs, monitorExtFields, sourceFilter }: {
   alertsQuery: ReturnType<typeof useQuery>
   confirmClear: boolean
   setConfirmClear: (v: boolean) => void
   total: number
   enterTs: number
   monitorExtFields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
+  /** 当前服务端 source 过滤 ('all' = 不过滤)。汇聚只在「全部」口径下有意义。 */
+  sourceFilter: string
 }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -319,6 +456,8 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
+  // 面板 3: 「只看汇聚」—— 单类命中不删除, 只是默认不升级、可被这一层筛掉
+  const [convergedOnly, setConvergedOnly] = useState(false)
 
   const clearMut = useMutation({
     mutationFn: api.alertsClear,
@@ -344,25 +483,109 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
     }
   }
 
-  const events = (alertsQuery.data as any)?.alerts ?? []
+  const events = useMemo(
+    () => ((alertsQuery.data as any)?.alerts ?? []) as AlertEvent[],
+    [alertsQuery.data],
+  )
+
+  // ── 面板 3 · 告警汇聚 ──
+  const convergence = useMemo(() => buildConvergence(events, CONVERGE_WINDOW_MS), [events])
+  /** 原始事件 → 所属汇聚簇 (按对象引用索引, 与列表渲染用的是同一批对象) */
+  const convergedOfEvent = useMemo(() => {
+    const map = new Map<AlertEvent, ConvergedAlert>()
+    for (const cluster of convergence.converged) {
+      for (const ev of cluster.events) map.set(ev, cluster)
+    }
+    return map
+  }, [convergence])
+
+  const visibleEvents = convergedOnly
+    ? events.filter(ev => convergedOfEvent.has(ev))
+    : events
+
+  const convergedRawCount = convergence.converged.reduce((sum, c) => sum + c.count, 0)
 
   return (
     <div className="space-y-3">
+      {/* 面板 3 · 告警汇聚 (置顶) —— 单类命中不删除, 只是不升级, 仍在下方原始列表 */}
+      <Panel
+        title="告警汇聚"
+        icon={Layers}
+        hint={`${convergence.converged.length} 条汇聚 · 合并 ${convergedRawCount} 条原始`}
+        actions={
+          <button
+            type="button"
+            aria-pressed={convergedOnly}
+            onClick={() => setConvergedOnly(v => !v)}
+            disabled={convergence.converged.length === 0}
+            title="只看被 ≥2 类告警源同时命中的原始告警"
+            className={cn(
+              'rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed',
+              convergedOnly
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-border/60 bg-surface text-muted hover:border-accent/40 hover:text-accent',
+            )}
+          >
+            只看汇聚
+          </button>
+        }
+        loading={alertsQuery.isLoading}
+        error={alertsQuery.error as Error | null}
+        empty={
+          !alertsQuery.isLoading && convergence.converged.length === 0
+            ? sourceFilter !== 'all'
+              ? '当前按单一告警源过滤中; 汇聚需要同一标的在 60 分钟内被 ≥2 类不同 source 命中, 请切回「全部」查看。'
+              : '当前没有被 ≥2 类告警源同时命中的标的。'
+            : false
+        }
+        evidence={{
+          label: '汇聚规则',
+          items: [
+            `同一 symbol 在 ${CONVERGE_WINDOW_MS / 60000} 分钟窗口内合并为一个簇`,
+            `窗内被 ≥${CONVERGE_MIN_SOURCES} 类不同 source 命中 → 升级为「汇聚告警」, 展示被哪几类同时命中`,
+            '单类命中不删除, 只是不升级 (仍在下方原始列表按时间平铺)',
+            '同一 (symbol, source, type) 窗内重复触发只保留最新一条 + 计数 (去重防疲劳)',
+            `无 symbol 的告警 (全市场类) 不参与汇聚${convergence.skippedNoSymbol > 0 ? ` (本次跳过 ${convergence.skippedNoSymbol} 条)` : ''}`,
+          ],
+        }}
+        footer={
+          <p className="text-[10px] leading-relaxed text-muted">
+            {convergence.singleCount > 0
+              ? `另有 ${convergence.singleCount} 个「标的 × 窗口」簇仅为单类命中, 未升级, 已在下方原始列表中按时间平铺。`
+              : '当前所有簇均已升级为汇聚告警。'}
+          </p>
+        }
+      >
+        <div className="space-y-2">
+          {convergence.converged.map(cluster => (
+            <ConvergedCard
+              key={cluster.key}
+              cluster={cluster}
+              onPreview={ev => setPreviewEv(ev)}
+            />
+          ))}
+        </div>
+      </Panel>
+
       {alertsQuery.isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} h="h-14" rounded="rounded-card" />
           ))}
         </div>
-      ) : events.length === 0 ? (
+      ) : visibleEvents.length === 0 ? (
         <EmptyState
           icon={Bell}
-          title="暂无触发记录"
-          hint="监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在标的详情页加入监控。"
+          title={convergedOnly ? '暂无汇聚告警' : '暂无触发记录'}
+          hint={
+            convergedOnly
+              ? '同一标的在 60 分钟内被 ≥2 类告警源命中才会升级为汇聚告警。'
+              : '监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在标的详情页加入监控。'
+          }
         />
       ) : (
         <div className="space-y-2">
-              {events.map((ev: any, i: number) => {
+              {visibleEvents.map((ev: any, i: number) => {
             const sev = SEVERITY_CONFIG[ev.severity ?? 'info'] ?? SEVERITY_CONFIG.info
             const SevIcon = sev.icon
             const isNew = ev.ts > enterTs
@@ -426,6 +649,14 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           <span className={cn('rounded border px-1.5 py-0.5 text-[9px] font-medium', SOURCE_BADGE_STYLE.strategy)}>
                             {sname}
                           </span>
+                          {convergedOfEvent.get(ev) && (
+                            <span
+                              title={`60 分钟内被 ${convergedOfEvent.get(ev)!.sources.length} 类告警源同时命中: ${convergedOfEvent.get(ev)!.sources.map(s => TYPE_LABEL[s] ?? s).join(' + ')}`}
+                              className="shrink-0 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent"
+                            >
+                              汇聚 · {convergedOfEvent.get(ev)!.sources.length} 类
+                            </span>
+                          )}
                         </div>
                         {ev.symbol ? (
                           <div className="mt-1 flex min-w-0 items-center gap-1.5">
@@ -510,6 +741,14 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             return dotIdx >= 0 ? rn.slice(dotIdx + 3) : (rn || (TYPE_LABEL[ev.source] ?? ev.source))
                           })()}
                         </span>
+                          {convergedOfEvent.get(ev) && (
+                            <span
+                              title={`60 分钟内被 ${convergedOfEvent.get(ev)!.sources.length} 类告警源同时命中: ${convergedOfEvent.get(ev)!.sources.map(s => TYPE_LABEL[s] ?? s).join(' + ')}`}
+                              className="shrink-0 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent"
+                            >
+                              汇聚 · {convergedOfEvent.get(ev)!.sources.length} 类
+                            </span>
+                          )}
                       </div>
                       {/* 详情行: 命中条件 (signal/price/market) + 当前价 / 或默认消息 */}
                       {(ev.conditions && ev.conditions.length > 0) ? (
@@ -617,6 +856,75 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
           setMemberPreview({ symbol, name })
         }}
       />
+    </div>
+  )
+}
+
+// ── 面板 3 · 汇聚告警卡片 ─────────────────────────────
+/**
+ * 单条汇聚告警: 展示「被哪几类同时命中」—— 用列出命中源代替打分, 更可解释
+ * (PRD §3.2 面板 3 明确不借 World Monitor 的 `types×25 + count×2` 打分公式)。
+ */
+function ConvergedCard({ cluster, onPreview }: {
+  cluster: ConvergedAlert
+  onPreview: (ev: AlertEvent) => void
+}) {
+  const sev = SEVERITY_CONFIG[cluster.severity] ?? SEVERITY_CONFIG.info
+  const SevIcon = sev.icon
+  return (
+    <div className="relative overflow-hidden rounded-lg border border-accent/30 bg-surface py-2 pl-3.5 pr-2.5 shadow-sm">
+      <div className={cn('absolute left-0 top-0 h-full w-0.5', sev.bar)} />
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn('shrink-0', sev.iconCls)}>
+          <SevIcon className="h-3.5 w-3.5" />
+        </span>
+        <button
+          onClick={() => onPreview(cluster.events[0])}
+          title="点击查看日K"
+          className="inline-flex items-center gap-1.5 rounded px-1 -mx-1 transition-colors hover:bg-elevated/50 cursor-pointer"
+        >
+          <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{cluster.symbol}</span>
+          {cluster.name && <span className="max-w-[8rem] truncate text-xs text-secondary hover:text-foreground">{cluster.name}</span>}
+        </button>
+        {cluster.changePct != null && (
+          <span className={cn('text-[11px] font-mono font-medium', cluster.changePct >= 0 ? 'text-danger' : 'text-bear')}>
+            {fmtPct(cluster.changePct)}
+          </span>
+        )}
+        {/* 被哪几类同时命中 */}
+        {cluster.sources.map(source => (
+          <span
+            key={source}
+            className={cn('shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-medium', SOURCE_BADGE_STYLE[source] ?? 'bg-elevated text-muted border-border')}
+          >
+            {TYPE_LABEL[source] ?? source}
+            <span className="ml-0.5 font-mono opacity-70">×{cluster.sourceCounts[source]}</span>
+          </span>
+        ))}
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted">{cluster.count} 条</span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-0.5 text-[10px] text-muted">
+        <span className="font-mono">{fmtShortTs(cluster.firstTs)} → {fmtShortTs(cluster.lastTs)}</span>
+        <span>· 60 分钟内 {cluster.sources.length} 类告警源同时命中</span>
+        {cluster.dedupedCount < cluster.count && <span>· 去重后 {cluster.dedupedCount} 条</span>}
+      </div>
+      <details className="group mt-1">
+        <summary className="flex cursor-pointer list-none items-center gap-1 text-[10px] text-muted transition-colors hover:text-secondary">
+          <ChevronDown className="h-3 w-3 transition-transform duration-200 group-open:rotate-180" />
+          展开被合并的原始告警 ({cluster.dedupedCount})
+        </summary>
+        <ul className="mt-1 space-y-0.5 pl-4">
+          {cluster.events.map(ev => (
+            <li key={`${ev.ts}-${ev.source}-${ev.type ?? ''}`} className="flex items-start gap-1.5 text-[10px] text-secondary">
+              <span className="shrink-0 font-mono text-muted">{fmtShortTs(ev.ts)}</span>
+              <span className={cn('shrink-0 rounded border px-1 text-[9px]', SOURCE_BADGE_STYLE[ev.source] ?? 'border-border text-muted')}>
+                {TYPE_LABEL[ev.source] ?? ev.source}
+              </span>
+              <span className="min-w-0 truncate">{ev.message}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
     </div>
   )
 }

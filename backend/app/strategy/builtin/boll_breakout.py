@@ -9,7 +9,7 @@ META = {
     "name": "布林突破",
     "description": "突破布林上轨 + 放量, 强势加速信号",
     "tags": ["布林", "突破"],
-    "asset_types": ["stock", "etf"],
+    "asset_types": ["stock", "etf", "hk", "us"],
     "timeframes": ["1d"],
     "params": [
         {

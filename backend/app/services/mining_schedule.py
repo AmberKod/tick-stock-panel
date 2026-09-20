@@ -101,7 +101,7 @@ def _build_data_fingerprint_once(
         "latest_enriched_date": _iso_or_none(repo.latest_enriched_date(asset_type)),
         "enriched": _enriched_metadata(enriched_root),
         "instruments": _instrument_metadata(repo, asset_type),
-        "regime": _path_metadata(regime_path(data_dir), root=data_dir),
+        "regime": _path_metadata(regime_path(data_dir, market="cn"), root=data_dir),
         "algorithm_version": MINING_ALGORITHM_VERSION,
         "methodology_version": FACTOR_METHODOLOGY_VERSION,
         "implementation": _implementation_metadata(module_root),
@@ -176,11 +176,14 @@ def _prerequisite_error(repo: Any, request: dict[str, Any]) -> str | None:
     end = request.get("end")
     if end is None:
         return "stock enriched data is unavailable"
-    regime = regime_path(data_dir)
+    # 用 load_regime_history 而非 regime_path 硬 stat: load 会按 cn 找新切分路径,
+    # 找不到时回退到老单文件路径(commit ① 兼容), 避免 mining 在 commit ① 切换窗口
+    # 误判 regime prerequisite 缺失。
     try:
-        if not regime.is_file() or regime.stat().st_size <= 0:
-            return "regime data is unavailable"
+        regime_df = load_regime_history(data_dir, market="cn")
     except OSError:
+        return "regime data is unavailable"
+    if regime_df.is_empty():
         return "regime data is unavailable"
 
     start = request.get("start")

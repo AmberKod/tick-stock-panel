@@ -12,14 +12,13 @@
 """
 from __future__ import annotations
 
-import json
+import hashlib
 import logging
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -33,14 +32,24 @@ from app.enriched_generation import (
     get_enriched_generation,
 )
 from app.market_time import cn_today
-from app.parquet import scan_enriched_parquet
+from app.parquet import scan_enriched_parquet, scan_parquet_compat
 
 logger = logging.getLogger(__name__)
 
 
 def enriched_dirname(asset_type: str) -> str:
-    """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
-    return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
+    """Resolve an explicit dataset; unknown assets must never read A-share data."""
+    directories = {
+        "stock": "kline_daily_enriched",
+        "etf": "kline_etf_enriched",
+        "index": "kline_index_enriched",
+        "hk": "kline_hk_us_enriched",
+        "us": "kline_hk_us_enriched",
+    }
+    try:
+        return directories[asset_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported enriched asset_type: {asset_type!r}") from exc
 
 
 def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
@@ -155,7 +164,7 @@ class DataStore:
             except OSError:
                 logger.warning("legacy dir %s not empty, kept", legacy_dir)
             logger.info("legacy data migration done")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("legacy data migration failed (startup continues): %s", e)
 
     def _register_views(self) -> None:
@@ -210,7 +219,7 @@ class DataStore:
         for sql in statements:
             try:
                 self.db.execute(sql)
-            except Exception as e:  # noqa: BLE001
+            except Exception:
                 # 空数据目录(首次启动)或权限问题时 DuckDB 会抛 IOException;
                 # 跨版本/平台也可能抛 CatalogException 等。空目录缺视图不影响启动
                 # (后续同步写入数据后会重新刷新视图),这里一律降级为 debug 日志。
@@ -298,7 +307,7 @@ class DataStore:
                 continue
             try:
                 self.db.execute(f"CREATE OR REPLACE VIEW {name} AS " + " UNION ALL BY NAME ".join(parts))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug("unified view %s skipped: %s", name, e)
 
 
@@ -337,6 +346,10 @@ class KlineRepository:
         self._etf_symbol_set_cache: set[str] | None = None
         self._index_enriched_cache: pl.DataFrame | None = None
         self._index_enriched_cache_date: date | None = None
+        self._market_cache_lock = threading.Lock()
+        self._market_enriched_cache: dict[
+            tuple[str, date | None, int], tuple[str, pl.DataFrame, date | None]
+        ] = {}
 
         # ---- enriched 后台预热 ----
         # 启动时 compute_indicators (107万行, 低配机 50s+) 移出 lifespan 关键路径,
@@ -447,7 +460,7 @@ class KlineRepository:
                 self._refresh_enriched()
                 logger.info("enriched warmup thread done (%.1fs)", time.perf_counter() - t0)
                 self._notify_refresh_done()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("enriched warmup thread failed")
             finally:
                 with self._warmup_lock:
@@ -456,7 +469,7 @@ class KlineRepository:
                 if cb is not None:
                     try:
                         cb()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.warning("enriched warmup callback failed", exc_info=True)
 
         self._warmup_thread = threading.Thread(
@@ -470,7 +483,7 @@ class KlineRepository:
             return
         try:
             callback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("repository refresh callback failed", exc_info=True)
 
     @property
@@ -489,6 +502,8 @@ class KlineRepository:
         导致内存里的旧缓存残留 (clear 数据后看板仍显示旧数据的根因)。
         本方法无条件清空, 供清除数据/重置场景调用。
         """
+        with self._market_cache_lock:
+            self._market_enriched_cache.clear()
         self._enriched_cache = None
         self._enriched_cache_date = None
         self._enriched_history_cache = None
@@ -555,7 +570,12 @@ class KlineRepository:
             # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
             try:
                 from datetime import timedelta
-                from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
+
+                from app.indicators.pipeline import (
+                    compute_indicators,
+                    compute_limit_signals,
+                    compute_signals,
+                )
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
@@ -648,7 +668,7 @@ class KlineRepository:
                         return
             except EnrichedGenerationUnavailableError:
                 raise
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("enriched 即时计算失败, 使用原始 14 列缓存: %s", e)
 
             # 降级: 直接使用 14 列数据 + 构建 live_agg
@@ -661,7 +681,7 @@ class KlineRepository:
 
             logger.info("enriched 缓存已加载: %d 只, 日期 %s", len(df_latest), latest)
             logger.info("enriched refresh done fallback (%.2fs)", time.perf_counter() - started)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("enriched 缓存刷新失败: %s", e)
 
     def _restore_missing_latest_rows(
@@ -721,7 +741,7 @@ class KlineRepository:
                 len(result) - len(df_today),
             )
             return result
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("enriched latest cache restore skipped: %s", e)
             return df_today
 
@@ -731,6 +751,7 @@ class KlineRepository:
         优化: 优先使用 _enriched_history_cache (启动时已计算), 避免重复 compute_indicators。
         """
         from datetime import timedelta
+
         from app.indicators.pipeline import _ema_alpha
 
         started = time.perf_counter()
@@ -942,7 +963,7 @@ class KlineRepository:
             if row and row[0]:
                 d = row[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return latest
 
@@ -1003,6 +1024,7 @@ class KlineRepository:
                 return
 
             from datetime import timedelta
+
             from app.indicators.pipeline import compute_indicators, compute_signals
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
@@ -1022,7 +1044,7 @@ class KlineRepository:
                 df_full = compute_signals(compute_indicators(df_hist))
                 self._etf_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
             self._etf_enriched_cache_date = latest
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
     def _refresh_index_enriched(self) -> None:
@@ -1066,18 +1088,25 @@ class KlineRepository:
                 df_full = self._compute_index_enriched_range(df_hist)
                 self._index_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
             self._index_enriched_cache_date = latest
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("指数 enriched 缓存刷新跳过: %s", e)
 
     def _refresh_instruments(self) -> None:
         """加载 instruments 到内存。"""
         try:
-            df = pl.scan_parquet(self._inst_glob).collect()
+            # Market metadata evolves independently. Union each file's schema
+            # before scanning so a HK all-null column cannot hide CN/US values.
+            files = sorted((self.store.data_dir / "instruments").rglob("*.parquet"))
+            if not files:
+                return
+            df = pl.concat(
+                [scan_parquet_compat(path) for path in files], how="diagonal_relaxed",
+            ).collect()
             if not df.is_empty():
                 self._instruments_cache = df
                 self._name_map_cache = None
                 logger.info("instruments 缓存已加载: %d 只", len(df))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("instruments 缓存刷新失败: %s", e)
 
     def _refresh_index_instruments(self) -> None:
@@ -1089,7 +1118,7 @@ class KlineRepository:
                 self._index_symbol_set_cache = None
                 self._name_map_cache = None
                 logger.info("index instruments 缓存已加载: %d 只", len(df))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("index instruments 缓存刷新跳过: %s", e)
 
     def _refresh_etf_instruments(self) -> None:
@@ -1099,7 +1128,7 @@ class KlineRepository:
             df = pl.scan_parquet(self._etf_inst_glob).collect()
             if not df.is_empty():
                 parts.append(df)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("etf instruments 缓存刷新跳过(new): %s", e)
         try:
             legacy = self.get_index_instruments()
@@ -1107,7 +1136,7 @@ class KlineRepository:
                 legacy = legacy.filter(pl.col("asset_type") == "etf")
                 if not legacy.is_empty():
                     parts.append(legacy)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("etf instruments legacy fallback skipped: %s", e)
         if parts:
             df_all = pl.concat(parts, how="diagonal_relaxed").unique(subset=["symbol"], keep="last").sort("symbol")
@@ -1130,6 +1159,144 @@ class KlineRepository:
             return pl.DataFrame(), self._enriched_cache_date
         return self._enriched_cache, self._enriched_cache_date
 
+    def get_market_enriched_files(self, asset_type: str) -> list[Path]:
+        """Select only one market from the existing shared symbol partitions."""
+        if asset_type not in ("hk", "us"):
+            raise ValueError(f"unsupported symbol-partitioned asset_type: {asset_type!r}")
+        root = self.store.data_dir / enriched_dirname(asset_type)
+        return sorted(root.glob(f"symbol=*.{asset_type.upper()}/**/*.parquet"))
+
+    def get_market_enriched_symbols(
+        self, asset_type: str, symbols: list[str] | None = None,
+    ) -> list[str]:
+        root = self.store.data_dir / enriched_dirname(asset_type)
+        available = {
+            path.relative_to(root).parts[0].removeprefix("symbol=")
+            for path in self.get_market_enriched_files(asset_type)
+        }
+        if symbols is None:
+            instruments = self.get_instruments_asset(asset_type)
+            symbols = instruments.get_column("symbol").to_list() if "symbol" in instruments.columns else []
+        from app.data_providers.normalizer import normalize_market_symbols
+        selected = normalize_market_symbols(symbols, asset_type)
+        available.intersection_update(selected)
+        return sorted(available)
+
+    def _scan_market_enriched(
+        self, asset_type: str, symbols: list[str] | None = None,
+    ) -> pl.LazyFrame | None:
+        selected = set(self.get_market_enriched_symbols(asset_type, symbols))
+        files = [path for path in self.get_market_enriched_files(asset_type)
+                 if path.parent.name.removeprefix("symbol=") in selected]
+        if not files:
+            return None
+        # These partitions already contain full indicators, unlike the narrow CN schema.
+        return (
+            scan_parquet_compat(files, hive_partitioning=False)
+            .with_columns(pl.col("date").cast(pl.Date))
+            .filter(pl.col("symbol").str.ends_with(f".{asset_type.upper()}"))
+        )
+
+    def read_market_enriched(
+        self,
+        asset_type: str,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+        symbols: list[str] | None = None,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        """Read prepared HK/US indicators without recomputing or changing price units."""
+        from app.backtest.fundamentals import (
+            HK_FINANCIAL_NAMES,
+            attach_hk_financial_fields,
+            load_fundamental_snapshot,
+        )
+
+        financial_names = set(columns or ()) & HK_FINANCIAL_NAMES if asset_type == "hk" else set()
+        lf = self._scan_market_enriched(asset_type, symbols)
+        if lf is None:
+            return pl.DataFrame()
+        if start is not None:
+            lf = lf.filter(pl.col("date") >= start)
+        if end is not None:
+            lf = lf.filter(pl.col("date") <= end)
+        if symbols is not None:
+            lf = lf.filter(pl.col("symbol").is_in(symbols))
+        if columns is not None:
+            available = set(lf.collect_schema().names())
+            selected = list(dict.fromkeys(["symbol", "date", *columns]))
+            if financial_names & {"pb", "raw_pb", "pb_latest", "pe_ttm", "turnover_rate"}:
+                selected.extend(["raw_close", "currency", "raw_price_verified", "volume", "volume_unit"])
+                selected = list(dict.fromkeys(selected))
+            lf = lf.select([name for name in selected if name in available])
+        frame = lf.sort(["symbol", "date"]).collect()
+        instruments = self.get_instruments_asset(asset_type)
+        if not frame.is_empty() and not instruments.is_empty():
+            missing = [
+                name for name in ("name", "sector", "industry", "total_shares", "float_shares")
+                if name in instruments.columns and name not in frame.columns
+                and (columns is None or name in columns)
+            ]
+            if missing:
+                frame = frame.join(
+                    instruments.select(["symbol", *missing]).unique(subset=["symbol"]),
+                    on="symbol", how="left",
+                )
+        if financial_names and not frame.is_empty():
+            frame = attach_hk_financial_fields(
+                frame, load_fundamental_snapshot(self.store.data_dir, market="HK", names=financial_names), financial_names,
+            )
+        return frame
+
+    def invalidate_market_cache(self, asset_type: str) -> None:
+        """Invalidate one foreign-market snapshot; the next read reloads its generation."""
+        if asset_type not in {"hk", "us"}:
+            raise ValueError("market cache invalidation requires hk or us")
+        with self._market_cache_lock:
+            for key in list(self._market_enriched_cache):
+                if key[0] == asset_type:
+                    self._market_enriched_cache.pop(key, None)
+
+    def get_market_enriched_snapshot(
+        self,
+        asset_type: str,
+        *,
+        end: date | None = None,
+        lookback_days: int = 1,
+        refresh: bool = True,
+    ) -> tuple[pl.DataFrame, date | None]:
+        """Cache a stable market snapshot/window, counting actual trading dates."""
+        key = (asset_type, end, max(1, lookback_days))
+        with self._market_cache_lock:
+            cached = self._market_enriched_cache.get(key)
+        if not refresh:
+            return (cached[1], cached[2]) if cached else (pl.DataFrame(), None)
+        for _attempt in range(2):
+            generation = self.get_matrix_data_generation(asset_type)
+            if cached is not None and cached[0] == generation:
+                return cached[1], cached[2]
+            lf = self._scan_market_enriched(asset_type)
+            frame, latest = pl.DataFrame(), None
+            if lf is not None:
+                if end is not None:
+                    lf = lf.filter(pl.col("date") <= end)
+                dates = (
+                    lf.select("date").drop_nulls().unique().sort("date")
+                    .tail(key[2]).collect()["date"]
+                )
+                if len(dates):
+                    latest = dates[-1]
+                    frame = self.read_market_enriched(asset_type, start=dates[0], end=latest)
+            if self.get_matrix_data_generation(asset_type) != generation:
+                continue
+            with self._market_cache_lock:
+                self._market_enriched_cache[key] = (generation, frame, latest)
+                while len(self._market_enriched_cache) > 8:
+                    self._market_enriched_cache.pop(next(iter(self._market_enriched_cache)))
+            return frame, latest
+        raise EnrichedGenerationUnavailableError("market enriched data changed during reading")
+
     def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
         """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。
 
@@ -1139,6 +1306,8 @@ class KlineRepository:
         """
         if asset_type == "stock":
             return self.get_enriched_latest()
+        if asset_type in ("hk", "us"):
+            return self.get_market_enriched_snapshot(asset_type, refresh=refresh)
         if asset_type == "etf":
             if self._etf_enriched_cache is None and refresh:
                 self._refresh_etf_enriched()
@@ -1300,6 +1469,13 @@ class KlineRepository:
 
     def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
         """按资产类型返回 instruments；老 stock 路径保持原样。"""
+        if asset_type in ("hk", "us"):
+            path = self.store.data_dir / "instruments" / f"{asset_type}_instruments.parquet"
+            if not path.exists():
+                return pl.DataFrame()
+            return pl.read_parquet(path).filter(
+                pl.col("symbol").str.ends_with(f".{asset_type.upper()}")
+            )
         if asset_type == "stock":
             return self.get_instruments()
         if asset_type == "index":
@@ -1387,8 +1563,12 @@ class KlineRepository:
         """单股日K查询 — 从14列parquet读取后即时计算指标。"""
         from datetime import timedelta
 
+        # 港美 symbol (.HK/.US) 分流: enriched 全历史已按 symbol 分区落盘
+        # (kline_hk_us_enriched/symbol=X/part.parquet, 含全套指标), 直接读分区文件。
+        if symbol.endswith(".HK") or symbol.endswith(".US"):
+            return self._scan_hk_us_enriched_symbol(symbol, start, end, columns)
+
         # 快路径: 请求的列全是 parquet 直接存储的列 (如迷你蜡烛图只要 OHLCV) →
-        # scan + 列下推直接返回, 跳过 warmup(150天) 与 _compute_enriched_range 全套指标计算。
         # 仍用 enriched_latest 缓存覆盖最新日 (盘中更准), 只保留请求列。
         # 试探 scan 仅读请求的列; 缺列时回退到下方完整计算路径 (代价仅一次轻量 scan)。
         if columns:
@@ -1447,6 +1627,39 @@ class KlineRepository:
             df = df.select(existing)
 
         return df
+
+    def _scan_hk_us_enriched_symbol(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        """读取港美 enriched 分区 (kline_hk_us_enriched/symbol=X/part.parquet)。
+
+        该存储按 symbol 全历史单文件落盘, 已含全套指标 (MA/MACD/KDJ/RSI/BOLL/信号),
+        与 A股 enriched schema 一致; date 列为 datetime 分区下的 Date 值。
+        """
+        path = self.store.data_dir / "kline_hk_us_enriched" / f"symbol={symbol}"
+        part = path / "part.parquet"
+        if not part.exists():
+            logger.warning("港美 enriched 分区不存在: %s", symbol)
+            return pl.DataFrame()
+        try:
+            df = pl.read_parquet(part)
+            df = df.filter(
+                (pl.col("date").dt.date() >= start) & (pl.col("date").dt.date() <= end)
+            ).sort("date")
+            # 统一 date 为 Date 类型 (与 A股 enriched 输出一致)
+            if df.schema.get("date") == pl.Datetime:
+                df = df.with_columns(pl.col("date").dt.date())
+            if columns:
+                existing = [c for c in columns if c in df.columns]
+                df = df.select(existing)
+            return df
+        except Exception as e:
+            logger.warning("港美 enriched 读取失败 %s: %s", symbol, e)
+            return pl.DataFrame()
 
     def get_daily_batch(
         self,
@@ -1554,7 +1767,7 @@ class KlineRepository:
                 (pl.col("symbol") == symbol)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort("datetime").collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("分钟K查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1576,7 +1789,7 @@ class KlineRepository:
                 pl.col("symbol").is_in(symbols)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort(["symbol", "datetime"]).collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("批量分钟K查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1608,7 +1821,7 @@ class KlineRepository:
                 .sort(["symbol", "datetime"])
                 .collect(streaming=True)
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("分钟K范围查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1649,7 +1862,7 @@ class KlineRepository:
                 .sort(["symbol", "datetime"])
                 .collect(streaming=True)
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("分钟K按日期查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1659,7 +1872,12 @@ class KlineRepository:
 
     def _compute_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
         """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。"""
-        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals, filter_halt_days
+        from app.indicators.pipeline import (
+            compute_indicators,
+            compute_limit_signals,
+            compute_signals,
+            filter_halt_days,
+        )
         if df.is_empty() or df.height < 2:
             return df
         # 兜底过滤历史脏数据中的停牌日 (close 可能被填充为前收盘价)
@@ -1675,7 +1893,7 @@ class KlineRepository:
                 instruments,
                 historical_shares=self.get_historical_shares(),
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("on-demand compute failed: %s", e)
         return df
 
@@ -1687,7 +1905,7 @@ class KlineRepository:
         try:
             df = compute_indicators(df)
             df = compute_signals(df)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("index on-demand compute failed: %s", e)
         return df
 
@@ -1718,7 +1936,7 @@ class KlineRepository:
                 existing = [c for c in columns if c in schema_names]
                 lf = lf.select(existing)
             return lf.collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("日K查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1735,7 +1953,7 @@ class KlineRepository:
                 existing = [c for c in columns if c in schema_names]
                 lf = lf.select(existing)
             return lf.collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("日K批量查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1752,7 +1970,7 @@ class KlineRepository:
                 existing = [c for c in columns if c in schema_names]
                 lf = lf.select(existing)
             return lf.collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("指数日K查询失败: %s", e)
             return pl.DataFrame()
 
@@ -1769,7 +1987,7 @@ class KlineRepository:
                 existing = [c for c in columns if c in schema_names]
                 lf = lf.select(existing)
             return lf.collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("ETF 日K查询跳过: %s", e)
             return pl.DataFrame()
 
@@ -1835,7 +2053,7 @@ class KlineRepository:
                 ).fetchone()
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
 
     def earliest_daily_date(self) -> date | None:
@@ -1875,7 +2093,12 @@ class KlineRepository:
                 ).fetchone()
             if res and res[0]:
                 d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
+                # duckdb 在某些版本/列类型下 max(date) 会返回 datetime; 统一收口成 date
+                if isinstance(d, datetime):
+                    d = d.date()
+                if isinstance(d, date):
+                    return d
+                return date.fromisoformat(str(d))
         except Exception:
             return None
         return None
@@ -1898,7 +2121,31 @@ class KlineRepository:
 
     def get_matrix_data_generation(self, asset_type: str = "stock") -> str:
         """Return the stable generation for managed enriched readers."""
-        return get_enriched_generation(self.store.data_dir, asset_type)
+        if asset_type == "hk":
+            from app.services.market_data_status import market_data_generation
+
+            try:
+                return market_data_generation(self.store.data_dir, "HK")
+            except FileNotFoundError as exc:
+                raise EnrichedGenerationUnavailableError("market enriched files changed") from exc
+        generation = get_enriched_generation(self.store.data_dir, asset_type)
+        if asset_type not in ("hk", "us"):
+            return generation
+        # Existing symbol writers may predate generation markers. Include file metadata
+        # so legacy updates, removals and instrument changes also invalidate readers.
+        digest = hashlib.blake2b(generation.encode(), digest_size=20)
+        files = self.get_market_enriched_files(asset_type)
+        instruments = self.store.data_dir / "instruments" / f"{asset_type}_instruments.parquet"
+        if instruments.exists():
+            files.append(instruments)
+        try:
+            for path in files:
+                stat = path.stat()
+                digest.update(str(path.relative_to(self.store.data_dir)).encode())
+                digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        except FileNotFoundError as exc:
+            raise EnrichedGenerationUnavailableError("market enriched files changed") from exc
+        return f"{asset_type}:{digest.hexdigest()}"
 
     def _bump_matrix_data_generation(self, asset_type: str) -> str:
         return bump_enriched_generation(self.store.data_dir, asset_type)
@@ -1931,7 +2178,7 @@ class KlineRepository:
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         return None
 
@@ -1986,7 +2233,19 @@ class KlineRepository:
 
     def append_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
         """按资产类型写入日K；stock/index 保持旧目录兼容。"""
-        if asset_type == "stock":
+        if asset_type in ("hk", "us"):
+            from app.data_providers.normalizer import normalize_market_symbols
+            from app.tickflow.market_daily import write_market_daily_symbol
+
+            if df.is_empty():
+                return
+            symbols = df.get_column("symbol").unique().to_list()
+            normalize_market_symbols(symbols, asset_type)
+            for symbol in symbols:
+                write_market_daily_symbol(
+                    self.store.data_dir, symbol, df.filter(pl.col("symbol") == symbol),
+                )
+        elif asset_type == "stock":
             self.append_daily(df)
         elif asset_type == "index":
             self.append_index_daily(df)
@@ -2048,7 +2307,7 @@ class KlineRepository:
             try:
                 with self._lock:
                     self.db.execute(sql)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug("index/etf view refresh skipped: %s", e)
         with self._lock:
             self.store._register_unified_views()
@@ -2083,7 +2342,7 @@ class KlineRepository:
                         f"CREATE OR REPLACE VIEW {name} AS "
                         f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
                     )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("rebuild view %s failed: %s", name, e)
         with self._lock:
             self.store._register_unified_views()

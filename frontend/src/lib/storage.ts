@@ -1,3 +1,5 @@
+import type { StrategyBacktestAsset } from './api'
+
 /**
  * 集中管理所有 localStorage 持久化。
  *
@@ -16,6 +18,69 @@ function kv<T>(key: string) {
     },
     set(val: T) {
       try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
+    },
+  }
+}
+
+export interface StrategyBacktestSaved {
+  selectedStrategy: string | null
+  symbols: string
+  assetType?: StrategyBacktestAsset
+  start: string
+  end: string
+  matching: 'close_t' | 'open_t+1'
+  entryFill: 'close_t' | 'open_t+1'
+  exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'
+  fees: string
+  stampTax?: string
+  buyStampTax?: string
+  slippage: string
+  maxPositions: string
+  maxExposure: string
+  initialCapital: string
+  positionSizing: 'equal' | 'score_weight'
+  mode: 'position' | 'full'
+  holdingDays: string
+  minuteFill?: boolean
+  regimeStates?: string[]
+  regimeMinScore?: number | ''
+  params?: Record<string, any>
+  overrides?: Record<string, any>
+  strategyConfigSignature?: string
+  result: unknown
+}
+
+const legacyBacktest = kv<StrategyBacktestSaved | null>('strategy-backtest-last')
+
+function strategyBacktestForAsset(asset: StrategyBacktestAsset) {
+  const scoped = kv<StrategyBacktestSaved | null>('strategy-backtest-last-' + asset)
+  return {
+    ...scoped,
+    get(fallback: StrategyBacktestSaved | null) {
+      const saved = scoped.get(null)
+      if (saved && (saved.assetType ?? 'stock') === asset) return saved
+      const legacy = legacyBacktest.get(null)
+      return legacy && (legacy.assetType ?? 'stock') === asset ? legacy : fallback
+    },
+  }
+}
+
+function backtestReconnect(asset: StrategyBacktestAsset) {
+  const scoped = kv<string | null>('backtest-reconnect-' + asset)
+  return {
+    ...scoped,
+    get(fallback: string | null) {
+      const saved = scoped.get(null)
+      if (saved) return saved
+      try {
+        const legacy = localStorage.getItem('backtest_reconnect')
+        if (legacy && (new URLSearchParams(legacy).get('asset_type') ?? 'stock') === asset) {
+          scoped.set(legacy)
+          localStorage.removeItem('backtest_reconnect')
+          return legacy
+        }
+      } catch { /* Storage may be unavailable. */ }
+      return fallback
     },
   }
 }
@@ -106,32 +171,9 @@ export const storage = {
   strategyBacktestQuickRanges: kv<unknown>('strategy-backtest-quick-ranges'),
 
   /** 策略回测最后一次成功结果和参数 */
-  strategyBacktestLast: kv<{
-    selectedStrategy: string | null
-    symbols: string
-    assetType?: 'stock' | 'etf'
-    start: string
-    end: string
-    matching: 'close_t' | 'open_t+1'
-    entryFill: 'close_t' | 'open_t+1'
-    exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'
-    fees: string
-    stampTax?: string
-    slippage: string
-    maxPositions: string
-    maxExposure: string
-    initialCapital: string
-    positionSizing: 'equal' | 'score_weight'
-    mode: 'position' | 'full'
-    holdingDays: string
-    minuteFill?: boolean
-    regimeStates?: string[]
-    regimeMinScore?: number | ''
-    params?: Record<string, any>
-    overrides?: Record<string, any>
-    strategyConfigSignature?: string
-    result: any
-  } | null>('strategy-backtest-last'),
+  strategyBacktestLast: legacyBacktest,
+  strategyBacktestForAsset,
+  backtestReconnect,
 
   /** 概念分析页面字段配置 */
   conceptAnalysisConfig: kv<Record<string, any>>('concept-analysis-config'),

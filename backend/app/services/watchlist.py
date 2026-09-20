@@ -60,7 +60,44 @@ _ENTRY_SCHEMA = {
     "added_at": pl.Utf8,
     "note": pl.Utf8,
     "group_ids": pl.List(pl.Utf8),
+    "market": pl.Utf8,
 }
+
+
+_MARKETS = frozenset({"cn", "hk", "us"})
+
+
+def _normalize_symbol(symbol: str) -> str:
+    normalized = (symbol or "").strip().upper()
+    if not normalized:
+        raise ValueError("自选标的不能为空")
+    return normalized
+
+
+def _infer_market(symbol: str) -> str:
+    """由 symbol 后缀推导市场: .HK → hk / .US → us / 其余 → cn。"""
+    s = (symbol or "").upper().strip()
+    if s.endswith(".HK"):
+        return "hk"
+    if s.endswith(".US"):
+        return "us"
+    return "cn"
+
+
+def _normalize_market(market: str | None, symbol: str) -> str:
+    normalized = (market or _infer_market(symbol)).strip().lower()
+    if normalized not in _MARKETS:
+        raise ValueError("不支持的自选市场")
+    return normalized
+
+
+def _entry_key(symbol: str, market: str | None = None) -> tuple[str, str]:
+    normalized_symbol = _normalize_symbol(symbol)
+    return _normalize_market(market, normalized_symbol), normalized_symbol
+
+
+def _row_key(row: dict) -> tuple[str, str]:
+    return _entry_key(row.get("symbol", ""), row.get("market"))
 
 
 def _path() -> Path:
@@ -96,6 +133,11 @@ def _read_entries() -> pl.DataFrame:
         df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias("added_at"))
     if "note" not in df.columns:
         df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("note"))
+    # 旧 schema 兼容: 无 market 列 → 按 symbol 后缀推导补 (HK/US/CN)
+    if "market" not in df.columns:
+        df = df.with_columns(
+            pl.col("symbol").map_elements(_infer_market, return_dtype=pl.Utf8).alias("market")
+        )
     return df.select(list(_ENTRY_SCHEMA))
 
 
@@ -174,8 +216,13 @@ def list_symbols() -> list[dict]:
         return [] if df.is_empty() else df.to_dicts()
 
 
-def add(symbol: str, note: str = "", group_id: str | None = None) -> list[dict]:
-    rows, _ = add_batch([symbol], note=note, group_id=group_id)
+def add(
+    symbol: str,
+    note: str = "",
+    group_id: str | None = None,
+    market: str | None = None,
+) -> list[dict]:
+    rows, _ = add_batch([symbol], note=note, group_id=group_id, market=market)
     return rows
 
 
@@ -183,6 +230,7 @@ def add_batch(
     symbols: list[str],
     note: str = "",
     group_id: str | None = None,
+    market: str | None = None,
 ) -> tuple[list[dict], int]:
     """批量添加并保持既有语义：每个新处理的标的移动到列表最前面。
 
@@ -195,39 +243,45 @@ def add_batch(
         rows = _read_entries().to_dicts()
         added = 0
         for symbol in symbols:
-            existing = next((row for row in rows if row["symbol"] == symbol), None)
+            entry_market, normalized_symbol = _entry_key(symbol, market)
+            key = (entry_market, normalized_symbol)
+            existing = next((row for row in rows if _row_key(row) == key), None)
             if existing is None:
                 added += 1
-            rows = [row for row in rows if row["symbol"] != symbol]
+            rows = [row for row in rows if _row_key(row) != key]
             gids = list((existing or {}).get("group_ids") or [])
             if group_id is not None and group_id not in gids:
                 gids.append(group_id)
             rows.insert(0, {
-                "symbol": symbol,
+                "symbol": normalized_symbol,
                 "added_at": datetime.utcnow().isoformat(timespec="seconds"),
                 "note": note,
                 "group_ids": gids,
+                "market": entry_market,
             })
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()
         _write_entries(out)
         return out.to_dicts(), added
 
 
-def remove(symbol: str) -> list[dict]:
+def remove(symbol: str, market: str | None = None) -> list[dict]:
     with _LOCK:
-        df = _read_entries().filter(pl.col("symbol") != symbol)
-        _write_entries(df)
-        return df.to_dicts()
+        key = _entry_key(symbol, market)
+        rows = [row for row in _read_entries().to_dicts() if _row_key(row) != key]
+        out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()
+        _write_entries(out)
+        return out.to_dicts()
 
 
-def move_to_top(symbol: str) -> list[dict]:
+def move_to_top(symbol: str, market: str | None = None) -> list[dict]:
     with _LOCK:
-        df = _read_entries()
-        if df.is_empty() or symbol not in df["symbol"].to_list():
-            return df.to_dicts()
-        target = df.filter(pl.col("symbol") == symbol)
-        rest = df.filter(pl.col("symbol") != symbol)
-        out = pl.concat([target, rest], how="diagonal_relaxed")
+        key = _entry_key(symbol, market)
+        rows = _read_entries().to_dicts()
+        target = [row for row in rows if _row_key(row) == key]
+        if not target:
+            return rows
+        rest = [row for row in rows if _row_key(row) != key]
+        out = pl.DataFrame(target + rest, schema=_ENTRY_SCHEMA)
         _write_entries(out)
         return out.to_dicts()
 
@@ -308,7 +362,11 @@ def delete_group(group_id: str) -> tuple[list[dict], list[dict]]:
         return remaining, df.to_dicts()
 
 
-def set_group(symbol: str, group_id: str | None) -> list[dict]:
+def set_group(
+    symbol: str,
+    group_id: str | None,
+    market: str | None = None,
+) -> list[dict]:
     """互斥设定: 该标的只保留这一个分组(group_id=None 即全部移出, 变未分组)。
 
     多组模型的日常操作走 add_to_group / remove_from_group; 本函数服务于
@@ -317,27 +375,33 @@ def set_group(symbol: str, group_id: str | None) -> list[dict]:
     with _LOCK:
         groups = _read_groups()
         _validate_group_id(group_id, groups)
+        key = _entry_key(symbol, market)
         rows = _read_entries().to_dicts()
-        if not any(row["symbol"] == symbol for row in rows):
-            raise KeyError(symbol)
+        if not any(_row_key(row) == key for row in rows):
+            raise KeyError(key)
         for row in rows:
-            if row["symbol"] == symbol:
+            if _row_key(row) == key:
                 row["group_ids"] = [group_id] if group_id is not None else []
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA)
         _write_entries(out)
         return out.to_dicts()
 
 
-def add_to_group(symbol: str, group_id: str) -> list[dict]:
+def add_to_group(
+    symbol: str,
+    group_id: str,
+    market: str | None = None,
+) -> list[dict]:
     """把标的加入一个分组(多组成员关系: 不影响已属于的其他分组)。"""
     with _LOCK:
         groups = _read_groups()
         _validate_group_id(group_id, groups)
+        key = _entry_key(symbol, market)
         rows = _read_entries().to_dicts()
-        if not any(row["symbol"] == symbol for row in rows):
-            raise KeyError(symbol)
+        if not any(_row_key(row) == key for row in rows):
+            raise KeyError(key)
         for row in rows:
-            if row["symbol"] == symbol:
+            if _row_key(row) == key:
                 gids = row["group_ids"] or []
                 if group_id not in gids:
                     gids.append(group_id)
@@ -347,16 +411,21 @@ def add_to_group(symbol: str, group_id: str) -> list[dict]:
         return out.to_dicts()
 
 
-def remove_from_group(symbol: str, group_id: str) -> list[dict]:
+def remove_from_group(
+    symbol: str,
+    group_id: str,
+    market: str | None = None,
+) -> list[dict]:
     """把标的移出一个分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
     with _LOCK:
         groups = _read_groups()
         _validate_group_id(group_id, groups)
+        key = _entry_key(symbol, market)
         rows = _read_entries().to_dicts()
-        if not any(row["symbol"] == symbol for row in rows):
-            raise KeyError(symbol)
+        if not any(_row_key(row) == key for row in rows):
+            raise KeyError(key)
         for row in rows:
-            if row["symbol"] == symbol:
+            if _row_key(row) == key:
                 row["group_ids"] = [g for g in (row["group_ids"] or []) if g != group_id]
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA)
         _write_entries(out)
@@ -427,7 +496,7 @@ def fetch_quotes(symbols: list[str], capset: CapabilitySet, timeout_s: float = 8
         except FuturesTimeout:
             logger.warning("quote fetch timeout (%.1fs) for %d symbols", timeout_s, len(chunk))
             break  # 超时后不再尝试后续批次
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("quote fetch failed for %d symbols: %s", len(chunk), e)
     pool.shutdown(wait=False)
 

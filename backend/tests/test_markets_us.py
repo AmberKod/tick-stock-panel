@@ -5,7 +5,7 @@ M2 阶段: 不依赖 yfinance, 仅验证档案本身行为正确。
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.markets import profile_for_symbol
@@ -21,8 +21,9 @@ def test_us_basic_attributes():
     assert US.market == "US"
     assert US.tz_name == "America/New_York"
     assert US.currency == "USD"
-    assert US.settlement == "T+0"
-    assert US.lot_size is None
+    assert US.settlement == "T+1"
+    assert US.same_day_sell_allowed is True
+    assert US.lot_size == 1
     assert US.symbol_suffixes == (".US",)
     assert US.trading_minutes_total == 390.0
     assert len(US.sessions) == 1  # 单一时段无午休
@@ -47,7 +48,6 @@ def test_us_benchmarks_empty():
 
 def test_us_dst_switch():
     """DST: 1月 EST = UTC-5, 7月 EDT = UTC-4。"""
-    from datetime import date
     jan = datetime(2026, 1, 15, 12, 0, tzinfo=ZoneInfo("America/New_York"))
     jul = datetime(2026, 7, 15, 12, 0, tzinfo=ZoneInfo("America/New_York"))
     assert jan.utcoffset().total_seconds() == -5 * 3600    # EST

@@ -11,13 +11,15 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
 
@@ -259,7 +261,7 @@ def _group_members_or_none(rule: dict) -> frozenset[str] | None:
     group_id = str(rule.get("group_id") or "")
     try:
         groups = _watchlist_groups_snapshot()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("自选分组数据读取失败, 规则 %s 本轮跳过: %s", rule.get("id"), exc)
         return None
     members = groups.get(group_id)
@@ -300,10 +302,7 @@ def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) 
             return df.head(0)
     if not parts:
         return df.head(0)
-    if logic == "or":
-        mask = pl.any_horizontal(parts)
-    else:
-        mask = pl.all_horizontal(parts)
+    mask = pl.any_horizontal(parts) if logic == "or" else pl.all_horizontal(parts)
     return df.filter(mask)
 
 
@@ -336,9 +335,9 @@ class MonitorRuleEngine:
         # 历史窗口加载器: (target_date, lookback_days) → 多日 enriched DataFrame。
         # 用于声明 filter_history 的策略 (如反包), 实时监控时拼历史窗口 + 今日行情跑选股。
         # 为 None 时, filter_history 策略仍会被跳过 (保持旧行为, 不破坏无历史场景)。
-        self._history_loader: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader: Callable[[_dt.date, int], pl.DataFrame] | None = None
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
-        self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader_etf: Callable[[_dt.date, int], pl.DataFrame] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
         # 本轮 evaluate() 产出的策略选股结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
@@ -720,7 +719,7 @@ class MonitorRuleEngine:
         for rule in rules:
             try:
                 events.extend(self._evaluate_sector_rule(rule, snapshots, timestamp))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("板块规则评估失败 %s: %s", rule.get("id"), exc)
         return events
 
@@ -794,7 +793,7 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(event)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("alert handler failed: %s", exc)
         return events
 
@@ -862,7 +861,7 @@ class MonitorRuleEngine:
         for rule in rules:
             try:
                 events.extend(self._evaluate_abnormal_rule(rule, rows, timestamp))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("异动规则评估失败 %s: %s", rule.get("id"), exc)
         return events
 
@@ -944,7 +943,7 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(event)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("alert handler failed: %s", exc)
         # 本轮未出现的标的 (跌出预过滤区间) 状态置 False 而非删除:
         # 删除会被当成「首轮观测」而不触发, 置 False 才能在回升穿过阈值时再次告警。
@@ -958,6 +957,15 @@ class MonitorRuleEngine:
         window, closeness, value, threshold = best
         board = row.get("board") or ""
         tag = f"{board}{'·ST' if row.get('st') else ''}"
+        symbol = str(row.get("symbol") or "")
+        # 港美为自定动量口径 (无交易所异动披露制度), 文案区分避免误导
+        if symbol.endswith(".HK") or symbol.endswith(".US"):
+            state = "已达动量阈值" if closeness >= 1 else "接近动量阈值"
+            return (
+                f"{row.get('name') or symbol} 近{window[0]}日动量 "
+                f"{value * 100:+.2f}%/阈值{threshold * 100:.0f}% "
+                f"接近度{closeness * 100:.0f}%, {state}"
+            )
         state = "已达异常波动阈值" if closeness >= 1 else "接近异常波动阈值"
         return (
             f"{row.get('name') or row.get('symbol')} {window}偏离值 "
@@ -979,7 +987,7 @@ class MonitorRuleEngine:
         rtype = rule.get("type", "signal")
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
-            hit_rows = self._match_strategy(scoped, rule)
+            hit_rows = self._match_strategy(scoped, rule, full_frame=df)
         elif rtype == "ladder":
             # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
             return self._evaluate_ladder(scoped, rule, now)
@@ -1077,6 +1085,7 @@ class MonitorRuleEngine:
 
     def _match_strategy(
         self, df: pl.DataFrame, rule: dict,
+        *, full_frame: pl.DataFrame | None = None,
     ) -> list[tuple[str, str, Any, Any, Any, list[str]]]:
         """策略类型评估: 一次执行同时产出交易信号和结果池变更事件。
 
@@ -1101,21 +1110,22 @@ class MonitorRuleEngine:
         # 运行策略选股: 复用当前 enriched DataFrame 跳过数据加载
         overrides = {}
         if self._data_dir:
-            try:
+            with contextlib.suppress(Exception):
                 overrides = _strategy_config.load_override(self._data_dir, sid)
-            except Exception:
-                pass
 
         # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
         # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
         # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
         from app.strategy.engine import StrategyDataContext
+        concept_resolver = getattr(self._strategy_engine, "concept_config_fingerprint", None)
+        concept_fingerprint = concept_resolver(sid, overrides=overrides) if callable(concept_resolver) else None
+        calculation_frame = full_frame if concept_fingerprint and full_frame is not None else df
         current_context = StrategyDataContext(
             asset_type=at,
             timeframe="1d",
             as_of=cn_today(),
-            current=df,
+            current=calculation_frame,
         )
         if getattr(s, "execution_backend", "polars_expr") == "composite":
             # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
@@ -1132,7 +1142,7 @@ class MonitorRuleEngine:
                 asset_type=at,
                 timeframe="1d",
                 as_of=cn_today(),
-                current=df,
+                current=calculation_frame,
                 market=matrix,
             )
         required_history_bars = 1
@@ -1167,9 +1177,9 @@ class MonitorRuleEngine:
                     asset_type=at,
                     timeframe="1d",
                     as_of=today,
-                    current=df,
+                    current=calculation_frame,
                     history=pl.concat(
-                        [hist_df, df], how="diagonal_relaxed"
+                        [hist_df, calculation_frame], how="diagonal_relaxed"
                     ),
                 )
             except Exception as e:
@@ -1180,13 +1190,19 @@ class MonitorRuleEngine:
                 sid,
                 current_context,
                 pool=(df["symbol"].cast(pl.Utf8).to_list()
-                      if getattr(s, "execution_backend", "polars_expr") == "matrix_native"
+                      if concept_fingerprint or getattr(s, "execution_backend", "polars_expr") == "matrix_native"
                       else None),
                 overrides=overrides,
                 params=dict(overrides.get("params") or {}),
             )
         except Exception as e:
             logger.warning("策略 %s 选股执行失败: %s", sid, e)
+            if at == "stock" and concept_fingerprint:
+                self._building_strategy_results[sid] = {
+                    "total": 0, "as_of": str(current_context.as_of), "rows": [], "warnings": [str(e)],
+                    "concept_heat_metadata": {"status": "unavailable", "reason": str(e), "market": "cn"},
+                }
+                self._latest_strategy_result_ids.add(sid)
             return []
 
         # 记录本轮完整选股结果 (供策略页实时回显: /cached 端点直接读取, 不落盘)。
@@ -1199,6 +1215,9 @@ class MonitorRuleEngine:
                 self._building_strategy_results[sid] = {
                     "total": result.total,
                     "as_of": str(cn_today()),
+                    "warnings": list(getattr(result, "warnings", []) or []),
+                    "industry_mapping_version": getattr(result, "industry_mapping_version", None),
+                    "concept_heat_metadata": dict(getattr(result, "concept_heat_metadata", {}) or {}),
                     "rows": [
                         {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
                          for k, v in row.items()}
@@ -1206,7 +1225,7 @@ class MonitorRuleEngine:
                     ],
                 }
                 self._latest_strategy_result_ids.add(sid)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         score_min = rule.get("score_min")
@@ -1460,7 +1479,7 @@ class MonitorRuleEngine:
                 try:
                     s = self._strategy_engine.get(sid)
                     sname = s.meta.get("name", "") or s.meta.get("id", "")
-                except Exception:  # noqa: BLE001
+                except Exception:
                     sname = ""
             if not sname:
                 rn = rule.get("name", "")

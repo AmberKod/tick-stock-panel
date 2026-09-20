@@ -30,6 +30,14 @@ from app.market_time import CN_TZ
 
 logger = logging.getLogger(__name__)
 
+# RUF006: fire-and-forget 修复任务持有引用, 防 GC 中途回收
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import asyncio
+
+_integrity_tasks: set[asyncio.Task[None]] = set()
+
 # 尾盘定版线: quote_ts 达到当日 15:00 即视为收盘后写入 (含 close_final 定版)
 CLOSE_CUTOFF = dt_time(15, 0)
 
@@ -91,7 +99,7 @@ def _quote_ts_max_ms(part_dir: Path) -> int | None:
                     .item()
                 )
             candidates.append(file_max)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("quote_ts scan skipped %s: %s", path, e)
     values = [v for v in candidates if v is not None]
     return max(values) if values else None
@@ -106,6 +114,11 @@ def _is_snapshot(day: date, quote_ts_ms: int | None) -> bool:
     except (OverflowError, OSError, ValueError):
         return False
     return ts.date() == day and ts.time() < CLOSE_CUTOFF
+
+
+def _today() -> date:
+    """当前日期 (北京时间)。抽成函数便于测试注入固定日期 (避免时间敏感用例漂移)。"""
+    return datetime.now(CN_TZ).date()
 
 
 def _candidate_days(today: date, lookback_days: int) -> list[date]:
@@ -130,7 +143,7 @@ def scan_recent_integrity(
     覆盖首次启动(无数据)与长期停用(用户自主)两类不应自动修复的场景。
     """
     data_dir = Path(data_dir)
-    today = today or datetime.now(CN_TZ).date()
+    today = today or _today()
     window_start = today - timedelta(days=lookback_days)
     issues: list[IntegrityIssue] = []
 
@@ -179,7 +192,7 @@ def within_auto_repair_window(day: date | None, *, today: date | None = None) ->
     """最早坏日是否落在自动修复窗口内 (≤ AUTO_REPAIR_MAX_LAG_DAYS 自然日)。"""
     if day is None:
         return False
-    today = today or datetime.now(CN_TZ).date()
+    today = today or _today()
     return (today - day).days <= AUTO_REPAIR_MAX_LAG_DAYS
 
 
@@ -249,7 +262,7 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
         if not capset.has(Cap.KLINE_DAILY_BATCH):
             logger.info("integrity repair skipped: no KLINE_DAILY_BATCH capability")
             return None, False
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None, False
 
     from app.services.pipeline_jobs import (
@@ -290,7 +303,7 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
                 job_store.succeed(job_id, result)
         except JobCancelledError:
             pass  # 已由 terminate() 标记失败
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("integrity repair failed: job_id=%s", job_id)
             job_store.fail(job_id, str(e))
         finally:
@@ -306,7 +319,11 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
         async def task() -> None:
             await loop.run_in_executor(None, _execute)
 
-        asyncio.create_task(task())
+        import asyncio as _asyncio
+
+        _task = _asyncio.create_task(task())
+        _integrity_tasks.add(_task)
+        _task.add_done_callback(_integrity_tasks.discard)
     except RuntimeError:
         threading.Thread(
             target=_execute, daemon=True, name=f"integrity-repair-{job_id[:8]}"
@@ -327,7 +344,7 @@ def boot_integrity_check(app_state) -> None:
         return
     try:
         issues = scan_recent_integrity(repo.store.data_dir)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("boot integrity scan failed: %s", e)
         return
     if not issues:

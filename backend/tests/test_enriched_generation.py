@@ -39,6 +39,39 @@ def test_repository_enriched_noop_does_not_bump_generation(tmp_path) -> None:
     assert repo.get_matrix_data_generation("stock") == first
 
 
+def test_repository_refresh_instruments_tolerates_additive_columns(tmp_path) -> None:
+    instruments_dir = tmp_path / "instruments"
+    instruments_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "name": ["浦发银行"],
+        "code": ["600000"],
+        "exchange": ["SH"],
+        "asset_type": ["stock"],
+        "source": ["tickflow"],
+        "market": ["CN"],
+    }).write_parquet(instruments_dir / "cn.parquet")
+    pl.DataFrame({
+        "symbol": ["00700.HK"],
+        "name": ["腾讯控股"],
+        "code": ["00700"],
+        "exchange": ["HK"],
+        "region": ["HK"],
+        "asset_type": ["stock"],
+        "source": ["akshare"],
+        "market": ["HK"],
+    }).write_parquet(instruments_dir / "hk.parquet")
+
+    repo = KlineRepository(DataStore(tmp_path))
+    repo._refresh_instruments()
+
+    assert repo.get_instruments().height == 2
+    assert set(repo.get_instruments()["symbol"].to_list()) == {"600000.SH", "00700.HK"}
+    instruments = repo.get_instruments()
+    assert instruments.filter(pl.col("symbol") == "600000.SH")["region"].item() is None
+    assert instruments.filter(pl.col("symbol") == "00700.HK")["region"].item() == "HK"
+
+
 def test_failed_multi_partition_publication_remains_fail_closed(
     tmp_path,
     monkeypatch,
@@ -167,10 +200,10 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
     tmp_path,
     monkeypatch,
 ) -> None:
-    generations = iter(["generation-a", "generation-b", "generation-b", "generation-b"])
+    current_generation = {"value": "generation-a"}
     repo = SimpleNamespace(
         store=SimpleNamespace(data_dir=tmp_path),
-        get_matrix_data_generation=lambda _asset_type: next(generations),
+        get_matrix_data_generation=lambda _asset_type: current_generation["value"],
         get_instruments_asset=lambda _asset_type: pl.DataFrame(),
     )
     engine = BacktestEngine(repo)
@@ -181,10 +214,13 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
         instrument_columns=set(),
         matrix_columns=set(),
     )
-    market = SimpleNamespace()
+    market = SimpleNamespace(source_generation=None)
 
     def load_matrix(*_args, source_generation=None, **_kwargs):
         calls.append(source_generation)
+        if len(calls) == 1:
+            current_generation["value"] = "generation-b"
+        market.source_generation = source_generation
         return market
 
     monkeypatch.setattr("app.backtest.engine.load_market_data_matrix_from_parquet", load_matrix)
@@ -198,6 +234,7 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
 
     assert result is market
     assert calls == ["generation-a", "generation-b"]
+    assert result.source_generation == "generation-b"
 
 
 def test_live_flush_write_recovers_stale_marker_from_dead_process(

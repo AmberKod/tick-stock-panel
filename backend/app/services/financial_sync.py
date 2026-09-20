@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,12 +71,12 @@ def _fetch_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
         try:
             provider = custom_sources.get_provider(preferences.get_financial_provider())
             df = provider.get_financials(table, symbols, latest_only=latest_only)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("sync_%s custom provider failed: %s", table, e)
             return pl.DataFrame()
         if df.is_empty() or "symbol" not in df.columns:
@@ -265,7 +267,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
     }
-    for name, path in views.items():
+    for name, _path in views.items():
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
         if not out.exists():
             continue
@@ -273,8 +275,27 @@ def _refresh_financials_views(data_dir: Path) -> None:
         logger.debug("financial parquet ready: %s (%d rows)", name, out.stat().st_size)
 
 
-def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
+def get_financial_df(data_dir: Path, table: str, *, market: str | None = None) -> pl.DataFrame:
     """读取本地财务 Parquet。"""
+    if table not in FINANCIAL_TABLES:
+        raise ValueError("unsupported financial table")
+    if market is not None and market.upper() == "HK":
+        from app.data_providers.hk_financial_provider import normalize_hk_financial_frame
+
+        frames = []
+        for filename in ("hk.parquet", "part.parquet"):
+            candidate = data_dir / "financials" / table / filename
+            if not candidate.exists():
+                continue
+            try:
+                frame = normalize_hk_financial_frame(pl.read_parquet(candidate))
+            except Exception as exc:
+                logger.warning("读取港股历史财务 %s/%s 失败: %s", table, filename, type(exc).__name__)
+                continue
+            if not frame.is_empty():
+                frames.append(frame)
+        merged, _ = _merge_hk_report_history(*frames)
+        return merged
     path = data_dir / "financials" / table / "part.parquet"
     if not path.exists():
         return pl.DataFrame()
@@ -283,6 +304,223 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
     except Exception as e:
         logger.warning("读取 financials/%s 失败: %s", table, e)
         return pl.DataFrame()
+
+
+_HK_FINANCIAL_WRITE_LOCK = threading.Lock()
+_HK_VERSION_KEY = ("symbol", "period_end", "announce_date", "revision_id", "source")
+
+
+def _hk_version_content(row: dict[str, Any]) -> str:
+    return json.dumps({key: value for key, value in row.items() if key != "observed_at"},
+                      default=str, sort_keys=True, ensure_ascii=False)
+
+
+def _merge_hk_report_history(*frames: pl.DataFrame) -> tuple[pl.DataFrame, list[dict]]:
+    """Retain every disclosure version; keep the first content on identity conflict."""
+    from app.data_providers.hk_financial_provider import normalize_hk_financial_frame
+
+    versions: dict[tuple, dict] = {}
+    conflicts: list[dict] = []
+    for frame in frames:
+        normalized = normalize_hk_financial_frame(frame)
+        for row in normalized.iter_rows(named=True):
+            key = tuple(row.get(name) for name in _HK_VERSION_KEY)
+            previous = versions.get(key)
+            if previous is not None:
+                if _hk_version_content(previous) != _hk_version_content(row):
+                    conflicts.append({"symbol": row["symbol"], "period_end": str(row["period_end"]),
+                                      "announce_date": str(row["announce_date"]), "revision_id": row["revision_id"],
+                                      "source": row["source"], "reason_code": "financial_version_conflict"})
+                continue
+            versions[key] = row
+    if not versions:
+        return pl.DataFrame(), conflicts
+    return pl.DataFrame(list(versions.values()), infer_schema_length=None).sort(list(_HK_VERSION_KEY)), conflicts
+
+
+def _get_hk_primary_provider():
+    """Use an explicitly configured financial provider, never the A-share SDK."""
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    name = preferences.get_financial_provider()
+    if name != "tickflow" and custom_sources.provider_has_dataset(name, "financial"):
+        return custom_sources.get_provider(name)
+    return None
+
+
+def _get_hk_fallback_provider():
+    from app.data_providers.registry import get_default_provider
+
+    return get_default_provider("HK", dataset="financial")
+
+
+def _hk_symbols(data_dir: Path) -> list[str]:
+    path = data_dir / "instruments" / "hk_instruments.parquet"
+    if not path.exists():
+        return []
+    try:
+        frame = pl.read_parquet(path, columns=["symbol"])
+        return sorted({str(value) for value in frame["symbol"].drop_nulls() if re.fullmatch(r"[0-9]{5}\.HK", str(value))})
+    except Exception as exc:
+        logger.warning("读取港股财务股票池失败: %s", type(exc).__name__)
+        return []
+
+
+def get_hk_financial_status(data_dir: Path) -> dict:
+    """Describe actual stored field coverage without starting a network request."""
+    from app.data_providers.hk_financial_provider import HK_FINANCIAL_FIELDS, HK_RATIO_FIELDS
+
+    frame = get_financial_df(data_dir, "metrics", market="HK")
+    pool = set(_hk_symbols(data_dir))
+    covered = set(frame["symbol"].to_list()) if not frame.is_empty() else set()
+    denominator = pool or covered
+    fields = {}
+    for field in HK_FINANCIAL_FIELDS:
+        valid = frame.filter(pl.col(field).is_finite()) if field in frame.columns else pl.DataFrame()
+        symbols = set(valid["symbol"].to_list()) if not valid.is_empty() else set()
+        fields[field] = {"available_symbols": len(symbols & denominator), "missing_symbols": len(denominator - symbols),
+                         "first_announce_date": str(valid["announce_date"].min()) if symbols else None,
+                         "last_announce_date": str(valid["announce_date"].max()) if symbols else None}
+    usable = any(fields[field]["available_symbols"] for field in HK_RATIO_FIELDS)
+    complete = bool(denominator) and all(fields[field]["missing_symbols"] == 0 for field in HK_FINANCIAL_FIELDS)
+    return {
+        "status": "available" if complete else "partial" if usable else "unavailable",
+        "reason": None if complete else "已核对公告的字段可用;缺少历史每股基准或原始财务依据的字段保持缺失" if usable else "尚无具有公告日期、版本及字段依据的港股历史财务数据",
+        "sources": sorted(frame["source"].unique().to_list()) if not frame.is_empty() else [],
+        "rows": frame.height, "symbols": len(covered),
+        "first_period_end": str(frame["period_end"].min()) if not frame.is_empty() else None,
+        "last_period_end": str(frame["period_end"].max()) if not frame.is_empty() else None,
+        "first_announce_date": str(frame["announce_date"].min()) if not frame.is_empty() else None,
+        "last_announce_date": str(frame["announce_date"].max()) if not frame.is_empty() else None,
+        "fields": fields,
+    }
+
+
+def sync_hk_financial_history(
+    data_dir: Path, capset=None, *, symbols: list[str] | None = None,
+    on_progress=None, job_id: str | None = None,
+) -> dict:
+    """Fetch missing HK history and publish it separately from all CN tables."""
+    from app.data_providers.hk_financial_provider import (
+        HK_FINANCIAL_FIELDS,
+        HK_RATIO_FIELDS,
+        normalize_hk_financial_frame,
+    )
+    from app.services.hk_data_adapter import _marker_bytes, _publish_hk_files
+
+    selected = list(dict.fromkeys(_hk_symbols(data_dir) if symbols is None else symbols))
+    if any(not isinstance(symbol, str) or re.fullmatch(r"[0-9]{5}\.HK", symbol) is None for symbol in selected):
+        raise ValueError("港股历史财务只接受五位代码.HK")
+    try:
+        primary = _get_hk_primary_provider()
+    except Exception as exc:
+        logger.warning("港股主财务源不可用: %s", type(exc).__name__)
+        primary = None
+    fallback = _get_hk_fallback_provider()
+    staged: list[pl.DataFrame] = []
+    items: list[dict] = []
+    original = get_financial_df(data_dir, "metrics", market="HK")
+    for index, symbol in enumerate(selected):
+        if _hk_financial_job_cancelled(job_id):
+            items.extend({"symbol": value, "status": "skipped", "reason_code": "cancelled", "reason": "任务已取消"} for value in selected[index:])
+            break
+        frames = []
+        attempted = []
+        errors = []
+        fallback_rows = 0
+        for provider in (primary, fallback):
+            if provider is None:
+                continue
+            attempted.append(str(getattr(provider, "name", "financial")))
+            try:
+                frame = normalize_hk_financial_frame(provider.get_financials("metrics", [symbol], latest_only=False))
+                if not frame.is_empty():
+                    frame = frame.filter(pl.col("symbol") == symbol)
+                    if not frame.is_empty():
+                        frames.append(frame)
+                        if provider is fallback:
+                            fallback_rows += frame.height
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        local = original.filter(pl.col("symbol") == symbol) if not original.is_empty() else pl.DataFrame()
+        merged, conflicts = _merge_hk_report_history(local, *frames)
+        available = sorted(field for field in HK_FINANCIAL_FIELDS if field in merged.columns and merged[field].is_finite().any())
+        incoming = bool(frames)
+        status = "ok" if incoming and not conflicts and all(field in available for field in HK_RATIO_FIELDS) else "partial" if not merged.is_empty() else "failed"
+        reason = "已同步经公告核对的历史比率" if status == "ok" else "沿用已公开本地历史,来源本次未完整返回" if not incoming and not merged.is_empty() else "部分字段缺少公告原文依据" if not merged.is_empty() else "来源未返回可核对的港股历史报告"
+        if conflicts:
+            reason = "同一公告版本内容冲突,已保留旧版本"
+        if errors:
+            reason += ";部分来源请求失败"
+        item = {"symbol": symbol, "status": status, "reason": reason,
+                "reason_code": "financial_version_conflict" if conflicts else "financial_partial" if status != "ok" else None,
+                "source": ",".join(sorted(merged["source"].unique().to_list())) if not merged.is_empty() else None,
+                "attempted_sources": attempted, "fallback_used": fallback_rows > 0 or (not incoming and not local.is_empty()),
+                "fields_available": available, "fields_missing": sorted(set(HK_FINANCIAL_FIELDS) - set(available)),
+                "actual_start": str(merged["period_end"].min()) if not merged.is_empty() else None,
+                "actual_end": str(merged["period_end"].max()) if not merged.is_empty() else None,
+                "observed_at": datetime.now(UTC).isoformat()}
+        item["fallback_used"] = bool(item["fallback_used"])
+        if not merged.is_empty():
+            staged.append(merged)
+        items.append(item)
+        if on_progress is not None:
+            percent = int((index + 1) * 100 / max(1, len(selected)))
+            on_progress("financial_sync", percent, f"港股历史财务同步 {index + 1}/{len(selected)}", percent, True)
+    if _hk_financial_job_cancelled(job_id):
+        for item in items:
+            item.update(status="skipped", reason="任务已取消,未发布财务数据", reason_code="cancelled")
+        staged = []
+    if staged:
+        with _HK_FINANCIAL_WRITE_LOCK:
+            # The shared publisher compares this marker under the cross-process
+            # claim lock, so a competing update cannot be lost after this read.
+            expected_marker = _marker_bytes(data_dir)
+            current = get_financial_df(data_dir, "metrics", market="HK")
+            merged, conflicts = _merge_hk_report_history(current, *staged)
+            conflict_symbols = {item["symbol"] for item in conflicts}
+            current_content = {_hk_version_content(row) for row in current.iter_rows(named=True)}
+            changed_symbols = {row["symbol"] for row in merged.iter_rows(named=True) if _hk_version_content(row) not in current_content}
+            if _hk_financial_job_cancelled(job_id):
+                for item in items:
+                    item.update(status="skipped", reason="任务已取消,未发布财务数据", reason_code="cancelled")
+            elif changed_symbols:
+                def before_publish() -> None:
+                    if _hk_financial_job_cancelled(job_id):
+                        raise RuntimeError("港股财务同步已取消")
+
+                try:
+                    _publish_hk_files(
+                        data_dir, [(merged, data_dir / "financials" / "metrics" / "hk.parquet")],
+                        expected_marker=expected_marker, before_publish=before_publish,
+                    )
+                except RuntimeError:
+                    if not _hk_financial_job_cancelled(job_id):
+                        raise
+                    for item in items:
+                        item.update(status="skipped", reason="任务已取消,未发布财务数据", reason_code="cancelled")
+            for item in items:
+                if item["symbol"] in conflict_symbols:
+                    item.update(status="partial", reason="同步期间公告版本发生冲突,已保留旧版本", reason_code="financial_version_conflict")
+                elif item["status"] == "ok" and item["symbol"] not in changed_symbols:
+                    item.update(status="unchanged", reason="已核对历史公告,内容无变化")
+    succeeded = sum(item["status"] in {"ok", "unchanged"} for item in items)
+    skipped = sum(item["status"] == "skipped" for item in items)
+    unchanged = sum(item["status"] == "unchanged" for item in items)
+    failed = len(items) - succeeded - skipped
+    status = "empty" if not selected else "unchanged" if unchanged == len(selected) else "completed" if succeeded == len(selected) else "completed_with_errors" if succeeded or any(item["status"] == "partial" for item in items) else "failed"
+    return {"operation": "financial_sync", "status": status, "requested": len(selected), "succeeded": succeeded,
+            "failed": failed, "skipped": skipped, "unchanged": unchanged, "items": items,
+            "reason": None if succeeded else "未取得完整的新历史财务数据;已保留已有有效版本"}
+
+
+def _hk_financial_job_cancelled(job_id: str | None) -> bool:
+    if job_id is None:
+        return False
+    from app.services.pipeline_jobs import is_cancelled
+
+    return is_cancelled(job_id)
 
 
 # ================================================================
@@ -329,14 +567,14 @@ class FinancialScheduler:
                     continue
                 parquet = data_dir / "financials" / table / "part.parquet"
                 if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
                     restored[table] = mtime
                     preferences.set_financial_sync_time(table, mtime)
                     logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
             self._last_sync = restored
             if self._last_sync:
                 logger.info("FinancialScheduler restored last_sync: %s", list(self._last_sync.keys()))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("restore financial_sync_times failed: %s", e)
 
         if not auto_schedule:
@@ -354,12 +592,12 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         self._last_sync[table] = ts
         try:
             from app.services import preferences
             preferences.set_financial_sync_time(table, ts)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("persist financial_sync_time(%s) failed: %s", e)
 
     def update_capabilities(self, capset: CapabilitySet) -> None:
@@ -489,7 +727,7 @@ class FinancialScheduler:
         def _bg() -> None:
             try:
                 self._run_body(table)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception("background financial sync failed: %s", e)
             finally:
                 with self._lock:

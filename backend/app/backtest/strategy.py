@@ -1,6 +1,6 @@
 """策略回测服务 — 复用 StrategyDef 体系做全周期回测。
 
-核心优化: 向量化 filter_fn，不逐日调用 StrategyEngine.run()。
+核心优化: 向量化 filter_fn,不逐日调用 StrategyEngine.run()。
 """
 from __future__ import annotations
 
@@ -19,8 +19,14 @@ from typing import Literal
 import numpy as np
 import polars as pl
 
-from app.backtest.engine import BacktestEngine, MatcherConfig, SimResult, SimulationOptions
-from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
+from app.backtest.engine import (
+    BacktestEngine,
+    MatcherConfig,
+    SimResult,
+    SimulationOptions,
+    validate_backtest_market,
+)
+from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES, HK_FINANCIAL_NAMES
 from app.backtest.matrix import (
     MarketDataMatrix,
     MatrixCacheProfile,
@@ -44,7 +50,15 @@ from app.indicators.pipeline import (
     get_signal_dependencies,
 )
 from app.markets.cn import CN_PROFILE
-from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
+from app.markets.registry import get_profile
+from app.strategy.engine import (
+    StrategyDataContext,
+    StrategyDef,
+    StrategyEngine,
+    basic_filter_dependencies,
+    filter_dependencies,
+    market_basic_filter,
+)
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
     effective_scoring,
@@ -134,12 +148,33 @@ class StrategyDependencyResolver:
     ) -> ResolvedFeaturePlan:
         overrides = overrides or {}
         basic_filter = _basic_filter_for_asset(basic_filter, asset_type)
+        StrategyEngine._validate_historical_inputs(
+            strategy,
+            StrategyDataContext(asset_type=asset_type, timeframe="1d", as_of=date.min, is_historical=True),
+            basic_filter,
+            effective_scoring(strategy.meta.get("scoring"), overrides),
+            overrides,
+            params,
+        )
+        historical_fields = set(strategy.required_features)
+        historical_fields.update(_filter_dependencies(strategy, params)[0])
+        if strategy.meta.get("order_by"):
+            historical_fields.add(strategy.meta["order_by"])
+        if strategy.matrix_strategy is not None:
+            historical_fields.update(strategy.matrix_strategy.required_fields())
+            required_for_params = getattr(strategy.matrix_strategy, "required_fields_for_params", None)
+            if callable(required_for_params):
+                historical_fields.update(required_for_params(params))
+        unavailable = historical_fields & ({"industry_heat", "concept_heat"} if asset_type == "hk" else {"pe_ttm", "pb", "industry_heat", "concept_heat"})
+        if unavailable:
+            raise ValueError("历史回测不可计算,缺少目标日期可追溯的数据: " + ", ".join(sorted(unavailable)))
         if strategy.execution_backend == "matrix_native":
             return self._resolve_matrix_native(
                 strategy,
                 params=params,
                 basic_filter=basic_filter,
                 overrides=overrides,
+                asset_type=asset_type,
             )
 
         required_features = set(strategy.required_features)
@@ -215,7 +250,7 @@ class StrategyDependencyResolver:
             full_feature_fallback=full_fallback,
             execution_backend=strategy.execution_backend,
             fundamental_columns=frozenset(
-                required_features & FUNDAMENTAL_FACTOR_NAMES
+                required_features & (HK_FINANCIAL_NAMES if asset_type == "hk" else FUNDAMENTAL_FACTOR_NAMES)
             ),
         )
 
@@ -226,6 +261,7 @@ class StrategyDependencyResolver:
         params: dict,
         basic_filter: dict,
         overrides: dict,
+        asset_type: str = "stock",
     ) -> ResolvedFeaturePlan:
         if strategy.matrix_strategy is None:
             raise ValueError(
@@ -279,7 +315,7 @@ class StrategyDependencyResolver:
             full_feature_fallback=False,
             execution_backend="matrix_native",
             fundamental_columns=frozenset(
-                required_features & FUNDAMENTAL_FACTOR_NAMES
+                required_features & (HK_FINANCIAL_NAMES if asset_type == "hk" else FUNDAMENTAL_FACTOR_NAMES)
             ),
         )
 
@@ -327,7 +363,13 @@ def build_matrix_cache_profile(
         plans.append(resolver.resolve(
             strategy,
             params=params,
-            basic_filter={**dict(strategy.basic_filter or {}), **common_filter},
+            basic_filter={
+                **market_basic_filter(
+                    strategy.basic_filter, asset_type,
+                    explicit_keys=getattr(strategy, "basic_filter_explicit_keys", frozenset()),
+                ),
+                **(common_filter if asset_type not in {"hk", "us"} else {"enabled": True, "amount_min": 0.0}),
+            },
             entry_signals=strategy.entry_signals,
             exit_signals=strategy.exit_signals,
             overrides={},
@@ -443,35 +485,11 @@ def _normalize_signal_name(signal: str) -> str:
 
 
 def _filter_dependencies(strategy: StrategyDef, params: dict) -> tuple[set[str], bool]:
-    if strategy.filter_history_fn:
-        return set(strategy.required_features), bool(strategy.required_features)
-    if not strategy.filter_fn:
-        return set(), True
-    try:
-        expr = strategy.filter_fn(pl.DataFrame(), params)
-        if expr is None:
-            return set(), True
-        return set(expr.meta.root_names()), True
-    except Exception as exc:
-        logger.warning("strategy filter dependency resolution failed: %s", exc)
-        return set(strategy.required_features), bool(strategy.required_features)
+    return filter_dependencies(strategy, params)
 
 
 def _basic_filter_dependencies(config: dict) -> set[str]:
-    if not config or not config.get("enabled", True):
-        return set()
-    dependencies = {"symbol", "close"}
-    if any(config.get(key) is not None for key in ("amount_min", "amount_max")):
-        dependencies.add("amount")
-    if any(config.get(key) is not None for key in ("turnover_min", "turnover_max")):
-        dependencies.add("turnover_rate")
-    if any(config.get(key) is not None for key in ("market_cap_min", "market_cap_max")):
-        dependencies.add("total_shares")
-    if any(config.get(key) is not None for key in ("float_cap_min", "float_cap_max")):
-        dependencies.add("float_shares")
-    if config.get("exclude_st"):
-        dependencies.add("name")
-    return dependencies
+    return basic_filter_dependencies(config)
 
 
 _SHARE_CAP_FILTER_KEYS = (
@@ -491,7 +509,7 @@ def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
     矩阵侧 _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN
     界, 二者对缺失股本列本就降级为 no-op。
     """
-    if asset_type == "stock" or not basic_filter:
+    if asset_type in {"stock", "hk", "us"} or not basic_filter:
         return basic_filter
     sanitized = dict(basic_filter)
     for key in _SHARE_CAP_FILTER_KEYS:
@@ -528,7 +546,7 @@ class StrategyBacktestConfig:
     matching: Literal["close_t", "open_t+1"] = "open_t+1"
     entry_fill: Literal["close_t", "open_t+1"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
-    fees_pct: float = 0.0002
+    fees_pct: float | None = None
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
@@ -544,8 +562,13 @@ class StrategyBacktestConfig:
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
     # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
     regime_filter: dict | None = None
+    buy_stamp_tax_pct: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.fees_pct is None:
+            self.fees_pct = 0.0 if self.asset_type in {"hk", "us"} else 0.0002
+        if self.symbols is not None:
+            self.symbols = list(dict.fromkeys(str(symbol).strip().upper() for symbol in self.symbols if str(symbol).strip()))
         if self.entry_fill is None:
             self.entry_fill = self.matching
         if self.exit_fill is None:
@@ -565,6 +588,7 @@ class StrategyBacktestResult:
     strategy_info: dict = field(default_factory=dict)
     elapsed_ms: float = 0.0
     error: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -644,6 +668,7 @@ class PreparedMatrixBacktest:
     reference_price: np.ndarray | None
     prepare_timing_ms: dict[str, float]
     compute_cache: MatrixComputeCache
+    data_generation: str | None = None
 
 
 class StrategyBacktestService:
@@ -716,7 +741,7 @@ class StrategyBacktestService:
                     loaded = loader(child.strategy_id)
                     if isinstance(loaded, dict):
                         child_override = dict(loaded)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
             child_params = self.strategy_engine.resolve_params(child_def, overrides=child_override)
             child_plan = resolver.resolve(
@@ -756,6 +781,9 @@ class StrategyBacktestService:
         min_confirm: int,
         max_hold: int,
         timing_ms: dict[str, float],
+        *,
+        entry_time_mask: np.ndarray | None = None,
+        warnings: list[str] | None = None,
     ):
         """逐子策略计算 SignalMatrix, 再合并为单个 SignalMatrix(回测合并)。
 
@@ -769,16 +797,22 @@ class StrategyBacktestService:
         t_signals = time.perf_counter()
         sigs = []
         for child_def, child_params, child_pipeline_cfg in resolved_children:
+            diagnostics: dict = {}
             try:
                 child_sig = MatrixStrategyPipeline().run(
                     child_def.matrix_strategy,
                     market_data,
                     child_params,
-                    child_pipeline_cfg,
+                    replace(child_pipeline_cfg, entry_time_mask=entry_time_mask, diagnostics=diagnostics),
                 )
             except (TypeError, ValueError) as e:
                 raise ValueError(f"子策略 {child_def.meta.get('id')} 信号计算失败: {e}") from e
             sigs.append(child_sig)
+            if warnings is not None:
+                warnings.extend(
+                    f"{child_def.meta.get('id')}: {warning}"
+                    for warning in self._matrix_input_warnings(market_data, diagnostics)
+                )
         timing_ms["strategy_signals"] = round((time.perf_counter() - t_signals) * 1000, 1)
 
         children_weights = getattr(self, "_composite_children_weights", None) or [
@@ -828,7 +862,7 @@ class StrategyBacktestService:
         )
 
         overrides = first.overrides or {}
-        basic_filter = self._effective_basic_filter(strategy, overrides)
+        basic_filter = self._effective_basic_filter(strategy, overrides, first.asset_type)
         entry_signals = self._effective_signals(overrides, "entry_signals", strategy.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", strategy.exit_signals)
         resolver = StrategyDependencyResolver()
@@ -869,6 +903,7 @@ class StrategyBacktestService:
 
         timing_ms: dict[str, float] = {}
         prepare_started = time.perf_counter()
+        generation = self.engine.data_generation(first.asset_type) if first.asset_type == "hk" else None
         if market_data_override is None:
             started = time.perf_counter()
             market_data = self.engine.load_market_data_matrix_for_backtest(
@@ -880,9 +915,12 @@ class StrategyBacktestService:
                 cache_profile=cache_profile,
                 coverage_start=coverage_start,
                 coverage_end=coverage_end,
+                expected_generation=generation,
             )
             direct_load_ms = round((time.perf_counter() - started) * 1000, 1)
         else:
+            if first.asset_type == "hk" and (market_data_override.source_generation is None or market_data_override.source_generation != generation):
+                raise ValueError("共享港股矩阵的来源版本缺失或已过期,请重新加载")
             labels = market_data_override.timestamp_labels
             visible_ids = np.flatnonzero(
                 np.fromiter(
@@ -953,6 +991,8 @@ class StrategyBacktestService:
         )
         timing_ms["total"] = round((time.perf_counter() - prepare_started) * 1000, 1)
         compute_cache = MatrixComputeCache(max_bytes=matrix_cache_max_bytes)
+        if first.asset_type == "hk":
+            self.engine.assert_data_generation(first.asset_type, generation)
         return PreparedMatrixBacktest(
             signature=signature,
             market_data=market_data,
@@ -967,6 +1007,7 @@ class StrategyBacktestService:
             reference_price=reference_price,
             prepare_timing_ms=timing_ms,
             compute_cache=compute_cache,
+            data_generation=generation,
         )
 
     def run(
@@ -980,17 +1021,29 @@ class StrategyBacktestService:
         t0 = time.perf_counter()
         run_id = uuid.uuid4().hex[:10]
         result_policy = result_policy or BacktestResultPolicy()
+        data_generation: str | None = None
+        warnings: list[str] = []
 
         def _err(msg: str) -> StrategyBacktestResult:
             return StrategyBacktestResult(
                 run_id=run_id,
-                config=self._config_to_dict(config),
+                config=self._config_to_dict(config, data_generation=data_generation),
                 error=msg,
                 elapsed_ms=(time.perf_counter() - t0) * 1000,
+                warnings=list(warnings),
             )
 
         # 获取策略定义
         try:
+            validate_backtest_market(
+                config.asset_type, config.symbols, minute_fill=config.minute_fill, exit_fill=config.exit_fill,
+            )
+            if config.start > config.end:
+                return _err("回测起始日期不能晚于结束日期")
+            if config.asset_type in {"hk", "us"} and config.regime_filter:
+                return _err("港美股尚无可追溯的市场环境数据,无法启用市场环境过滤")
+            generation_loader = getattr(self.engine, "data_generation", None)
+            data_generation = generation_loader(config.asset_type) if callable(generation_loader) else None
             s = self.strategy_engine.get(config.strategy_id)
             StrategyEngine.validate_context(
                 s,
@@ -1005,7 +1058,7 @@ class StrategyBacktestService:
 
         params = self._normalize_params(config.params or {}, s)
         overrides = config.overrides or {}
-        basic_filter = self._effective_basic_filter(s, overrides)
+        basic_filter = self._effective_basic_filter(s, overrides, config.asset_type)
         entry_signals = self._effective_signals(overrides, "entry_signals", s.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", s.exit_signals)
         if config.exit_fill == "signal_next_minute":
@@ -1046,6 +1099,10 @@ class StrategyBacktestService:
         )
 
         try:
+            if self.strategy_engine.concept_config_fingerprint(config.strategy_id, params, overrides):
+                from app.strategy.concept_heat import HISTORICAL_REASON
+
+                raise ValueError(HISTORICAL_REASON)
             if s.execution_backend == "composite":
                 # composite 回测: 子策略必须全为 matrix_native(否则 fail-closed),
                 # feature_plan 取所有子策略计划的并集(_merge_resolved_feature_plans)。
@@ -1076,12 +1133,12 @@ class StrategyBacktestService:
         matrix_data_cache_status = "none"
         matrix_data_cache_timing_ms: Mapping[str, float] = {}
 
-        # 加载 warmup + 正式区间。矩阵策略的 warmup 由协议解析，不再依赖策略名称。
+        # 加载 warmup + 正式区间。矩阵策略的 warmup 由协议解析,不再依赖策略名称。
         warmup_days = max(120, int(max(feature_plan.warmup_bars, 1) * 1.6))
         load_start = config.start - timedelta(days=warmup_days)
 
         # 全量模式: entries 只在正式区间触发, exits 需要 end 之后的尾部数据继续执行策略卖点。
-        # 若策略有 max_hold_days, 用它决定尾部窗口；否则 holding_days 只作为兜底观察上限。
+        # 若策略有 max_hold_days, 用它决定尾部窗口;否则 holding_days 只作为兜底观察上限。
         full_horizon_days = int(max_hold_days or config.holding_days or 5)
         full_horizon_days = max(full_horizon_days, 1)
         load_end = config.end
@@ -1098,6 +1155,12 @@ class StrategyBacktestService:
                 return _err("共享基础矩阵只能用于 matrix_native 策略")
             if prepared.signature != self._matrix_prepare_signature(config):
                 return _err("共享基础矩阵与当前回测配置不匹配")
+            if config.asset_type == "hk" and (
+                prepared.data_generation is None
+                or prepared.data_generation != data_generation
+                or prepared.market_data.source_generation != prepared.data_generation
+            ):
+                return _err("共享港股矩阵的数据版本已过期,请重新加载")
             load_start = prepared.load_start
             load_end = prepared.load_end
             sim_end = prepared.sim_end
@@ -1197,6 +1260,20 @@ class StrategyBacktestService:
                 return _err("正式回测区间内无数据")
             feature_width = int(panel.width)
 
+        if config.asset_type == "hk" and feature_plan.fundamental_columns:
+            from app.backtest.fundamentals import require_hk_financial_coverage
+
+            if panel is not None:
+                financial_frame = panel.filter(self._date_range_mask(panel, config.start, config.end))
+            else:
+                financial_market = prepared.market_data if prepared is not None else market_data
+                financial_times = self._matrix_date_range_mask(financial_market.timestamp_labels, config.start, config.end)
+                financial_frame = pl.DataFrame({name: financial_market.fields[name][financial_times].reshape(-1) for name in feature_plan.fundamental_columns})
+            try:
+                require_hk_financial_coverage(financial_frame, feature_plan.fundamental_columns, context=f"{config.start} 至 {config.end}")
+            except ValueError as exc:
+                return _err(str(exc))
+
         matcher_config = MatcherConfig(
             matching=config.matching,
             entry_fill=config.entry_fill,
@@ -1204,6 +1281,7 @@ class StrategyBacktestService:
             fees_pct=config.fees_pct,
             commission_pct=config.commission_pct,
             stamp_tax_pct=config.stamp_tax_pct,
+            buy_stamp_tax_pct=config.buy_stamp_tax_pct,
             slippage_bps=config.slippage_bps,
             stop_loss_pct=stop_loss,
             take_profit_pct=take_profit,
@@ -1218,6 +1296,7 @@ class StrategyBacktestService:
             initial_capital=config.initial_capital,
             position_sizing=config.position_sizing,
             minute_fill=config.minute_fill,
+            asset_type=config.asset_type,
         )
         t_signal = time.perf_counter()
         selection_stats: dict[str, int | bool]
@@ -1281,6 +1360,8 @@ class StrategyBacktestService:
                     min_confirm,
                     composite_max_hold,
                     timing_ms,
+                    entry_time_mask=entry_time_mask,
+                    warnings=warnings,
                 )
             except ValueError as e:
                 return _err(str(e))
@@ -1374,6 +1455,7 @@ class StrategyBacktestService:
                 )
 
             scoring = effective_scoring(s.meta.get("scoring"), overrides)
+            diagnostics: dict = {}
             try:
                 pipeline_config = MatrixPipelineConfig(
                     basic_filter=basic_filter,
@@ -1382,6 +1464,8 @@ class StrategyBacktestService:
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
                     protect_strategy_cache=prepared is not None,
+                    entry_time_mask=entry_time_mask,
+                    diagnostics=diagnostics,
                 )
                 if prepared is None:
                     signal_matrix = MatrixStrategyPipeline().run(
@@ -1403,6 +1487,7 @@ class StrategyBacktestService:
             except (TypeError, ValueError) as e:
                 return _err(f"矩阵策略信号计算失败: {e}")
 
+            warnings.extend(self._matrix_input_warnings(market_data, diagnostics))
             sim_market_data = slice_market_data_matrix(market_data, start_id, stop_id)
             sim_signal_matrix = slice_signal_matrix(signal_matrix, start_id, stop_id)
             sim_signal_matrix = apply_time_masks(
@@ -1437,20 +1522,30 @@ class StrategyBacktestService:
         else:
             if panel is None or formal_range is None:
                 return _err("非矩阵策略不能使用共享基础矩阵")
-            # basic_filter 只影响买入候选，不能删除持仓估值和卖出所需行情。
+            # basic_filter 只影响买入候选,不能删除持仓估值和卖出所需行情。
             basic_mask = pl.Series("_basic", [True] * len(panel), dtype=pl.Boolean)
             if basic_filter and basic_filter.get("enabled", True):
-                expr = StrategyEngine._basic_filter_expr(panel, basic_filter)
-                if expr is not None:
-                    try:
+                try:
+                    expr = StrategyEngine._basic_filter_expr(panel, basic_filter)
+                    if expr is not None:
                         basic_mask = panel.select(expr.alias("_basic"))["_basic"].fill_null(False).cast(pl.Boolean)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("basic_filter mask failed: %s", e)
-                        return _err(f"基础过滤计算失败: {e}")
+                    warnings.extend(self._basic_filter_warnings(panel.filter(formal_range), basic_filter))
+                except Exception as e:
+                    logger.warning("basic_filter mask failed: %s", e)
+                    return _err(f"基础过滤计算失败: {e}")
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
             candidate_mask = basic_mask & candidate_filter_mask
-            panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
+            try:
+                panel = self._apply_score(
+                    panel, s, overrides,
+                    universe_mask=candidate_mask & formal_range,
+                    warnings=warnings,
+                )
+            except ValueError as exc:
+                return _err(str(exc))
+            # Keep every price and exit row. Only unscorable entries are removed.
+            candidate_mask = candidate_mask & panel["score"].is_finite().fill_null(False)
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
             entry_mask = entry_mask & formal_range
@@ -1544,6 +1639,7 @@ class StrategyBacktestService:
                 config=self._config_to_dict(config),
                 error="cancelled",
                 elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+                warnings=list(warnings),
             )
 
         if result.stats.get("error"):
@@ -1567,9 +1663,20 @@ class StrategyBacktestService:
             result.stats["matrix_compute_cache"] = prepared.compute_cache.snapshot()
 
         benchmark_curve = (
-            self._build_benchmark_curve(config.start, config.end)
+            self._build_benchmark_curve(config.start, config.end, asset_type=config.asset_type)
             if result_policy.include_benchmark
             else []
+        )
+
+        benchmark_return = (
+            benchmark_curve[-1]["close"] / benchmark_curve[0]["close"] - 1
+            if len(benchmark_curve) >= 2 else None
+        )
+        result.stats["benchmark_return"] = round(benchmark_return, 6) if benchmark_return is not None else None
+        own_return = result.stats.get("total_return")
+        result.stats["excess"] = (
+            round(float(own_return) - benchmark_return, 6)
+            if benchmark_return is not None and own_return is not None else None
         )
 
         # 构建策略信息
@@ -1605,13 +1712,29 @@ class StrategyBacktestService:
             ),
         } if result_policy.include_strategy_info else {}
 
+        execution_inputs: dict = {}
+        if config.asset_type == "hk":
+            try:
+                execution_inputs = self._hk_execution_inputs(
+                    config, list(market_matrix.symbols), feature_plan.fundamental_columns,
+                    sim_end=sim_end, lot_snapshot_dates=result.stats.get("lot_size_snapshot_dates", []),
+                )
+                self.engine.assert_data_generation(config.asset_type, data_generation)
+            except (ValueError, RuntimeError, OSError) as exc:
+                return _err(f"港股回测数据版本校验失败: {exc}")
+
         selected_stats = result_policy.select_stats(result.stats)
 
         elapsed = (time.perf_counter() - t0) * 1000
 
         return StrategyBacktestResult(
             run_id=run_id,
-            config=self._config_to_dict(config),
+            config={
+                **self._config_to_dict(config, data_generation=data_generation, benchmark_available=bool(benchmark_curve), execution_inputs=execution_inputs),
+                "params": params,
+                "effective_basic_filter": basic_filter,
+                "lot_sizes": result.stats.get("lot_sizes", {}),
+            },
             stats=selected_stats,
             equity_curve=result.equity_curve if result_policy.include_curves else [],
             drawdown_curve=result.drawdown_curve if result_policy.include_curves else [],
@@ -1628,6 +1751,7 @@ class StrategyBacktestService:
             ),
             strategy_info=strategy_info,
             elapsed_ms=round(elapsed, 1),
+            warnings=warnings,
         )
 
     # ── 全量模拟 (选股能力统计, 不建组合不算净值) ──
@@ -1884,7 +2008,7 @@ class StrategyBacktestService:
         s: StrategyDef,
         entry_signals: list[str],
     ) -> pl.Series:
-        """向量化生成买入掩码：候选层 AND 买点层；无买点时只用策略候选层。"""
+        """向量化生成买入掩码:候选层 AND 买点层;无买点时只用策略候选层。"""
         signal_mask = self._build_signal_mask(panel, entry_signals, "_entry_signal")
         if entry_signals:
             return candidate_mask & signal_mask
@@ -1905,10 +2029,10 @@ class StrategyBacktestService:
 
     @staticmethod
     def _build_signal_mask(panel: pl.DataFrame, signals: list[str], name: str) -> pl.Series:
-        """向量化合并信号列，多个信号 OR。支持内置 signal_ 与自定义 csg_ 前缀。"""
+        """向量化合并信号列,多个信号 OR。支持内置 signal_ 与自定义 csg_ 前缀。"""
         masks: list[pl.Series] = []
         for sig in signals:
-            # csg_ (自定义信号) 直接用；否则按 signal_ 解析
+            # csg_ (自定义信号) 直接用;否则按 signal_ 解析
             col = sig if (sig.startswith("signal_") or sig.startswith("csg_")) else f"signal_{sig}"
             if col in panel.columns:
                 masks.append(panel[col].fill_null(False).cast(pl.Boolean))
@@ -1921,27 +2045,31 @@ class StrategyBacktestService:
             combined = combined | m
         return combined
 
-    def _build_benchmark_curve(self, start: date, end: date) -> list[dict]:
+    def _build_benchmark_curve(self, start: date, end: date, asset_type: str = "stock") -> list[dict]:
+        profile = get_profile(asset_type if asset_type in {"hk", "us"} else "CN")
+        symbol = profile.benchmark_symbol
         try:
-            df = self.engine.repo.get_index_daily(BENCHMARK_SYMBOL, start, end, columns=["date", "close"])
+            loader = self.engine.repo.get_daily if asset_type in {"hk", "us"} else self.engine.repo.get_index_daily
+            df = loader(symbol, start, end, columns=["date", "close"])
         except Exception as e:
-            logger.warning("load benchmark %s failed: %s", BENCHMARK_SYMBOL, e)
+            logger.warning("load benchmark %s failed: %s", symbol, e)
             return []
 
         if df.is_empty() or "close" not in df.columns:
             return []
 
-        df = df.filter(pl.col("close").is_not_null() & (pl.col("close") > 0)).sort("date")
-        if df.is_empty():
+        df = df.filter(pl.col("close").is_finite() & (pl.col("close") > 0)).sort("date")
+        if df.height < 2:
             return []
 
+        name = next((index.name for index in profile.core_indices if index.symbol == symbol), symbol)
         return [
             {
                 "date": str(row["date"])[:10],
                 "value": round(float(row["close"]), 4),
                 "close": round(float(row["close"]), 4),
-                "name": "上证指数",
-                "symbol": BENCHMARK_SYMBOL,
+                "name": name,
+                "symbol": symbol,
             }
             for row in df.iter_rows(named=True)
             if row["close"] is not None
@@ -1950,12 +2078,13 @@ class StrategyBacktestService:
     # ── 工具 ──
 
     @staticmethod
-    def _effective_basic_filter(s: StrategyDef, overrides: dict) -> dict:
-        basic_filter = dict(s.basic_filter or {})
+    def _effective_basic_filter(s: StrategyDef, overrides: dict, asset_type: str = "stock") -> dict:
         override_filter = overrides.get("basic_filter")
-        if isinstance(override_filter, dict):
-            basic_filter.update(override_filter)
-        return basic_filter
+        return market_basic_filter(
+            s.basic_filter, asset_type,
+            overrides=override_filter if isinstance(override_filter, dict) else None,
+            explicit_keys=getattr(s, "basic_filter_explicit_keys", frozenset()),
+        )
 
     @staticmethod
     def _effective_signals(overrides: dict, key: str, default: list[str]) -> list[str]:
@@ -2052,8 +2181,8 @@ class StrategyBacktestService:
         return {
             "symbol": t.symbol,
             "name": t.name,
-            "entry_date": str(t.entry_date) if isinstance(t.entry_date, date) else str(t.entry_date),
-            "exit_date": str(t.exit_date) if isinstance(t.exit_date, date) else str(t.exit_date),
+            "entry_date": str(t.entry_date),
+            "exit_date": str(t.exit_date),
             "entry_price": t.entry_price,
             "exit_price": t.exit_price,
             "pnl_pct": t.pnl_pct,
@@ -2073,12 +2202,93 @@ class StrategyBacktestService:
             "exit_signal_id": getattr(t, "exit_signal_id", None),
         }
 
+    def _hk_execution_inputs(
+        self, config: StrategyBacktestConfig, symbols: list[str], financial_names,
+        *, sim_end: date, lot_snapshot_dates: list[str],
+    ) -> dict:
+        """Describe actual rows used by this run, under its fixed data generation."""
+        from app.backtest.fundamentals import (
+            HK_FINANCIAL_ALIASES,
+            HK_FINANCIAL_NAMES,
+            attach_hk_financial_fields,
+            load_fundamental_snapshot,
+        )
+
+        reader = getattr(getattr(self.engine, "repo", None), "read_market_enriched", None)
+        columns = ["source", "currency", "raw_close", "raw_price_verified", "price_adjustment",
+                   "price_schema_version", "adjustment_source", "adjustment_version", "adjustment_as_of", "volume", "volume_unit"]
+        frame = reader("hk", start=config.start, end=sim_end, symbols=symbols, columns=columns) if callable(reader) else pl.DataFrame()
+
+        def values(column: str) -> list[str]:
+            return sorted({str(value) for value in frame[column].drop_nulls() if str(value)}) if column in frame.columns else []
+
+        verified_symbols: set[str] = set()
+        verified = pl.DataFrame()
+        verification_columns = {"raw_price_verified", "price_adjustment", "adjustment_source", "adjustment_version", "adjustment_as_of", "source"}
+        if not frame.is_empty() and verification_columns.issubset(frame.columns):
+            valid = (
+                (pl.col("raw_price_verified").cast(pl.Float64, strict=False) == 1.0)
+                & (pl.col("price_adjustment") == "forward_adjusted")
+                & (pl.col("adjustment_as_of").cast(pl.Date, strict=False) >= pl.col("date"))
+                & pl.col("adjustment_source").is_not_null() & (pl.col("adjustment_source") != "")
+                & pl.col("adjustment_version").is_not_null() & (pl.col("adjustment_version") != "")
+                & pl.col("source").is_not_null() & (pl.col("source") != "")
+            ).fill_null(False)
+            coverage = frame.with_columns(valid.alias("__verified")).group_by("symbol").agg(pl.col("__verified").all())
+            verified_symbols = set(coverage.filter(pl.col("__verified"))["symbol"].to_list())
+            verified = frame.filter(pl.col("symbol").is_in(verified_symbols))
+        verified_count = len(verified_symbols)
+        unknown_count = len(set(symbols) - verified_symbols)
+        requested = sorted(set(financial_names) & HK_FINANCIAL_NAMES)
+        used_fields: list[str] = []
+        financial_sources: set[str] = set()
+        if requested and not frame.is_empty():
+            snapshot = load_fundamental_snapshot(self.engine.repo.store.data_dir, market="HK", names=requested)
+            attached = attach_hk_financial_fields(frame, snapshot, requested, include_provenance=True)
+            for name in requested:
+                available = attached.filter(pl.col(name).is_finite())
+                if available.is_empty():
+                    continue
+                used_fields.append(name)
+                source_column = f"__hk_fin_{HK_FINANCIAL_ALIASES[name]}_source"
+                if source_column in available.columns:
+                    financial_sources.update(str(value) for value in available[source_column].drop_nulls() if value)
+        complete = bool(symbols) and unknown_count == 0
+        return {
+            "price_basis": "forward_adjusted_daily_ohlc" if complete else "stored_daily_ohlc",
+            "price_basis_note": f"使用港股日线研究价格;本次区间 {verified_count} 个证券的原价及复权来源可核对,{unknown_count} 个证券仍有未核实价格。",
+            "price_sources": values("source"),
+            "adjustment_sources": values("adjustment_source"),
+            "adjustment_versions": values("adjustment_version"),
+            "price_verified_range": {
+                "start": str(verified["date"].min()) if not verified.is_empty() else None,
+                "end": str(verified["date"].max()) if not verified.is_empty() else None,
+                "verified_symbols": verified_count, "unknown_symbols": unknown_count,
+            },
+            "lot_size_snapshot_dates": sorted(set(lot_snapshot_dates)),
+            "currency_restriction": "仅接受 HKD 柜台;币种未知或其他币种阻止买入,每手有效期及证券失效日期按实际执行日校验。",
+            "financial_fields": used_fields,
+            "financial_sources": sorted(financial_sources),
+            "financial_availability_rule": (
+                "仅使用严格早于交易日公开的最新报告期及当时已公开修订;公告当日沿用此前报告,新报告缺字段保持空值;估值另需原价、同币种及有效每股基准。"
+                if used_fields else None
+            ),
+        }
+
     @staticmethod
-    def _config_to_dict(c: StrategyBacktestConfig) -> dict:
+    def _config_to_dict(
+        c: StrategyBacktestConfig,
+        *,
+        data_generation: str | None = None,
+        benchmark_available: bool = False,
+        execution_inputs: dict | None = None,
+    ) -> dict:
         score_min, score_max = StrategyBacktestService._normalize_score_range(
             (c.overrides or {}).get("score_min"),
             (c.overrides or {}).get("score_max"),
         )
+        profile = get_profile(c.asset_type if c.asset_type in {"hk", "us"} else "CN")
+        commission = c.commission_pct if c.commission_pct is not None else c.fees_pct
         return {
             "strategy_id": c.strategy_id,
             "symbols": c.symbols,
@@ -2099,6 +2309,7 @@ class StrategyBacktestService:
             "fees_pct": c.fees_pct,
             "commission_pct": c.commission_pct,
             "stamp_tax_pct": c.stamp_tax_pct,
+            "buy_stamp_tax_pct": c.buy_stamp_tax_pct,
             "slippage_bps": c.slippage_bps,
             "max_positions": c.max_positions,
             "max_exposure_pct": c.max_exposure_pct,
@@ -2108,7 +2319,77 @@ class StrategyBacktestService:
             "holding_days": c.holding_days,
             "minute_fill": c.minute_fill,
             "regime_filter": c.regime_filter,
+            "asset_type": c.asset_type,
+            "market": profile.market,
+            "currency": profile.currency,
+            "benchmark_symbol": profile.benchmark_symbol,
+            "benchmark_available": benchmark_available,
+            "benchmark_unavailable_reason": None if benchmark_available else "本市场基准在所选区间缺少可用日线",
+            "data_generation": data_generation,
+            "universe_scope": "explicit_symbols" if c.symbols else "current_instruments",
+            "execution_assumptions": {
+                "position_side": "long",
+                "price_basis": "stored_daily_ohlc",
+                "price_basis_note": "使用已存储日线价格;旧数据的复权口径未逐行核实",
+                "corporate_actions_simulated": False,
+                "corporate_actions_note": "未模拟拆股、分红等公司行动的实际交割",
+                "quantity_rule": "instrument_lot" if c.asset_type == "hk" else "whole_share" if c.asset_type == "us" else "board_lot",
+                "default_lot_size": profile.lot_size,
+                "lot_size_basis": "current_instrument_metadata" if c.asset_type == "hk" else "market_profile",
+                "missing_lot_size": "block_entry",
+                "same_day_sell_allowed": profile.same_day_sell_allowed,
+                "settlement": profile.settlement,
+                "settlement_ledger_simulated": False,
+                "settlement_note": "结算周期仅为当前制度说明;未模拟历史结算台账和未交收资金限制",
+                "cost_model": "editable_research_assumption",
+                "commission_pct": commission,
+                "buy_cost_pct": float(commission or 0) + c.buy_stamp_tax_pct + c.slippage_bps / 10000,
+                "sell_cost_pct": float(commission or 0) + (c.stamp_tax_pct or 0) + c.slippage_bps / 10000,
+                "signal_timing": "daily_bar_close",
+                "entry_fill": c.entry_fill,
+                "exit_fill": c.exit_fill,
+                "risk_fill": "daily_ohlc_barrier",
+                "portfolio_constraint_scope": "signal_candidates",
+                **(execution_inputs or {}),
+            },
         }
+
+    @staticmethod
+    def _matrix_input_warnings(market: MarketDataMatrix, diagnostics: dict) -> list[str]:
+        warnings: list[str] = []
+        for key, suffix in (
+            ("filter_missing_by_date", "已从基础筛选候选中排除"),
+            ("score_missing_by_date", "无法评分,已从策略候选中排除"),
+        ):
+            for name, counts in diagnostics.get(key, {}).items():
+                for index in np.flatnonzero(counts):
+                    warnings.append(
+                        f"{market.timestamp_labels[int(index)]}: {int(counts[index])} 个标的缺少有效 {name},{suffix}"
+                    )
+        return warnings
+
+    @staticmethod
+    def _basic_filter_warnings(panel: pl.DataFrame, basic_filter: dict) -> list[str]:
+        names = sorted(basic_filter_dependencies(basic_filter))
+        if not names or panel.is_empty():
+            return []
+        availability = panel.group_by("date").agg([
+            (
+                pl.col(name).is_not_null()
+                if name in {"name", "symbol"}
+                else pl.col(name).cast(pl.Float64, strict=False).is_finite().fill_null(False)
+            ).sum().alias(name)
+            for name in names
+        ] + [pl.len().alias("_rows")]).sort("date")
+        warnings: list[str] = []
+        for row in availability.iter_rows(named=True):
+            for name in names:
+                if row[name] == 0:
+                    raise ValueError(f"{row['date']} 基础筛选不可计算,字段没有有效数据: {name}")
+                count = row["_rows"] - row[name]
+                if count:
+                    warnings.append(f"{row['date']}: {count} 个标的缺少有效 {name},已从基础筛选候选中排除")
+        return warnings
 
     @staticmethod
     def _apply_score(
@@ -2116,6 +2397,8 @@ class StrategyBacktestService:
         s: StrategyDef,
         overrides: dict | None,
         universe_mask: pl.Series | None = None,
+        *,
+        warnings: list[str] | None = None,
     ) -> pl.DataFrame:
         scoring = effective_scoring(s.meta.get("scoring"), overrides)
         directions = effective_scoring_directions(overrides)
@@ -2139,7 +2422,34 @@ class StrategyBacktestService:
             ]
             return df.drop(temporary) if temporary else df
 
+        candidates = work.filter(pl.col("_score_universe")) if has_universe else work
+        if candidates.is_empty():
+            return _finish(work.with_columns(pl.lit(0.0).alias("score")))
+
+        def _validate_inputs(inputs: list[tuple[str, pl.Expr]]) -> None:
+            # Aggregate once by trading date, so another date or an excluded
+            # ticker cannot make an unavailable candidate input look usable.
+            finite = [value.cast(pl.Float64, strict=False).is_finite().fill_null(False) for _, value in inputs]
+            availability = candidates.group_by("date").agg([
+                *[value.any().alias(f"_valid_{index}") for index, value in enumerate(finite)],
+                *[(~value).sum().alias(f"_missing_{index}") for index, value in enumerate(finite)],
+                pl.all_horizontal(finite).any().alias("_complete"),
+            ]).sort("date")
+            for row in availability.iter_rows(named=True):
+                missing = [name for index, (name, _) in enumerate(inputs) if not row[f"_valid_{index}"]]
+                if missing or not row["_complete"]:
+                    fields = missing or [name for name, _ in inputs]
+                    raise ValueError(f"{row['date']} 策略评分不可计算,候选缺少完整有效数据: " + ", ".join(fields))
+                if warnings is not None:
+                    for index, (name, _) in enumerate(inputs):
+                        count = row[f"_missing_{index}"]
+                        if count:
+                            warnings.append(f"{row['date']}: {count} 个标的缺少有效 {name},无法评分,已从策略候选中排除")
+
         if scoring:
+            missing = [str(name) for name, weight in scoring.items() if weight and scoring_value_expr(work.columns, str(name)) is None]
+            if missing:
+                raise ValueError("策略评分不可计算,缺少字段或依赖: " + ", ".join(sorted(missing)))
             executable = [
                 (str(col), value, weight)
                 for col, weight in scoring.items()
@@ -2147,16 +2457,18 @@ class StrategyBacktestService:
             ]
             total_weight = sum(weight for _, _, weight in executable)
             if total_weight > 0:
+                _validate_inputs([(name, value) for name, value, _ in executable])
                 score_parts: list[pl.Expr] = []
                 for name, score_value, weight in executable:
                     w = weight / total_weight
-                    value = _value_in_universe(score_value)
+                    numeric = score_value.cast(pl.Float64, strict=False)
+                    value = _value_in_universe(pl.when(numeric.is_finite()).then(numeric).otherwise(None))
                     col_min = value.min().over("date")
                     col_max = value.max().over("date")
                     col_range = col_max - col_min
-                    normalized = pl.when(col_range > 0).then(
-                        (score_value - col_min) / col_range
-                    ).otherwise(pl.lit(0.5))
+                    normalized = pl.when(value.is_not_null()).then(
+                        pl.when(col_range > 0).then((value - col_min) / col_range).otherwise(0.5)
+                    ).otherwise(None)
                     if directions.get(name) == SCORING_DIRECTION_LOW:
                         normalized = 1.0 - normalized
                     if has_universe:
@@ -2166,12 +2478,17 @@ class StrategyBacktestService:
                     score_expr = score_parts[0]
                     for part in score_parts[1:]:
                         score_expr = score_expr + part
-                    return _finish(work.with_columns((score_expr * 100).fill_null(0).alias("score")))
+                    return _finish(work.with_columns((score_expr * 100).alias("score")))
 
         order_by = s.meta.get("order_by")
-        if order_by and order_by != "score" and order_by in work.columns:
+        if order_by and order_by != "score":
+            value = scoring_value_expr(work.columns, str(order_by))
+            if value is None:
+                raise ValueError(f"策略排序不可计算,缺少字段或依赖: {order_by}")
+            _validate_inputs([(str(order_by), value)])
             direction = 1 if s.meta.get("descending", True) else -1
-            score_expr = pl.col(order_by).fill_null(0) * direction
+            numeric = value.cast(pl.Float64, strict=False)
+            score_expr = pl.when(numeric.is_finite()).then(numeric * direction).otherwise(None)
             if has_universe:
                 score_expr = pl.when(pl.col("_score_universe")).then(score_expr).otherwise(0.0)
             return _finish(work.with_columns(score_expr.alias("score")))

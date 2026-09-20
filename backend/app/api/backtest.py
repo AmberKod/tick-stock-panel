@@ -11,13 +11,13 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.config import settings
 from app.services.backtest import (
     BacktestConfig,
     BacktestService,
-    VectorbtUnavailable,
+    VectorbtUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ def _get_engine(request: Request):
 
 def _resolve_start(req: BaseModel, end: date, default_days: int) -> date:
     """未传 start 使用默认区间；显式传 null/空值表示全部历史。"""
-    start = getattr(req, "start")
+    start = req.start
     if start is not None:
         return start
     if "start" in req.model_fields_set:
@@ -113,7 +113,7 @@ def run(req: BacktestRequest, request: Request):
     )
     try:
         result = svc.run(cfg)
-    except VectorbtUnavailable as e:
+    except VectorbtUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return asdict(result)
 
@@ -127,10 +127,21 @@ class FactorColumnsResponse(BaseModel):
 
 
 @router.get("/factor/columns")
-def factor_columns():
-    """返回可用的因子列列表。"""
+def factor_columns(
+    request: Request,
+    purpose: Literal["research", "scoring"] = "research",
+    asset_type: Literal["stock", "etf", "hk", "us"] = "stock",
+    context: Literal["current", "historical"] = "current",
+    as_of: date | None = None,
+):
+    """Keep historical research factors separate from current scoring capability."""
     from app.backtest.factor import FACTOR_COLUMNS
-    return {"columns": FACTOR_COLUMNS}
+    if purpose == "research":
+        return {"columns": FACTOR_COLUMNS}
+    from app.strategy.concept_heat import concept_scoring_column
+
+    concept = concept_scoring_column(request.app.state.repo, asset_type=asset_type, context=context, as_of=as_of)
+    return {"columns": [*FACTOR_COLUMNS, concept]}
 
 
 class FactorBacktestRequest(BaseModel):
@@ -331,19 +342,41 @@ class StrategyBacktestRequest(BaseModel):
     matching: Literal["close_t", "open_t+1"] = "open_t+1"
     entry_fill: Literal["close_t", "open_t+1"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
-    fees_pct: float = 0.0002
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
-    slippage_bps: float = 5.0
-    max_positions: int = 10
-    max_exposure_pct: float = 1.0
-    initial_capital: float = 1_000_000.0
+    fees_pct: float | None = Field(None, ge=0, lt=1, allow_inf_nan=False)
+    commission_pct: float | None = Field(None, ge=0, lt=1, allow_inf_nan=False)
+    stamp_tax_pct: float | None = Field(None, ge=0, lt=1, allow_inf_nan=False)
+    buy_stamp_tax_pct: float = Field(0.0, ge=0, lt=1, allow_inf_nan=False)
+    slippage_bps: float = Field(5.0, ge=0, lt=10000, allow_inf_nan=False)
+    max_positions: int = Field(10, ge=1)
+    max_exposure_pct: float = Field(1.0, ge=0, le=1, allow_inf_nan=False)
+    initial_capital: float = Field(1_000_000.0, gt=0, allow_inf_nan=False)
     position_sizing: Literal["equal", "score_weight"] = "equal"
     mode: Literal["position", "full"] = "position"
     holding_days: int = 5
-    asset_type: str = "stock"
+    asset_type: Literal["stock", "etf", "hk", "us"] = "stock"
     minute_fill: bool = False
     regime_filter: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_market_execution(self) -> StrategyBacktestRequest:
+        from app.backtest.engine import validate_backtest_market
+
+        if self.symbols is not None:
+            self.symbols = list(dict.fromkeys(symbol.strip().upper() for symbol in self.symbols if symbol.strip()))
+        validate_backtest_market(
+            self.asset_type, self.symbols, minute_fill=self.minute_fill,
+            exit_fill=self.exit_fill or self.matching,
+        )
+        if self.asset_type in {"hk", "us"} and self.regime_filter:
+            raise ValueError("港美股尚无可追溯的市场环境数据,无法启用市场环境过滤")
+        if self.start and self.end and self.start > self.end:
+            raise ValueError("回测起始日期不能晚于结束日期")
+        if self.fees_pct is None:
+            self.fees_pct = 0.0 if self.asset_type in {"hk", "us"} else 0.0002
+        commission = self.commission_pct if self.commission_pct is not None else self.fees_pct
+        if commission + max(self.stamp_tax_pct or 0, self.buy_stamp_tax_pct) + self.slippage_bps / 10000 >= 1:
+            raise ValueError("单边费用与滑点之和必须小于成交金额")
+        return self
 
 
 @router.post("/strategy/run")
@@ -369,6 +402,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         fees_pct=req.fees_pct,
         commission_pct=req.commission_pct,
         stamp_tax_pct=req.stamp_tax_pct,
+        buy_stamp_tax_pct=req.buy_stamp_tax_pct,
         slippage_bps=req.slippage_bps,
         max_positions=req.max_positions,
         max_exposure_pct=req.max_exposure_pct,
@@ -389,16 +423,17 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
-import time
 import hashlib
+import time
 
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts")
+    __slots__ = ("cancel_event", "done", "error", "finish_ts", "key", "progress", "request_key", "result")
 
-    def __init__(self, key: str):
+    def __init__(self, key: str, request_key: str | None = None):
         self.key = key
+        self.request_key = request_key or key
         self.cancel_event = threading.Event()
         self.progress: list[dict] = []   # 进度历史 (新连接可回放)
         self.result = None               # 完成后的结果
@@ -445,7 +480,7 @@ def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> 
 def _make_job_key(
     strategy_id: str, symbols: str | None, start: str | None, end: str | None,
     matching: str, entry_fill: str | None, exit_fill: str | None,
-    fees_pct: float, slippage_bps: float,
+    fees_pct: float | None, slippage_bps: float,
     max_positions: int, max_exposure_pct: float, initial_capital: float, position_sizing: str,
     params: str | None, overrides: str | None,
     mode: str = "position", holding_days: int = 5,
@@ -453,8 +488,14 @@ def _make_job_key(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    buy_stamp_tax_pct: float = 0.0,
+    data_generation: str | None = None,
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
+    if fees_pct is None:
+        fees_pct = 0.0 if asset_type in {"hk", "us"} else 0.0002
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{buy_stamp_tax_pct}"
+    if data_generation is not None:
+        raw += f"|generation:{data_generation}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -468,7 +509,7 @@ async def strategy_stream(
     matching: str = "open_t+1",
     entry_fill: str | None = None,
     exit_fill: str | None = None,
-    fees_pct: float = 0.0002,
+    fees_pct: float | None = None,
     commission_pct: float | None = None,
     stamp_tax_pct: float | None = None,
     slippage_bps: float = 5.0,
@@ -483,6 +524,7 @@ async def strategy_stream(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    buy_stamp_tax_pct: float = 0.0,
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -498,12 +540,33 @@ async def strategy_stream(
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
-    end_date = date.fromisoformat(end) if end else date.today()
-    if start:
-        start_date = date.fromisoformat(start)
+    try:
+        validated = StrategyBacktestRequest(
+            strategy_id=strategy_id,
+            symbols=[symbol.strip() for symbol in symbols.split(",") if symbol.strip()] if symbols else None,
+            start=start or None, end=end or None, matching=matching, entry_fill=entry_fill, exit_fill=exit_fill,
+            fees_pct=fees_pct, commission_pct=commission_pct, stamp_tax_pct=stamp_tax_pct,
+            buy_stamp_tax_pct=buy_stamp_tax_pct, slippage_bps=slippage_bps, max_positions=max_positions,
+            max_exposure_pct=max_exposure_pct, initial_capital=initial_capital, position_sizing=position_sizing,
+            params=json.loads(params) if params else None, overrides=json.loads(overrides) if overrides else None,
+            mode=mode, holding_days=holding_days, asset_type=asset_type, minute_fill=minute_fill,
+            regime_filter=json.loads(regime_filter) if regime_filter else None,
+        )
+    except (ValidationError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from app.markets.registry import get_profile
+
+    profile = get_profile(asset_type if asset_type in {"hk", "us"} else "CN")
+    end_date = validated.end or profile.today()
+    fees_pct = validated.fees_pct
+    if validated.start:
+        start_date = validated.start
     else:
         # 空 start = 全部历史: 用本地最早日K日期, 查不到再回退到默认窗口
-        earliest = request.app.state.repo.earliest_daily_date()
+        earliest = (
+            date(1900, 1, 1) if asset_type in {"hk", "us"}
+            else request.app.state.repo.earliest_daily_date()
+        )
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
 
     # 服务端范围保护
@@ -513,7 +576,7 @@ async def strategy_stream(
         if days > BACKTEST_MAX_SERVER_DAYS:
             guard_violated = True
 
-    job_key = _make_job_key(
+    request_key = _make_job_key(
         strategy_id, symbols, start, end,
         matching, entry_fill, exit_fill,
         fees_pct, slippage_bps, max_positions, max_exposure_pct, initial_capital, position_sizing,
@@ -523,6 +586,17 @@ async def strategy_stream(
         asset_type=asset_type,
         minute_fill=minute_fill,
         regime_filter=regime_filter,
+        buy_stamp_tax_pct=buy_stamp_tax_pct,
+    )
+
+    generation_loader = getattr(request.app.state.repo, "get_matrix_data_generation", None)
+    try:
+        generation = generation_loader(asset_type) if callable(generation_loader) else None
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="市场数据正在更新或暂不可读取,请稍后重试") from exc
+    job_key = (
+        hashlib.md5(f"{request_key}|{generation}".encode()).hexdigest()[:12]
+        if generation is not None else request_key
     )
 
     _cleanup_stale_jobs()
@@ -531,7 +605,7 @@ async def strategy_stream(
     with _jobs_lock:
         job = _running_jobs.get(job_key)
         if job is None:
-            job = _BacktestJob(job_key)
+            job = _BacktestJob(job_key, request_key=request_key)
             _running_jobs[job_key] = job
             is_new = True
         else:
@@ -574,6 +648,7 @@ async def strategy_stream(
                 fees_pct=fees_pct,
                 commission_pct=commission_pct,
                 stamp_tax_pct=stamp_tax_pct,
+                buy_stamp_tax_pct=buy_stamp_tax_pct,
                 slippage_bps=slippage_bps,
                 max_positions=int(max_positions),
                 max_exposure_pct=float(max_exposure_pct),
@@ -598,11 +673,15 @@ async def strategy_stream(
                         cancel_event=job.cancel_event,
                     ):
                         task = make_worker_task("backtest", settings.data_dir, cfg)
+                        if asset_type == "hk" and generation is not None:
+                            task["expected_data_generation"] = generation
                         result = run_worker_task(
                             task,
                             lambda d: job.progress.append(d),
                             job.cancel_event,
                         )
+                    if asset_type == "hk" and callable(generation_loader) and generation_loader(asset_type) != generation:
+                        raise RuntimeError("港股数据在回测任务执行期间已更新,请重新回测")
                     _finish_job(job, result=result)
                 except HeavyJobCancelledError:
                     _finish_job(job, error="回测已取消")
@@ -676,7 +755,7 @@ async def strategy_cancel(request: Request):
         _get("matching", "open_t+1"),
         _get("entry_fill") or None,
         _get("exit_fill") or None,
-        float(_get("fees_pct", "0.0002")),
+        _get_opt_float("fees_pct"),
         float(_get("slippage_bps", "5")),
         int(_get("max_positions", "10")),
         float(_get("max_exposure_pct", "1")),
@@ -688,14 +767,18 @@ async def strategy_cancel(request: Request):
         int(_get("holding_days", "5")),
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
+        buy_stamp_tax_pct=_get_opt_float("buy_stamp_tax_pct") or 0.0,
         asset_type=_get("asset_type", "stock"),
+        minute_fill=_get("minute_fill", "false").lower() in {"true", "1"},
+        regime_filter=_get("regime_filter") or None,
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
-        job = _running_jobs.get(job_key)
-    if job and not job.done:
-        job.cancel_event.set()
-        return {"ok": True}
+        jobs = [job for job in _running_jobs.values() if job.request_key == job_key and not job.done]
+    if jobs:
+        for job in jobs:
+            job.cancel_event.set()
+        return {"ok": True, "cancelled_count": len(jobs)}
     return {"ok": False, "message": "任务不存在或已完成"}
 
 

@@ -91,7 +91,7 @@ def get_realtime_watchlist_symbols() -> list[str]:
     try:
         from app.services import watchlist
         rows = watchlist.list_symbols()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("load watchlist for realtime failed: %s", e)
         return []
     out: list[str] = []
@@ -104,7 +104,7 @@ def get_realtime_watchlist_symbols() -> list[str]:
     return out
 
 
-def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: ARG001
+def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:
     """兼容旧接口: Free 实时标的现在由自选页前 5 个决定。"""
     return get_realtime_watchlist_symbols()
 
@@ -252,7 +252,7 @@ def _allowed_data_providers() -> set[str]:
     try:
         from app.data_providers import custom as custom_sources
         return _ALLOWED_DATA_PROVIDERS | custom_sources.names()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return set(_ALLOWED_DATA_PROVIDERS)
 
 
@@ -381,7 +381,7 @@ def get_mainline_blacklist() -> list[str]:
     """
     v = load().get("mainline_blacklist", [])
     if isinstance(v, str):
-        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]  # noqa: RUF001
+        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]
     if not isinstance(v, list):
         return []
     return [str(x).strip() for x in v if str(x).strip()]
@@ -424,7 +424,7 @@ def set_mainline_filter_config(cfg: dict) -> dict:
     if "blacklist" in cfg and cfg["blacklist"] is not None:
         raw = cfg["blacklist"]
         if isinstance(raw, str):
-            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]  # noqa: RUF001
+            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]
         updates["mainline_blacklist"] = [str(x).strip() for x in (raw or []) if str(x).strip()]
     if updates:
         save(updates)

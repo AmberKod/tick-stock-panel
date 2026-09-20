@@ -162,10 +162,12 @@
 
 ```bash
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
-./dev.sh                   # Windows: .\dev.ps1
+cd backend && uv sync --frozen && cd ..
+cd frontend && pnpm install && cd ..
+python dev.py
 ```
 
-自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+`dev.py` 同时启动前后端，后端使用 Uvicorn 热重载，前端使用 Vite HMR；按 `Ctrl-C` 会关闭两端。默认地址：后端 <http://localhost:3018>，前端 <http://localhost:3011>。依赖已安装后只需运行最后一行。可用 `python dev.py --help` 查看端口覆盖和仅检查选项。
 
 ### 方式 B:Docker(部署最省心)
 

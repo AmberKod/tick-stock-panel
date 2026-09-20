@@ -112,6 +112,11 @@ class Settings(BaseSettings):
     backtest_matrix_cache_prewarm: bool = True
     backtest_matrix_cache_prewarm_years: int = 5
 
+    # Optional HK/US quote fallback. Disabled until the external source is verified.
+    market_quote_fallback_enabled: bool = False
+    market_quote_fallback_cache_ttl_seconds: float = 30.0
+    market_quote_fallback_timeout_seconds: float = 8.0
+
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""

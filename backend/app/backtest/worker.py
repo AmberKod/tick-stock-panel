@@ -148,11 +148,17 @@ def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
         encoded = dict(config)
     else:
         raise ValueError(f"unsupported worker task kind: {kind}")
-    return {
+    task = {
         "kind": kind,
         "data_dir": str(data_dir.resolve()),
         "config": encoded,
     }
+    asset_type = encoded.get("asset_type") or (encoded.get("backtest_kwargs") or {}).get("asset_type")
+    if asset_type == "hk":
+        from app.services.market_data_status import market_data_generation
+
+        task["expected_data_generation"] = market_data_generation(data_dir, "HK")
+    return task
 
 
 def _attach_worker_metrics(
@@ -185,8 +191,12 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         strategy_engine = StrategyEngine(
             strategy_dirs=_strategy_dirs(data_dir),
             override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
+            data_dir=data_dir,
         )
         service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
+        expected_generation = task.get("expected_data_generation")
+        if expected_generation is not None:
+            service.engine.assert_data_generation("hk", expected_generation)
 
         def _progress(message: dict) -> None:
             event_queue.put({"type": "progress", "payload": message})
@@ -226,6 +236,8 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         else:
             raise ValueError(f"unsupported worker task kind: {kind}")
 
+        if expected_generation is not None:
+            service.engine.assert_data_generation("hk", expected_generation)
         serialization_started = time.perf_counter()
         serialized_bytes = len(
             json.dumps(result, ensure_ascii=False, default=str).encode("utf-8")

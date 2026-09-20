@@ -55,6 +55,28 @@ import {
 
 const BOARDS = ['沪主板', '深主板', '创业板', '科创板', '北交所'] as const
 type BoardType = typeof BOARDS[number]
+type WatchlistMarketFilter = 'all' | 'cn' | 'hk' | 'us'
+
+const WATCHLIST_MARKETS: Array<{ value: WatchlistMarketFilter; label: string }> = [
+  { value: 'all', label: '全部市场' },
+  { value: 'cn', label: 'A股' },
+  { value: 'hk', label: '港股' },
+  { value: 'us', label: '美股' },
+]
+
+function normalizeWatchlistMarket(value: string | null): WatchlistMarketFilter {
+  return value === 'cn' || value === 'hk' || value === 'us' ? value : 'all'
+}
+
+function marketForSymbol(
+  symbol: string,
+  market?: WatchlistMarketFilter,
+): Exclude<WatchlistMarketFilter, 'all'> {
+  if (market && market !== 'all') return market
+  if (/\\.HK$/i.test(symbol)) return 'hk'
+  if (/\\.US$/i.test(symbol)) return 'us'
+  return 'cn'
+}
 
 function getBoardType(symbol: string): BoardType | null {
   if (/^(300|301)/.test(symbol)) return '创业板'
@@ -669,6 +691,7 @@ export function Watchlist() {
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [searchParams] = useSearchParams()
+  const marketFilter = normalizeWatchlistMarket(searchParams.get('market'))
   const initialGroup = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
   const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>(initialGroup)
   // URL ?group= 变化时同步选中分组 (侧边栏二级菜单切换分组时触发)
@@ -823,7 +846,12 @@ export function Watchlist() {
     enabled: (list.data?.symbols.length ?? 0) > 0,
   })
 
-  const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
+  const symbols = useMemo(() => {
+    const allSymbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
+    return marketFilter === 'all'
+      ? allSymbols
+      : allSymbols.filter((symbol: string) => marketForSymbol(symbol) === marketFilter)
+  }, [enriched.data, marketFilter])
   const symbolsKey = symbols.join(',')
 
   // 指数无本地分钟K数据, 分时批量请求剔除指数 symbol (省请求, 避免逐只 404)
@@ -899,12 +927,18 @@ export function Watchlist() {
   })
 
   const remove = useMutation({
-    mutationFn: (sym: string) => api.watchlistRemove(sym),
-    onSuccess: (_data, sym) => {
+    mutationFn: (entry: { symbol: string; market?: 'cn' | 'hk' | 'us' }) =>
+      api.watchlistRemove(entry.symbol, entry.market),
+    onSuccess: (_data, entry) => {
       // 1. 立即从 enriched 缓存中移除该股票，UI 即时更新
       qc.setQueryData(['watchlist-enriched', extColumnsParam], (old: any) => {
         if (!old?.rows) return old
-        return { ...old, rows: old.rows.filter((r: any) => r.symbol !== sym) }
+        return {
+          ...old,
+          rows: old.rows.filter((r: any) =>
+            r.symbol !== entry.symbol || (entry.market && r.market !== entry.market),
+          ),
+        }
       })
       // 2. 清除 list 缓存，触发后台 refetch
       qc.invalidateQueries({ queryKey: QK.watchlist })
@@ -914,7 +948,8 @@ export function Watchlist() {
   })
 
   const moveToTop = useMutation({
-    mutationFn: (sym: string) => api.watchlistMoveToTop(sym),
+    mutationFn: (entry: { symbol: string; market?: 'cn' | 'hk' | 'us' }) =>
+      api.watchlistMoveToTop(entry.symbol, entry.market),
     onSuccess: (data) => {
       qc.setQueryData(QK.watchlist, data)
       qc.invalidateQueries({ queryKey: QK.watchlist })
@@ -973,13 +1008,13 @@ export function Watchlist() {
 
   // 多组并存: 勾选加入 / 取消移出 (仅影响该分组, 标的保留在自选中)
   const addGroupMember = useMutation({
-    mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string }) =>
-      api.watchlistGroupAddMember(groupId, symbol),
+    mutationFn: ({ symbol, groupId, market }: { symbol: string; groupId: string; market?: 'cn' | 'hk' | 'us' }) =>
+      api.watchlistGroupAddMember(groupId, symbol, market),
     onSuccess: data => qc.setQueryData(QK.watchlist, data),
   })
   const removeGroupMember = useMutation({
-    mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string }) =>
-      api.watchlistGroupRemoveMember(groupId, symbol),
+    mutationFn: ({ symbol, groupId, market }: { symbol: string; groupId: string; market?: 'cn' | 'hk' | 'us' }) =>
+      api.watchlistGroupRemoveMember(groupId, symbol, market),
     onSuccess: data => qc.setQueryData(QK.watchlist, data),
   })
 
@@ -992,14 +1027,17 @@ export function Watchlist() {
     setPreviewSymbol(sym); setPreviewName(name)
   }, [])
   const handleCardConfirmRemove = useCallback((sym: string) => {
-    remove.mutate(sym); setConfirmRemove(null)
-  }, [remove])
+    const entry = (list.data?.symbols ?? []).find(item => item.symbol === sym)
+    remove.mutate({ symbol: sym, market: entry?.market ?? marketForSymbol(sym) }); setConfirmRemove(null)
+  }, [list.data, remove])
   const handleCardCancelRemove = useCallback(() => setConfirmRemove(null), [])
   const handleCardRequestRemove = useCallback((sym: string) => setConfirmRemove(sym), [])
   const handleToggleMember = useCallback((symbol: string, groupId: string, member: boolean) => {
-    if (member) addGroupMember.mutate({ symbol, groupId })
-    else removeGroupMember.mutate({ symbol, groupId })
-  }, [addGroupMember, removeGroupMember])
+    const entry = (list.data?.symbols ?? []).find(item => item.symbol === symbol)
+    const market = entry?.market ?? marketForSymbol(symbol)
+    if (member) addGroupMember.mutate({ symbol, groupId, market })
+    else removeGroupMember.mutate({ symbol, groupId, market })
+  }, [addGroupMember, list.data, removeGroupMember])
   // 分组卡片总览下点击分组 tab / 卡片头 = 钻取该分组: 关闭总览并选中分组,
   // 个股视图设置(table/card)保持用户原选择
   const handleGroupSelect = useCallback((group: WatchlistGroupFilter) => {
@@ -1007,11 +1045,25 @@ export function Watchlist() {
     setGroupCardsOpen(false)
   }, [])
 
-  const listEntries = list.data?.symbols ?? []
+  const allListEntries = list.data?.symbols ?? []
+  const listEntries = useMemo(
+    () => marketFilter === 'all'
+      ? allListEntries
+      : allListEntries.filter(entry => marketForSymbol(entry.symbol, entry.market) === marketFilter),
+    [allListEntries, marketFilter],
+  )
   const allSymbols = listEntries.map(s => s.symbol)
-  const rows = enriched.data?.rows ?? []
+  const rows = useMemo(
+    () => {
+      const allRows = enriched.data?.rows ?? []
+      return marketFilter === 'all'
+        ? allRows
+        : allRows.filter((row: any) => marketForSymbol(row.symbol, row.market) === marketFilter)
+    },
+    [enriched.data, marketFilter],
+  )
   const groupBySymbol = useMemo(
-    () => new Map(listEntries.map(entry => [entry.symbol, entry.group_ids ?? []])),
+    () => new Map(listEntries.map(entry => [`${entry.market ?? marketForSymbol(entry.symbol)}:${entry.symbol}`, entry.group_ids ?? []])),
     [listEntries],
   )
   // 分组等权平均涨跌幅 (实时优先 rt_pct, 收盘兜底 change_pct; 与表格同源)
@@ -1042,7 +1094,10 @@ export function Watchlist() {
     return counts
   }, [listEntries])
   const rowsInSelectedGroup = useMemo(() => {
-    const rowsWithGroup = rows.map(row => ({ ...row, group_ids: groupBySymbol.get(row.symbol) ?? [] }))
+    const rowsWithGroup = rows.map(row => ({
+      ...row,
+      group_ids: groupBySymbol.get(`${row.market ?? marketForSymbol(row.symbol)}:${row.symbol}`) ?? [],
+    }))
     if (selectedGroup === 'all') return rowsWithGroup
     if (selectedGroup === 'ungrouped') return rowsWithGroup.filter(row => row.group_ids.length === 0)
     return rowsWithGroup.filter(row => row.group_ids.includes(selectedGroup))
@@ -1255,9 +1310,23 @@ export function Watchlist() {
   return (
     <div className="flex flex-col h-full">
       <PageHeader
-        title="自选股"
+        title={marketFilter === 'all' ? '自选股' : `${WATCHLIST_MARKETS.find(item => item.value === marketFilter)?.label ?? ''}自选`}
         titleExtra={
-          <span className="inline-flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded-md bg-elevated/70 p-0.5" role="group" aria-label="自选市场筛选">
+              {WATCHLIST_MARKETS.map(item => (
+                <a
+                  key={item.value}
+                  href={item.value === 'all' ? '/watchlist' : `/watchlist?market=${item.value}`}
+                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                    marketFilter === item.value ? 'bg-accent/15 text-accent' : 'text-muted hover:text-foreground'
+                  }`}
+                >
+                  {item.label}
+                </a>
+              ))}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
             {/* 计数胶囊: 显示数/总数, mono 字体突出数字 */}
             <span className="inline-flex items-baseline gap-0.5 px-2 py-0.5 rounded-md bg-elevated/70 text-[11px]">
               <span className="font-mono font-semibold text-secondary tabular-nums">{sortedRows.length}</span>
@@ -1285,6 +1354,7 @@ export function Watchlist() {
                 已过滤 {hiddenCount}
               </span>
             )}
+            </span>
           </span>
         }
         right={
@@ -1676,7 +1746,10 @@ export function Watchlist() {
                           {confirmRemove === r.symbol ? (
                             <div className="flex items-center gap-1">
                               <button
-                                onClick={() => { remove.mutate(r.symbol); setConfirmRemove(null) }}
+                                onClick={() => {
+                                  remove.mutate({ symbol: r.symbol, market: r.market ?? marketForSymbol(r.symbol) })
+                                  setConfirmRemove(null)
+                                }}
                                 className="px-1.5 py-0.5 rounded text-[10px] text-danger bg-danger/10 hover:bg-danger/20 transition-colors"
                               >
                                 确认
@@ -1717,7 +1790,7 @@ export function Watchlist() {
                                 <Minus className="h-3.5 w-3.5" />
                               </button>
                               <button
-                                onClick={() => moveToTop.mutate(r.symbol)}
+                                onClick={() => moveToTop.mutate({ symbol: r.symbol, market: r.market ?? marketForSymbol(r.symbol) })}
                                 disabled={moveToTop.isPending || allSymbols[0] === r.symbol}
                                 className="p-0.5 text-muted hover:text-accent transition-colors duration-150 ease-smooth disabled:opacity-30 disabled:hover:text-muted"
                                 aria-label="移到顶部"

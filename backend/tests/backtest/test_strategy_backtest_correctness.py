@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, SimResult
 from app.backtest.matrix import build_market_data_matrix, make_signal_matrix, rolling_mean
@@ -40,6 +41,11 @@ class _StrategyEngineStub:
 
     def get(self, strategy_id: str) -> StrategyDef:
         return self.strategy
+
+    def concept_config_fingerprint(self, strategy_id: str, params, overrides) -> str | None:
+        # Stub: no concept dependency declared, mirrors the production default so
+        # tests outside the concept-heat paths don't have to wire a real engine.
+        return None
 
 
 class _RepoStub:
@@ -327,11 +333,243 @@ def test_score_normalizes_inside_strategy_candidate_universe():
     strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True})
 
     scored = StrategyBacktestService._apply_score(panel, strategy, None, universe_mask=universe)
-    scores = dict(zip(scored["symbol"].to_list(), scored["score"].to_list()))
+    scores = dict(zip(scored["symbol"].to_list(), scored["score"].to_list(), strict=True))
 
     assert scores["A"] == 0.0
     assert scores["B"] == 100.0
     assert scores["C"] == 0.0
+
+
+@pytest.mark.parametrize("missing", ["column", "null", "nan", "infinite"])
+def test_backtest_scoring_rejects_unavailable_candidate_factor(missing):
+    panel = pl.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "date": [date(2024, 1, 1)] * 3,
+        "factor": [None, None, 100.0],
+    })
+    if missing == "column":
+        panel = panel.drop("factor")
+    elif missing != "null":
+        value = float("nan") if missing == "nan" else float("inf")
+        panel = panel.with_columns(
+            pl.when(pl.col("symbol") != "C").then(value).otherwise(100.0).alias("factor"),
+        )
+    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}})
+
+    with pytest.raises(ValueError, match="factor"):
+        StrategyBacktestService._apply_score(
+            panel, strategy, None, universe_mask=pl.Series([True, True, False]),
+        )
+
+
+def test_backtest_scoring_validates_each_candidate_date():
+    panel = pl.DataFrame({
+        "symbol": ["A", "A"],
+        "date": [date(2024, 1, 1), date(2024, 1, 2)],
+        "factor": [10.0, None],
+    })
+    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}})
+
+    with pytest.raises(ValueError, match=r"2024-01-02.*factor"):
+        StrategyBacktestService._apply_score(panel, strategy, None)
+
+
+def test_backtest_scoring_rejects_candidates_without_a_complete_score():
+    panel = pl.DataFrame({
+        "symbol": ["A", "B"],
+        "date": [date(2024, 1, 1)] * 2,
+        "factor": [10.0, None],
+        "other": [None, 20.0],
+    })
+    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0, "other": 1.0}})
+
+    with pytest.raises(ValueError, match=r"factor.*other"):
+        StrategyBacktestService._apply_score(panel, strategy, None)
+
+
+def test_backtest_scoring_keeps_partial_missing_scores_null_and_normalizes_by_date():
+    panel = pl.DataFrame({
+        "symbol": ["A", "B", "C", "A", "B", "C"],
+        "date": [date(2024, 1, 1)] * 3 + [date(2024, 1, 2)] * 3,
+        "factor": [10.0, 20.0, None, 200.0, 100.0, float("inf")],
+    })
+    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}})
+    scored = StrategyBacktestService._apply_score(panel, strategy, None)
+
+    assert scored["symbol"].to_list() == panel["symbol"].to_list()
+    assert scored["score"].to_list() == [0.0, 100.0, None, 100.0, 0.0, None]
+
+
+def _strict_scoring_strategy(backend: str) -> StrategyDef:
+    class NativeStrategy:
+        def required_fields(self):
+            return frozenset({"close", "signal_limit_down", "factor"})
+
+        def required_warmup_bars(self, params):
+            return 1
+
+        def compute_signals(self, market, params):
+            return make_signal_matrix(
+                market.shape,
+                entry=(market.close > 0).astype(np.uint8),
+                exit=market.limit_down_locked,
+            )
+
+    return _strategy(
+        meta={"id": "test", "name": "test", "asset_types": ["us"],
+              "scoring": {"factor": 1.0}, "params": []},
+        basic_filter={"enabled": False},
+        execution_backend=backend,
+        required_features=frozenset({"close"}),
+        filter_fn=(lambda df, params: pl.col("close") > 0) if backend == "polars_expr" else None,
+        filter_history_fn=(lambda df, params: df.filter(pl.col("close") > 0)) if backend == "legacy" else None,
+        exit_signals=["signal_limit_down"],
+        matrix_strategy=NativeStrategy() if backend == "matrix_native" else None,
+    )
+
+
+def _strict_scoring_panel() -> pl.DataFrame:
+    start = date(2024, 1, 2)
+    return pl.DataFrame([
+        {
+            "symbol": symbol, "name": symbol,
+            "date": start + timedelta(days=offset),
+            "open": 10.0 + offset * 2, "high": 10.0 + offset * 2,
+            "low": 10.0 + offset * 2, "close": 10.0 + offset * 2,
+            "volume": 1000.0,
+            "factor": 10.0 if (symbol, offset) in {("A.US", 0), ("B.US", 1)} else None,
+            "signal_limit_up": False,
+            "signal_limit_down": offset == (1 if symbol == "A.US" else 2),
+        }
+        for symbol in ("A.US", "B.US") for offset in range(-1, 4)
+    ]).sort(["symbol", "date"])
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "legacy", "matrix_native"])
+def test_partial_scoring_excludes_entries_but_preserves_exit_prices_and_signals(backend):
+    start = date(2024, 1, 2)
+    panel = _strict_scoring_panel()
+    engine = BacktestEngine(repo=None)
+    engine.load_panel_for_backtest = lambda *args, **kwargs: panel
+    engine.load_market_data_matrix_for_backtest = lambda *args, **kwargs: build_market_data_matrix(
+        panel, field_columns={"factor", "signal_limit_down"},
+    )
+    service = StrategyBacktestService(engine, _StrategyEngineStub(_strict_scoring_strategy(backend)))
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test", symbols=["A.US", "B.US"], asset_type="us",
+        start=start, end=start + timedelta(days=1), mode="full",
+        matching="open_t+1", fees_pct=0, slippage_bps=0,
+    ))
+
+    assert result.error is None
+    assert len(result.trades) == 2
+    trades = {trade["symbol"]: trade for trade in result.trades}
+    assert trades["A.US"]["entry_date"] == "2024-01-03"
+    assert trades["A.US"]["exit_date"] == "2024-01-04"
+    assert trades["A.US"]["exit_price"] == 14.0
+    assert trades["B.US"]["entry_date"] == "2024-01-04"
+    assert trades["B.US"]["exit_date"] == "2024-01-05"
+    assert trades["B.US"]["exit_price"] == 16.0
+    assert all(trade["entry_score"] == 50.0 for trade in result.trades)
+    assert result.stats["selection"]["entry_candidates"] == 2
+    assert len(result.warnings) == 2
+    assert all("1 个标的" in warning and "factor" in warning for warning in result.warnings)
+    assert any("2024-01-02" in warning for warning in result.warnings)
+    assert any("2024-01-03" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "legacy", "matrix_native"])
+def test_unavailable_scoring_returns_a_service_error_before_execution(backend):
+    start = date(2024, 1, 2)
+    panel = _strict_scoring_panel().drop("factor")
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(engine, _StrategyEngineStub(_strict_scoring_strategy(backend)))
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test", symbols=None, asset_type="us",
+        start=start, end=start + timedelta(days=1),
+    ))
+
+    assert result.error is not None
+    assert "factor" in result.error and "不可计算" in result.error
+    assert result.trades == []
+    assert engine.sim_matrix is None
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "legacy", "matrix_native"])
+def test_backtest_rejects_an_unscorable_date_even_when_other_dates_are_valid(backend):
+    panel = _strict_scoring_panel().with_columns(
+        pl.when(pl.col("date") == date(2024, 1, 3)).then(None).otherwise(pl.col("factor")).alias("factor"),
+    )
+    engine = _EngineStub(panel)
+    engine.load_market_data_matrix_for_backtest = lambda *args, **kwargs: build_market_data_matrix(
+        panel, field_columns={"factor"},
+    )
+    service = StrategyBacktestService(engine, _StrategyEngineStub(_strict_scoring_strategy(backend)))
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test", symbols=None, asset_type="us",
+        start=date(2024, 1, 2), end=date(2024, 1, 3),
+    ))
+    assert result.error is not None
+    assert "2024-01-03" in result.error and "factor" in result.error
+    assert engine.sim_matrix is None
+
+
+@pytest.mark.parametrize("missing_column", [True, False])
+def test_unavailable_basic_filter_returns_a_service_error(missing_column):
+    panel = _strict_scoring_panel()
+    if not missing_column:
+        panel = panel.with_columns(pl.lit(None, dtype=pl.Float64).alias("amount"))
+    strategy = _strict_scoring_strategy("polars_expr")
+    strategy.basic_filter = {"amount_min": 1}
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(engine, _StrategyEngineStub(strategy))
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test", symbols=None, asset_type="us",
+        start=date(2024, 1, 2), end=date(2024, 1, 3),
+    ))
+    assert result.error is not None
+    assert "amount" in result.error and "不可计算" in result.error
+    assert engine.sim_matrix is None
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "legacy", "matrix_native"])
+@pytest.mark.parametrize("whole_date_missing", [False, True])
+def test_backtest_basic_filter_reports_partial_and_daily_input_gaps(backend, whole_date_missing):
+    panel = _strict_scoring_panel().with_columns(
+        pl.when(
+            (pl.col("symbol") == "A.US")
+            & ((pl.col("date") != date(2024, 1, 3)) | pl.lit(not whole_date_missing))
+        ).then(1000.0).otherwise(None).alias("amount"),
+    )
+    strategy = _strict_scoring_strategy(backend)
+    strategy.meta["scoring"] = {}
+    strategy.basic_filter = {"amount_min": 1}
+    engine = _EngineStub(panel)
+    result = StrategyBacktestService(engine, _StrategyEngineStub(strategy)).run(StrategyBacktestConfig(
+        strategy_id="test", symbols=None, asset_type="us",
+        start=date(2024, 1, 2), end=date(2024, 1, 3),
+    ))
+    if whole_date_missing:
+        assert result.error is not None and "2024-01-03" in result.error and "amount" in result.error
+        assert engine.sim_matrix is None
+    else:
+        assert result.error is None
+        assert len(result.warnings) == 2
+        assert all("amount" in warning and "1 个标的" in warning for warning in result.warnings)
+
+
+def test_backtest_price_assumptions_do_not_claim_unverified_adjustments():
+    config = StrategyBacktestConfig(
+        strategy_id="test", symbols=None, asset_type="us",
+        start=date(2024, 1, 2), end=date(2024, 1, 3),
+    )
+    assumptions = StrategyBacktestService._config_to_dict(config)["execution_assumptions"]
+
+    assert assumptions["price_basis"] == "stored_daily_ohlc"
+    assert assumptions["corporate_actions_simulated"] is False
+    assert "复权" in assumptions["price_basis_note"]
 
 
 def test_full_mode_executes_every_candidate_with_strategy_rules():

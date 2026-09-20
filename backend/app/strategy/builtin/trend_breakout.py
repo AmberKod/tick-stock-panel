@@ -17,7 +17,7 @@ META = {
     "name": "趋势突破",
     "description": "MA60上方 + 60日新高 + 量能 ≥ 2倍均量",
     "tags": ["趋势", "突破", "放量"],
-    "asset_types": ["stock", "etf"],
+    "asset_types": ["stock", "etf", "hk", "us"],
     "timeframes": ["1d"],
     "basic_filter": {
         "price_min": 5,
@@ -26,6 +26,10 @@ META = {
         "amount_min": 1e8,
         "exclude_st": True,
         "exclude_new_days": 60,
+        "market_defaults": {
+            "hk": {"market_cap_min": None, "exclude_st": False, "exclude_new_days": 0},
+            "us": {"market_cap_min": None, "exclude_st": False, "exclude_new_days": 0},
+        },
     },
     "params": [
         {

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,7 +26,6 @@ import httpx
 import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
-from app.data_providers.normalizer import normalize_instruments
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +55,7 @@ def _is_hk_stock_symbol(symbol: str) -> bool:
     if len(s) == 5 and s.isdigit():
         return True
     # HK00700 (腾讯/新浪用过的形式)
-    if s.startswith("HK") and len(s) > 2 and s[2:].isdigit():
-        return True
-    return False
+    return bool(s.startswith("HK") and len(s) > 2 and s[2:].isdigit())
 
 
 def _is_hk_index(symbol: str) -> bool:
@@ -65,9 +63,7 @@ def _is_hk_index(symbol: str) -> bool:
     s = str(symbol or "").strip().upper()
     if s in _INDEX_CODE_MAP:
         return True
-    if s.startswith("^") and s[1:] in _INDEX_CODE_MAP.values():
-        return True
-    return False
+    return bool(s.startswith("^") and s[1:] in _INDEX_CODE_MAP.values())
 
 
 def _stock_code(symbol: str) -> str:
@@ -107,6 +103,104 @@ def _sina_symbol(symbol: str) -> str:
 # ── 腾讯 (qt.gtimg.cn) ──────────────────────────────
 
 _TENCENT_FIELDS_RE = re.compile(r'="([^"]*)"')
+# 批量响应按行拆解: 腾讯 v_xxx="..." ; 新浪 hq_str_xxx="..."
+_TENCENT_LINE_RE = re.compile(r'v_(\w+)="([^"]*)"')
+_SINA_LINE_RE = re.compile(r'hq_str_(\w+)="([^"]*)"')
+
+
+def _parse_tencent_fields(fields: list[str], symbol: str) -> dict | None:
+    """解析腾讯单只行情 (~ 分隔字段)。
+
+    字段布局 (港股 r_hk* 与美股 us* 一致, 实测 2026-09):
+        1=名称 2=代码 3=现价 4=昨收 5=今开 6=成交量(股) 30=行情时间
+        32=涨跌幅(百分制) 33=最高 34=最低 37=成交额(元)
+    """
+    if len(fields) < 40:
+        return None
+
+    def _f(i: int) -> float | None:
+        try:
+            v = fields[i]
+            return float(v) if v else None
+        except (ValueError, IndexError):
+            return None
+
+    return {
+        "symbol": _normalize_internal_symbol(symbol),
+        "name": fields[1] if len(fields) > 1 else "",
+        "code": fields[2] if len(fields) > 2 else "",
+        "price": _f(3),
+        "pre_close": _f(4),
+        "open": _f(5),
+        "volume": _f(6),  # 实测为"股", 非"手"
+        "amount": _f(37),  # 成交额, 元
+        "high": _f(33),
+        "low": _f(34),
+        "change_pct": _f(32),  # 百分制
+        "source": "tencent",
+    }
+
+
+def _parse_sina_fields(fields: list[str], symbol: str) -> dict | None:
+    """解析新浪单只港股行情 (逗号分隔字段)。
+
+    新浪港股标准字段 (hq_str_hk*):
+        0=英文名 1=中文名 2=今开 3=昨收 4=最高 5=最低 6=现价
+        7=涨跌额 8=涨跌幅(百分制) 9=买一 10=卖一 11=成交额(元) 12=成交量(股)
+    """
+    if len(fields) < 13 or not fields[0]:
+        return None
+
+    def _f(i: int) -> float | None:
+        try:
+            v = fields[i]
+            return float(v) if v else None
+        except (ValueError, IndexError):
+            return None
+
+    return {
+        "symbol": _normalize_internal_symbol(symbol),
+        "name": fields[1],
+        "code": _stock_code(symbol),
+        "price": _f(6),
+        "pre_close": _f(3),
+        "open": _f(2),
+        "high": _f(4),
+        "low": _f(5),
+        "volume": _f(12),
+        "amount": _f(11),
+        "change_pct": _f(8),  # 百分制
+        "source": "sina",
+    }
+
+
+def _symbol_from_tencent_key(key: str) -> str | None:
+    """腾讯返回 key (如 r_hk00700 / hkHSI) → 内部 symbol (00700.HK / HSI.HK)。"""
+    k = str(key or "").strip().upper()
+    if k.startswith("R_HK"):
+        code = k[4:]
+        if len(code) == 5 and code.isdigit():
+            return f"{code}.HK"
+        return None
+    if k.startswith("HK"):
+        idx = k[2:]
+        for sym, v in _INDEX_CODE_MAP.items():
+            if v == idx:
+                return sym
+    return None
+
+
+def _symbol_from_sina_key(key: str) -> str | None:
+    """新浪返回 key (如 hk00700 / hkHSI) → 内部 symbol (00700.HK / HSI.HK)。"""
+    k = str(key or "").strip().upper()
+    if k.startswith("HK"):
+        idx = k[2:]
+        for sym, v in _INDEX_CODE_MAP.items():
+            if v == idx:
+                return sym
+        if len(idx) == 5 and idx.isdigit():
+            return f"{idx}.HK"
+    return None
 
 
 async def _fetch_tencent(symbol: str, timeout: float = 5.0) -> dict | None:
@@ -129,53 +223,14 @@ async def _fetch_tencent(symbol: str, timeout: float = 5.0) -> dict | None:
             raw = resp.content.decode("gbk")
         except UnicodeDecodeError:
             raw = resp.text
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("tencent quote fetch failed %s: %s", sym, exc)
         return None
 
     m = _TENCENT_FIELDS_RE.search(raw)
     if not m:
         return None
-    fields = m.group(1).split("~")
-    if len(fields) < 40:
-        return None
-
-    def _f(i: int) -> float | None:
-        try:
-            v = fields[i]
-            return float(v) if v else None
-        except (ValueError, IndexError):
-            return None
-
-    name = fields[1] if len(fields) > 1 else ""
-    code = fields[2] if len(fields) > 2 else ""
-    price = _f(3)
-    pre_close = _f(4)
-    open_p = _f(5)
-    volume_hands = _f(6)  # 腾讯是"手"为单位
-    amount = _f(37)  # 成交额, 万
-    high = _f(33)
-    low = _f(34)
-    change_pct = _f(32)  # 涨跌幅, 百分制
-
-    # 港股成交量以"股"为单位, 腾讯返回是"手", 需 * 100 (但 1手=100 是默认, 实际有变)
-    # 不强转, 留原始 hands 单位
-    volume_shares = volume_hands * 100 if volume_hands else None
-
-    return {
-        "symbol": _normalize_internal_symbol(symbol),
-        "name": name,
-        "code": code,
-        "price": price,
-        "pre_close": pre_close,
-        "open": open_p,
-        "high": high,
-        "low": low,
-        "volume": volume_shares,
-        "amount": amount,
-        "change_pct": change_pct,
-        "source": "tencent",
-    }
+    return _parse_tencent_fields(m.group(1).split("~"), symbol)
 
 
 # ── 新浪 (hq.sinajs.cn) ──────────────────────────────
@@ -198,51 +253,14 @@ async def _fetch_sina(symbol: str, timeout: float = 5.0) -> dict | None:
             raw = resp.content.decode("gbk")
         except UnicodeDecodeError:
             raw = resp.text
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("sina quote fetch failed %s: %s", sym, exc)
         return None
 
     m = _TENCENT_FIELDS_RE.search(raw)
     if not m:
         return None
-    fields = m.group(1).split(",")
-    if len(fields) < 10 or not fields[0]:
-        return None
-
-    def _f(i: int) -> float | None:
-        try:
-            v = fields[i]
-            return float(v) if v else None
-        except (ValueError, IndexError):
-            return None
-
-    name = fields[0]
-    open_p = _f(1)
-    pre_close = _f(2)
-    price = _f(3)
-    high = _f(4)
-    low = _f(5)
-    # 新浪港股: fields[8] 成交量, fields[9] 成交额 (元)
-    volume = _f(8)
-    amount = _f(9)
-    change_pct = None
-    if price is not None and pre_close:
-        change_pct = (price - pre_close) / pre_close * 100
-
-    return {
-        "symbol": _normalize_internal_symbol(symbol),
-        "name": name,
-        "code": _stock_code(symbol),
-        "price": price,
-        "pre_close": pre_close,
-        "open": open_p,
-        "high": high,
-        "low": low,
-        "volume": volume,
-        "amount": amount,
-        "change_pct": round(change_pct, 4) if change_pct is not None else None,
-        "source": "sina",
-    }
+    return _parse_sina_fields(m.group(1).split(","), symbol)
 
 
 def _normalize_internal_symbol(symbol: str) -> str:
@@ -289,6 +307,94 @@ def fetch_quote_sync(symbol: str, timeout: float = 5.0) -> dict | None:
         return loop.run_until_complete(fetch_quote(symbol, timeout))
     except RuntimeError:
         return asyncio.run(fetch_quote(symbol, timeout))
+
+
+def _fetch_tencent_batch_sync(symbols: list[str], timeout: float = 5.0) -> dict[str, dict]:
+    """腾讯逗号批量: 一次请求拉多只, 返回 {内部 symbol: quote}。
+
+    单次约 50 只上限 (URL 长度), 超出由调用方分片。
+    """
+    if not symbols:
+        return {}
+    url = "https://qt.gtimg.cn/q=" + ",".join(_tencent_symbol(s) for s in symbols)
+    try:
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://stockapp.finance.qq.com/"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        raw = resp.content.decode("gbk", errors="replace")
+    except Exception as exc:
+        logger.debug("tencent batch fetch failed: %s", exc)
+        return {}
+    result: dict[str, dict] = {}
+    for m in _TENCENT_LINE_RE.finditer(raw):
+        sym = _symbol_from_tencent_key(m.group(1))
+        if sym is None:
+            continue
+        quote = _parse_tencent_fields(m.group(2).split("~"), sym)
+        if quote is not None:
+            result[sym] = quote
+    return result
+
+
+def _fetch_sina_batch_sync(symbols: list[str], timeout: float = 5.0) -> dict[str, dict]:
+    """新浪逗号批量: 一次请求拉多只, 返回 {内部 symbol: quote}。"""
+    if not symbols:
+        return {}
+    url = "https://hq.sinajs.cn/list=" + ",".join(_sina_symbol(s) for s in symbols)
+    try:
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        raw = resp.content.decode("gbk", errors="replace")
+    except Exception as exc:
+        logger.debug("sina batch fetch failed: %s", exc)
+        return {}
+    result: dict[str, dict] = {}
+    for m in _SINA_LINE_RE.finditer(raw):
+        sym = _symbol_from_sina_key(m.group(1))
+        if sym is None:
+            continue
+        quote = _parse_sina_fields(m.group(2).split(","), sym)
+        if quote is not None:
+            result[sym] = quote
+    return result
+
+
+def fetch_quotes_batch_sync(
+    symbols: list[str] | None,
+    timeout: float = 5.0,
+    batch_size: int = 50,
+    max_workers: int = 8,
+) -> list[dict]:
+    """并发分片批量拉港股行情: 腾讯优先, 失败者新浪补漏。
+
+    腾讯/新浪单次约 50 只上限, 故按 batch_size 分片 + 线程池并发。
+    返回顺序与输入一致 (仅含成功项)。
+    """
+    dedup = list(dict.fromkeys(s.strip().upper() for s in (symbols or []) if s and s.strip()))
+    if not dedup:
+        return []
+    batches = [dedup[i:i + batch_size] for i in range(0, len(dedup), batch_size)]
+    results: dict[str, dict] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for partial in ex.map(lambda b: _fetch_tencent_batch_sync(b, timeout), batches):
+            results.update(partial)
+
+    missing = [s for s in dedup if s not in results]
+    if missing:
+        missing_batches = [missing[i:i + batch_size] for i in range(0, len(missing), batch_size)]
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for partial in ex.map(lambda b: _fetch_sina_batch_sync(b, timeout), missing_batches):
+                results.update(partial)
+
+    return [results[s] for s in dedup if s in results]
 
 
 def batch_quotes_to_df(quotes: list[dict]) -> pl.DataFrame:
@@ -343,29 +449,22 @@ class HKQuickQuoteProvider:
         from app.services.hk_data_adapter import load_demo_instruments
         return load_demo_instruments()
 
-    def get_daily(self, *args, **kwargs):  # noqa: ARG002
+    def get_daily(self, *args, **kwargs):
         return pl.DataFrame()
 
-    def get_adj_factors(self, *args, **kwargs):  # noqa: ARG002
+    def get_adj_factors(self, *args, **kwargs):
         return pl.DataFrame()
 
-    def get_minute(self, *args, **kwargs):  # noqa: ARG002
+    def get_minute(self, *args, **kwargs):
         return pl.DataFrame()
 
     def get_realtime(
         self,
-        universes: list[str] | None = None,  # noqa: ARG002
+        universes: list[str] | None = None,
         symbols: list[str] | None = None,
     ) -> pl.DataFrame:
-        """批量拉取 (M1 阶段: 同步逐个拉, 失败该标跳过)。
-
-        M2 优化: 改 httpx.AsyncClient 并发拉取 + 限流。
-        """
+        """批量拉取: 腾讯逗号批量优先, 新浪补漏, 线程池并发分片。"""
         if not symbols:
             return pl.DataFrame()
-        quotes: list[dict] = []
-        for s in symbols:
-            q = fetch_quote_sync(s, timeout=3.0)
-            if q is not None:
-                quotes.append(q)
+        quotes = fetch_quotes_batch_sync(symbols, timeout=3.0)
         return batch_quotes_to_df(quotes)

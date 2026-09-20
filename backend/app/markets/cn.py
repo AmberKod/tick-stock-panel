@@ -9,7 +9,8 @@ M0 迁移红线: 数值与边界语义一字不改 —
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 
 from app.markets.profile import IndexRef, TradingSession
 
@@ -43,6 +44,7 @@ class CNProfile:
     trading_minutes_total = float(_MORNING.minutes + _AFTERNOON.minutes)  # 240
     currency = "CNY"
     settlement = "T+1"
+    same_day_sell_allowed = False
     lot_size = 100
     symbol_suffixes = (".SH", ".SZ", ".BJ")
 

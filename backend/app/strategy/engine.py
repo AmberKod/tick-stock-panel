@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import importlib.util
+import json
 import logging
 import sys
 import threading
@@ -20,6 +23,16 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from app.strategy.concept_heat import (
+    HISTORICAL_REASON,
+    ConceptMappingSnapshot,
+    attach_concept_heat,
+    concept_heat_availability,
+    concept_heat_required,
+    concept_market,
+    concept_quote_date,
+    load_concept_mapping,
+)
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
     effective_scoring,
@@ -52,6 +65,126 @@ DEFAULT_BASIC_FILTER: dict = {
 MAX_COMPOSITE_CHILDREN = 8
 
 
+BASIC_FILTER_NUMERIC_FIELDS: dict[str, tuple[str, ...]] = {
+    "price": ("close",),
+    "market_cap": ("close", "total_shares"),
+    "float_cap": ("close", "float_shares"),
+    "amount": ("amount",),
+    "turnover": ("turnover_rate",),
+    "change_pct": ("change_pct",),
+    "pe_ttm": ("pe_ttm",),
+    "pb": ("pb",),
+}
+
+
+def market_basic_filter(
+    base: dict,
+    asset_type: str,
+    *,
+    overrides: dict | None = None,
+    explicit_keys: frozenset[str] | None = None,
+) -> dict:
+    """Resolve market defaults before applying explicit strategy/user choices.
+
+    Older callers that did not record provenance treat CN-specific values in
+    ``base`` as engine defaults. Explicit share-cap bounds remain enabled and
+    require real share data; they are never silently disabled.
+    """
+    resolved = dict(base or {})
+    market_defaults = resolved.pop("market_defaults", {})
+    if asset_type in ("hk", "us"):
+        defaults = {"boards": [], "exclude_st": False, "exclude_new_days": 0}
+        defaults.update(dict.fromkeys((
+            "market_cap_min", "market_cap_max", "float_cap_min", "float_cap_max",
+        )))
+        for key, value in defaults.items():
+            if key not in (explicit_keys or frozenset()):
+                resolved[key] = value
+    if isinstance(market_defaults, dict) and isinstance(market_defaults.get(asset_type), dict):
+        resolved.update(market_defaults[asset_type])
+    if overrides:
+        resolved.update(overrides)
+    if asset_type in ("hk", "us") and resolved.get("enabled", True):
+        unsupported = [
+            key for key in ("boards", "exclude_st", "exclude_new_days") if resolved.get(key)
+        ]
+        if unsupported:
+            raise ValueError(
+                "港美股不支持所选 A 股基础规则: " + ", ".join(unsupported)
+                + ";请关闭这些条件后重试"
+            )
+    return resolved
+
+
+def basic_filter_dependencies(config: dict) -> set[str]:
+    """Return the exact inputs required by enabled basic-filter conditions."""
+    if not config or not config.get("enabled", True):
+        return set()
+    dependencies: set[str] = set()
+    for prefix, names in BASIC_FILTER_NUMERIC_FIELDS.items():
+        if any(config.get(f"{prefix}_{bound}") is not None for bound in ("min", "max")):
+            dependencies.update(names)
+    if config.get("exclude_st"):
+        dependencies.add("name")
+    if config.get("boards"):
+        dependencies.add("symbol")
+    return dependencies
+
+
+def filter_dependencies(strategy: StrategyDef, params: dict) -> tuple[set[str], bool]:
+    """Share expression-root dependency checks between current and historical runs."""
+    declared = set(strategy.required_features)
+    function = strategy.filter_history_fn or strategy.filter_fn
+    constants = getattr(getattr(function, "__code__", None), "co_consts", ())
+    if strategy.filter_history_fn:
+        if "concept_heat" in constants:
+            declared.add("concept_heat")
+        return declared, bool(declared)
+    if not strategy.filter_fn:
+        return declared, True
+    try:
+        expression = strategy.filter_fn(pl.DataFrame(), params)
+        return declared | (set(expression.meta.root_names()) if expression is not None else set()), True
+    except Exception as exc:
+        logger.debug("strategy filter dependency resolution failed: %s", exc)
+        if "concept_heat" in constants:
+            declared.add("concept_heat")
+        return declared, bool(declared)
+
+
+def strategy_feature_dependencies(strategy: StrategyDef, params: dict) -> set[str]:
+    """Keep snapshot identities while resolving declared and dynamic inputs."""
+    features = set(strategy.required_features) | filter_dependencies(strategy, params)[0]
+    if strategy.meta.get("order_by"):
+        features.add(str(strategy.meta["order_by"]))
+    if strategy.matrix_strategy is not None:
+        features.update(strategy.matrix_strategy.required_fields())
+        parameter_fields = getattr(strategy.matrix_strategy, "required_fields_for_params", None)
+        if callable(parameter_fields):
+            features.update(parameter_fields(params))
+    return features
+
+
+def _validate_filter_data(df: pl.DataFrame, config: dict) -> None:
+    """Reject unavailable enabled inputs while allowing explicitly reported row gaps."""
+    if df.is_empty():
+        return
+    dependencies = basic_filter_dependencies(config)
+    missing = sorted(dependencies - set(df.columns))
+    if missing:
+        raise ValueError("基础筛选不可计算,缺少字段: " + ", ".join(missing))
+    numeric = dependencies - {"name", "symbol"}
+    unavailable = [
+        name for name in sorted(dependencies)
+        if not df.select(
+            (pl.col(name).cast(pl.Float64, strict=False).is_finite()
+             if name in numeric else pl.col(name).is_not_null()).any()
+        ).item()
+    ]
+    if unavailable:
+        raise ValueError("基础筛选不可计算,字段没有有效数据: " + ", ".join(unavailable))
+
+
 def _normalize_param_defs(params: Any) -> list[dict]:
     """把 META["params"] 归一化为标准 list[dict] (每项含 id/label/type/default).
 
@@ -73,10 +206,7 @@ def _normalize_param_defs(params: Any) -> list[dict]:
         for key, val in params.items():
             if not isinstance(key, str) or not key:
                 continue
-            if isinstance(val, dict):
-                item = {"id": key, **val}
-            else:
-                item = {"id": key, "default": val}
+            item = {"id": key, **val} if isinstance(val, dict) else {"id": key, "default": val}
             items.append(item)
         return [_normalize_param_item(item) for item in items]
 
@@ -157,6 +287,11 @@ class StrategyDataContext:
     history: pl.DataFrame | None = None
     market: Any | None = None
     cache_key: str | None = None
+    data_generation: str | None = None
+    is_historical: bool = False
+    concept_snapshot: ConceptMappingSnapshot | None = None
+    concept_heat_metadata: dict = field(default_factory=dict)
+    concept_materialized_frames: tuple[Any, Any, Any] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -199,6 +334,7 @@ class StrategyDef:
     execution_backend: str = "polars_expr"
     matrix_strategy: Any | None = None
     composite: CompositeSpec | None = None  # 仅 backend=="composite" 时非空
+    basic_filter_explicit_keys: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -212,6 +348,9 @@ class StrategyResult:
     scores: dict[str, float] = field(default_factory=dict)
     entry_signal_hits: list[dict] = field(default_factory=list)
     exit_signal_hits: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    industry_mapping_version: str | None = None
+    concept_heat_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -230,6 +369,7 @@ class StrategyEngine:
         strategy_dirs: list[Path] | None = None,
         *,
         override_loader: Callable[[str], dict] | None = None,
+        data_dir: Path | None = None,
     ):
         self._strategies: dict[str, StrategyDef] = {}
         self._load_errors: list[dict] = []  # 加载失败的策略 [{file, error}]
@@ -240,6 +380,9 @@ class StrategyEngine:
         # 保证 composite 内跑子策略与单独跑子策略使用同一口径(CONTRIBUTING §5.1)。
         # None 时(测试/无 data_dir) 子策略用默认参数, 不报错。
         self._override_loader = override_loader
+        # data_dir 用于组合层约束的行业映射加载 (ext_hy_ths / instruments.sector);
+        # None 时 (测试) portfolio 约束优雅降级为直通。
+        self._data_dir = data_dir
         self._load_all(retain_previous_on_error=False)
 
     # ================================================================
@@ -324,7 +467,7 @@ class StrategyEngine:
         规则(首版硬约束):
         - 每个 child 必须已加载(candidates 中存在)
         - 禁止 composite 嵌套 composite(子策略必须是叶子)
-        - child 的 asset_types / timeframes 必须与父 composite 完全一致
+        - child 的 asset_types / timeframes 必须覆盖父 composite 声明的范围
         - 数量 <= MAX_COMPOSITE_CHILDREN
         任一不满足返回错误描述, 由 _load_all 移除该孤儿策略(不波及无辜)。
         """
@@ -390,7 +533,7 @@ class StrategyEngine:
                 )
         except ValueError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             # 文件读不到/语法错等: 不阻断, 让下方 exec_module 抛原样错误
             pass
 
@@ -414,10 +557,8 @@ class StrategyEngine:
                     sys.modules[spec.name] = previous_module
                 raise
             finally:
-                try:
+                with contextlib.suppress(ValueError):
                     sys.path.remove(inserted_path)
-                except ValueError:
-                    pass
 
         meta = dict(getattr(mod, "META", {}) or {})
         meta.setdefault("id", path.stem)
@@ -521,6 +662,7 @@ class StrategyEngine:
         return StrategyDef(
             meta=meta,
             basic_filter=bf,
+            basic_filter_explicit_keys=frozenset(strat_bf or {}) | frozenset(meta_bf or {}),
             entry_signals=getattr(mod, "ENTRY_SIGNALS", []),
             exit_signals=getattr(mod, "EXIT_SIGNALS", []),
             stop_loss=getattr(mod, "STOP_LOSS", None),
@@ -751,6 +893,7 @@ class StrategyEngine:
                     strategy,
                     overrides_map.get(strategy_id),
                     params,
+                    context.asset_type,
                 )
             )
         if not matrix_ids:
@@ -838,14 +981,41 @@ class StrategyEngine:
 
         s = self.get(strategy_id)
         self.validate_context(s, context)
+        self._assert_hk_context_generation(context)
         as_of = context.as_of
         overrides = overrides or {}
         params = self.resolve_params(s, params, overrides)
         entry_signals = self._effective_signals(overrides, "entry_signals", s.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", s.exit_signals)
+        scoring = effective_scoring(s.meta.get("scoring"), overrides)
+        basic_filter = market_basic_filter(
+            s.basic_filter, context.asset_type,
+            overrides=overrides.get("basic_filter"),
+            explicit_keys=s.basic_filter_explicit_keys,
+        )
+        self._validate_historical_inputs(s, context, basic_filter, scoring, overrides, params)
+        if context.asset_type == "hk":
+            from app.backtest.fundamentals import HK_FINANCIAL_NAMES
+
+            financial_names = (basic_filter_dependencies(basic_filter) | scoring_dependencies(scoring)
+                               | strategy_feature_dependencies(s, params)) & HK_FINANCIAL_NAMES
+            if s.meta.get("order_by") in HK_FINANCIAL_NAMES:
+                financial_names.add(s.meta["order_by"])
+            context = self._with_hk_financials(context, financial_names)
+        concept_fingerprint = self.concept_config_fingerprint(strategy_id, params, overrides)
+        if concept_fingerprint:
+            if context.is_historical:
+                raise ValueError(HISTORICAL_REASON)
+            snapshot = context.concept_snapshot or load_concept_mapping(self._data_dir, concept_market(context.asset_type))
+            context = self._with_concept_heat(context, snapshot)
+        concept_metadata = {
+            **context.concept_heat_metadata, "config_fingerprint": concept_fingerprint,
+        } if concept_fingerprint else {}
+        industry_version = self._industry_version(s, context, scoring, overrides)
+        context = self._with_industry_heat(context, scoring)
 
         if s.execution_backend == "matrix_native":
-            return self._run_matrix_strategy(
+            result = self._run_matrix_strategy(
                 strategy_id,
                 s,
                 as_of,
@@ -855,9 +1025,13 @@ class StrategyEngine:
                 context=context,
                 started_at=t0,
             )
+            result.industry_mapping_version = industry_version
+            result.concept_heat_metadata = concept_metadata
+            self._assert_hk_context_generation(context)
+            return result
 
         if s.execution_backend == "composite":
-            return self._run_composite_strategy(
+            result = self._run_composite_strategy(
                 strategy_id,
                 s,
                 context,
@@ -866,8 +1040,12 @@ class StrategyEngine:
                 overrides=overrides,
                 started_at=t0,
             )
+            if concept_metadata:
+                result.concept_heat_metadata = {**concept_metadata, **result.concept_heat_metadata}
+                result.concept_heat_metadata["config_fingerprint"] = concept_fingerprint
+            self._assert_hk_context_generation(context)
+            return result
 
-        scoring = effective_scoring(s.meta.get("scoring"), overrides)
         scoring_directions = effective_scoring_directions(overrides)
         current, history = self._materialize_scoring_frames(
             context.current,
@@ -894,6 +1072,7 @@ class StrategyEngine:
                     as_of=as_of,
                     strategy_id=strategy_id,
                     exit_signal_hits=exit_signal_hits,
+                    concept_heat_metadata=concept_metadata,
                 )
             # 自定义信号前置校验: REQUIRED_FEATURES 引用的 csg_ 列未注入时,
             # 给出明确指引, 而不是让策略代码抛 polars 缺列错 (500)。
@@ -921,13 +1100,13 @@ class StrategyEngine:
                 as_of=as_of,
                 strategy_id=strategy_id,
                 exit_signal_hits=exit_signal_hits,
+                concept_heat_metadata=concept_metadata,
             )
 
         # 基础过滤: 策略默认 basic_filter 兜底, 用户 override 优先覆盖。
         # 这样策略文件里写的 exclude_st/price_min 等默认值即使前端没保存也能生效。
-        bf = dict(s.basic_filter) if s.basic_filter else {}
-        if overrides and overrides.get("basic_filter"):
-            bf.update(overrides["basic_filter"])
+        bf = basic_filter
+        warnings = self._missing_input_warnings(df, bf, {})
 
         # Stage 1: 基础过滤（enabled 默认开启; 显式 enabled=false 才跳过）
         if bf and bf.get("enabled", True):
@@ -942,8 +1121,23 @@ class StrategyEngine:
             expr = s.filter_fn(df, params)
             df = df.filter(expr)
 
-        # Stage 3: 评分
+        # Stage 3: 热度已经基于完整输入截面计算,候选过滤不能改变其定义。
+        warnings.extend(self._missing_input_warnings(df, {}, scoring))
         df = self._apply_scoring(df, scoring, scoring_directions)
+        if any(weight for weight in scoring.values()) and "score" in df.columns:
+            df = df.filter(pl.col("score").is_finite())
+        order_value = None
+        order_by = s.meta.get("order_by")
+        if not df.is_empty() and "score" not in df.columns and order_by and order_by != "score":
+            df = materialize_scoring_columns(df, [order_by])
+            order_value = scoring_value_expr(df.columns, order_by)
+            if order_value is None:
+                raise ValueError(f"策略排序不可计算,缺少字段或依赖: {order_by}")
+            order_value = order_value.cast(pl.Float64, strict=False)
+            if not df.select(order_value.is_finite().any()).item():
+                raise ValueError(f"策略排序不可计算,字段没有有效数据: {order_by}")
+            warnings.extend(self._missing_input_warnings(df, {}, {order_by: 1}))
+            df = df.filter(order_value.is_finite())
         entry_signal_hits = self._collect_signal_hits(df, entry_signals)
         if not entry_signals and (s.filter_history_fn or s.filter_fn):
             entry_signal_hits = [
@@ -955,23 +1149,30 @@ class StrategyEngine:
         limit = self._result_limit(s, overrides)
         order_desc = s.meta.get("descending", True)
         if "score" in df.columns:
-            df = df.sort("score", descending=order_desc)
-        elif s.meta.get("order_by") and s.meta["order_by"] != "score":
-            ob = s.meta["order_by"]
-            if ob in df.columns:
-                df = df.sort(ob, descending=order_desc)
-        if limit is not None:
-            df = df.head(limit)
+            df = df.sort(["score", "symbol"], descending=[order_desc, False], nulls_last=True)
+        elif order_value is not None:
+            df = df.sort([order_value, "symbol"], descending=[order_desc, False], nulls_last=True)
 
-        # 输出
-        rows = _sanitize(df.to_dicts())
+        # 组合层约束 (借鉴 AlphaSift portfolio_profile): 排序后、截断前,
+        # 对截面施加同行业最多 N 只 + 可选集中度惩罚。仅显式配置时生效,
+        # 默认 (无 portfolio 配置) 行为与历史完全一致。
+        rows = df.to_dicts()
+        portfolio_cfg = overrides.get("portfolio", s.meta.get("portfolio"))
+        rows = self._constrain_candidates(rows, portfolio_cfg, context.asset_type, warnings)
+        if limit is not None:
+            rows = rows[:limit]
+
+        # 输出 (rows 已在组合约束段物化为 dict 列表)
+        rows = _sanitize(rows)
         elapsed = (time.perf_counter() - t0) * 1000
 
         scores: dict[str, float] = {}
-        if "score" in df.columns:
-            for r in df.iter_rows(named=True):
-                scores[r["symbol"]] = float(r.get("score") or 0)
+        for r in rows:
+            score = r.get("score")
+            if isinstance(score, (int, float)):
+                scores[r["symbol"]] = float(score)
 
+        self._assert_hk_context_generation(context)
         return StrategyResult(
             as_of=as_of,
             strategy_id=strategy_id,
@@ -981,7 +1182,314 @@ class StrategyEngine:
             scores=scores,
             entry_signal_hits=entry_signal_hits,
             exit_signal_hits=exit_signal_hits,
+            warnings=warnings,
+            industry_mapping_version=industry_version,
+            concept_heat_metadata=concept_metadata,
         )
+
+    def concept_config_fingerprint(
+        self, strategy_id: str, params: dict | None = None, overrides: dict | None = None,
+    ) -> str | None:
+        """Identify effective configuration, including dependent composite children.
+
+        This does not read concept data. Cache readers use it to reject delayed
+        results from runs started before a configuration save.
+        """
+        strategy = self.get(strategy_id)
+        overrides = overrides or {}
+        params = self.resolve_params(strategy, params, overrides)
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
+        required = concept_heat_required(scoring, strategy_feature_dependencies(strategy, params))
+        children_config: list[dict] = []
+        if strategy.composite is not None:
+            for child in self._concept_children(strategy, overrides):
+                child_override = self._concept_child_override(child.strategy_id, overrides)
+                fingerprint = self.concept_config_fingerprint(child.strategy_id, overrides=child_override)
+                required = required or fingerprint is not None
+                children_config.append({
+                    "id": child.strategy_id, "weight": child.weight,
+                    "meta": self.get(child.strategy_id).meta, "overrides": child_override,
+                    "concept_fingerprint": fingerprint,
+                })
+        if not required:
+            return None
+        payload = {"id": strategy_id, "meta": strategy.meta, "params": params,
+                   "scoring": scoring, "overrides": overrides, "children": children_config}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:20]
+
+    @staticmethod
+    def _concept_children(strategy: StrategyDef, overrides: dict) -> tuple[CompositeChild, ...]:
+        override_children = overrides.get("children")
+        if isinstance(override_children, list) and override_children:
+            return _parse_composite_children(override_children).children
+        return strategy.composite.children if strategy.composite is not None else ()
+
+    def _concept_child_override(self, strategy_id: str, overrides: dict) -> dict:
+        try:
+            loaded = self._override_loader(strategy_id) if self._override_loader is not None else {}
+        except Exception as exc:
+            # Match the existing composite fallback for unavailable saved settings.
+            logger.debug("composite override lookup failed: %s", exc)
+            loaded = {}
+        child_override = dict(loaded) if isinstance(loaded, dict) else {}
+        if overrides.get("basic_filter"):
+            child_override["basic_filter"] = overrides["basic_filter"]
+        return child_override
+
+    def _with_concept_heat(
+        self, context: StrategyDataContext, snapshot: ConceptMappingSnapshot,
+    ) -> StrategyDataContext:
+        """Attach the full current slice; historical values remain unknown."""
+        from app.markets import get_profile
+
+        market_name = concept_market(context.asset_type)
+        today = get_profile(market_name if market_name != "etf" else "cn").today()
+        current = context.current
+        if current is None and context.history is not None:
+            panel = context.history
+            if "datetime" in panel.columns:
+                current = panel.filter(pl.col("datetime").cast(pl.Date) == context.as_of)
+                if not current.is_empty():
+                    current = current.filter(pl.col("datetime") == current["datetime"].max())
+            elif "date" in panel.columns:
+                current = panel.filter(pl.col("date") == context.as_of)
+        quote_date, mixed_dates = concept_quote_date(current)
+        metadata = concept_heat_availability(
+            snapshot, market=market_name, as_of=context.as_of, quote_date=quote_date,
+            current_market_date=today, historical=context.is_historical,
+        )
+        if mixed_dates and metadata["reason_code"] == "missing_quote_date":
+            metadata.update(reason="行情包含多个交易日期,概念热度需要同一日期的完整截面", reason_code="mixed_quote_dates")
+        if metadata["status"] == "unavailable":
+            raise ValueError(metadata["reason"])
+        if current is None or "change_pct" not in current.columns:
+            raise ValueError("概念热度不可计算:缺少当日涨幅 change_pct")
+        if "symbol" not in current.columns:
+            raise ValueError("概念热度不可计算:缺少完整标的代码")
+        prepared = context.concept_materialized_frames
+        reuse_frames = (
+            context.concept_snapshot is snapshot and prepared is not None
+            and prepared[0] is current and prepared[1] is context.history
+            and context.concept_heat_metadata.get("market") == market_name
+            and context.concept_heat_metadata.get("quote_date") == str(quote_date)
+            and context.concept_heat_metadata.get("current_market_date") == str(today)
+        )
+        if reuse_frames:
+            metadata = context.concept_heat_metadata
+            if prepared[2] is context.market:
+                return context
+        else:
+            counts: dict[str, int] = {}
+            current = attach_concept_heat(current, snapshot, market=market_name, diagnostics=counts)
+            valid_count = counts.get("computable_symbols", 0)
+            if not valid_count:
+                raise ValueError("概念热度不可计算:没有至少 3 个独立有效成员的概念")
+            metadata.update(counts, status="partial" if valid_count < counts["input_symbols"] else "available")
+        history = context.history
+        if not reuse_frames and history is not None and not history.is_empty():
+            history = history.drop("concept_heat", strict=False)
+            if ("datetime" in current.columns) != ("datetime" in history.columns):
+                raise ValueError("概念热度不可计算:当前截面与历史窗口的行情时间精度不一致")
+            keys = [name for name in ("symbol", "date", "datetime") if name in current.columns and name in history.columns]
+            if not ({"date", "datetime"} & set(keys)):
+                raise ValueError("概念热度不可计算:历史窗口缺少可对齐的行情时点")
+            values = current.select([*keys, "concept_heat"]).unique(subset=keys, keep="last")
+            history = history.join(values, on=keys, how="left", maintain_order="left")
+        matrix = context.market
+        if matrix is not None:
+            heat = np.full(matrix.shape, np.nan, dtype=np.float32)
+            time_key = "datetime" if "datetime" in current.columns else "date"
+            values = {
+                (str(row[time_key])[:19].replace("T", " "), str(row["symbol"]).strip().upper()): row["concept_heat"]
+                for row in current.select("symbol", time_key, "concept_heat").iter_rows(named=True)
+            }
+            target_ids = [i for i, label in enumerate(matrix.timestamp_labels) if label[:10] == str(quote_date)]
+            if not target_ids:
+                raise ValueError("概念热度不可计算:矩阵缺少当前行情日期")
+            if time_key == "date" and any(len(matrix.timestamp_labels[i]) > 10 for i in target_ids):
+                raise ValueError("概念热度不可计算:分钟矩阵需要对应的行情时间")
+            for time_id in target_ids:
+                label = matrix.timestamp_labels[time_id][:19].replace("T", " ")
+                for asset_id, symbol in enumerate(matrix.symbols):
+                    value = values.get((label, symbol.strip().upper()))
+                    if value is not None:
+                        heat[time_id, asset_id] = float(value)
+            if not np.isfinite(heat[target_ids[-1]]).any():
+                raise ValueError("概念热度不可计算:矩阵目标时点与行情时间不一致")
+            matrix = replace(matrix, fields={**matrix.fields, "concept_heat": heat})
+        return replace(context, current=current, history=history, market=matrix,
+                       concept_snapshot=snapshot, concept_heat_metadata=metadata,
+                       concept_materialized_frames=(current, history, matrix))
+
+    def _industry_version(
+        self, strategy: StrategyDef, context: StrategyDataContext,
+        scoring: Mapping[str, Any], overrides: dict,
+    ) -> str | None:
+        from app.strategy.industry_heat import scoring_uses_industry_heat
+        from app.strategy.portfolio_constraints import (
+            industry_mapping_version,
+            normalize_portfolio_config,
+        )
+
+        portfolio = overrides.get("portfolio", strategy.meta.get("portfolio"))
+        if not scoring_uses_industry_heat(scoring) and not normalize_portfolio_config(portfolio):
+            return None
+        market = context.asset_type if context.asset_type in ("hk", "us") else "cn"
+        return industry_mapping_version(self._data_dir, market)
+
+    def _constrain_candidates(
+        self, rows: list[dict], portfolio: dict | None, asset_type: str, warnings: list[str],
+    ) -> list[dict]:
+        from app.strategy.portfolio_constraints import (
+            UNKNOWN_BUCKET,
+            apply_portfolio_constraints,
+            industry_map_for_market,
+            normalize_portfolio_config,
+        )
+
+        config = normalize_portfolio_config(portfolio)
+        if not config or not rows:
+            return rows
+        market = asset_type if asset_type in ("hk", "us") else "cn"
+        mapping = industry_map_for_market(self._data_dir, market, config["industry_level"])
+        if not mapping:
+            raise ValueError("候选集合行业约束不可计算,缺少行业映射")
+        unknown = sum(mapping.get(str(row.get("symbol")), UNKNOWN_BUCKET) == UNKNOWN_BUCKET for row in rows)
+        if unknown:
+            warnings.append(f"{unknown} 个标的行业未知,已保留,未应用候选集合行业约束")
+        return apply_portfolio_constraints(rows, mapping, config)
+
+    @staticmethod
+    def _validate_historical_inputs(
+        strategy: StrategyDef,
+        context: StrategyDataContext,
+        basic_filter: dict,
+        scoring: Mapping[str, Any],
+        overrides: dict,
+        params: dict | None = None,
+    ) -> None:
+        """Current valuation/sector snapshots cannot describe past screening dates."""
+        if not context.is_historical:
+            return
+        from app.strategy.portfolio_constraints import normalize_portfolio_config
+
+        features = basic_filter_dependencies(basic_filter) | scoring_dependencies(scoring)
+        features.update(strategy_feature_dependencies(strategy, StrategyEngine.resolve_params(strategy, params, overrides)))
+        if "concept_heat" in features:
+            raise ValueError(HISTORICAL_REASON)
+        unavailable = features & ({"industry_heat"} if context.asset_type == "hk" else {"pe_ttm", "pb", "industry_heat"})
+        portfolio = overrides.get("portfolio", strategy.meta.get("portfolio"))
+        if normalize_portfolio_config(portfolio):
+            unavailable.add("portfolio")
+        if unavailable:
+            raise ValueError(
+                "历史筛选不可计算,缺少目标日期可追溯的估值或行业数据: "
+                + ", ".join(sorted(unavailable))
+            )
+
+    def _assert_hk_context_generation(self, context: StrategyDataContext) -> None:
+        if context.asset_type != "hk" or context.data_generation is None or self._data_dir is None:
+            return
+        from app.enriched_generation import EnrichedGenerationUnavailableError
+        from app.services.market_data_status import market_data_generation
+
+        if market_data_generation(self._data_dir, "HK") != context.data_generation:
+            raise EnrichedGenerationUnavailableError("港股筛选上下文的数据版本已过期,请重新加载")
+
+    def _with_hk_financials(self, context: StrategyDataContext, names: set[str]) -> StrategyDataContext:
+        """Materialize requested historical ratios for every strategy backend."""
+        if not names:
+            return context
+        from app.backtest.fundamentals import (
+            attach_hk_financial_fields,
+            build_fundamental_matrices,
+            load_fundamental_snapshot,
+            require_hk_financial_coverage,
+        )
+
+        snapshot = load_fundamental_snapshot(self._data_dir, market="HK", names=names)
+        current = attach_hk_financial_fields(context.current, snapshot, names) if context.current is not None else None
+        history = attach_hk_financial_fields(context.history, snapshot, names) if context.history is not None else None
+        target = current if current is not None else history
+        if target is not None and "date" in target.columns:
+            target = target.filter(pl.col("date") == context.as_of)
+        if target is not None:
+            require_hk_financial_coverage(target, names, context=str(context.as_of))
+        market = context.market
+        if market is not None:
+            extra = build_fundamental_matrices(
+                market, snapshot, names,
+                price_metadata=context.history if context.history is not None else context.current,
+            )
+            target_times = [index for index, label in enumerate(market.timestamp_labels) if label[:10] == str(context.as_of)]
+            if target_times:
+                require_hk_financial_coverage(
+                    pl.DataFrame({name: values[target_times].reshape(-1) for name, values in extra.items()}),
+                    names, context=str(context.as_of),
+                )
+            market = replace(market, fields={**dict(market.fields), **extra})
+        return replace(context, current=current, history=history, market=market)
+
+    def _with_industry_heat(
+        self, context: StrategyDataContext, scoring: Mapping[str, Any],
+    ) -> StrategyDataContext:
+        """Attach heat for the current market/date before pool or strategy filtering."""
+        from app.strategy.industry_heat import attach_industry_heat, scoring_uses_industry_heat
+
+        if not scoring_uses_industry_heat(scoring):
+            return context
+        current = context.current
+        if current is None and context.history is not None:
+            current = self._matrix_target_frame(context.history, context.as_of)
+        if current is None or current.is_empty():
+            return context
+        if "industry_heat" in current.columns:
+            current = current.drop("industry_heat")
+        market_name = context.asset_type if context.asset_type in ("hk", "us") else "cn"
+        current = attach_industry_heat(current, self._data_dir, market=market_name)
+        history = context.history
+        if history is not None and not history.is_empty():
+            if "industry_heat" in history.columns:
+                history = history.drop("industry_heat")
+            keys = [name for name in ("symbol", "date", "datetime") if name in current.columns and name in history.columns]
+            values = current.select([*keys, "industry_heat"]).unique(subset=keys, keep="last")
+            history = history.join(values, on=keys, how="left")
+        matrix = context.market
+        if matrix is not None:
+            heat = np.full(matrix.shape, np.nan, dtype=np.float32)
+            by_symbol = dict(zip(current["symbol"].to_list(), current["industry_heat"].to_list(), strict=True))
+            target_times = [i for i, label in enumerate(matrix.timestamp_labels) if label[:10] == str(context.as_of)]
+            if target_times:
+                for asset_id, symbol in enumerate(matrix.symbols):
+                    value = by_symbol.get(symbol)
+                    if value is not None:
+                        heat[target_times[-1], asset_id] = float(value)
+            matrix = replace(matrix, fields={**matrix.fields, "industry_heat": heat})
+        return replace(context, current=current, history=history, market=matrix)
+
+    @staticmethod
+    def _missing_input_warnings(
+        df: pl.DataFrame, basic_filter: dict, scoring: Mapping[str, Any],
+    ) -> list[str]:
+        if df.is_empty():
+            return []
+        warnings: list[str] = []
+        for name in sorted(basic_filter_dependencies(basic_filter) - {"symbol", "name"}):
+            if name not in df.columns:
+                continue
+            count = df.select((~pl.col(name).cast(pl.Float64, strict=False).is_finite().fill_null(False)).sum()).item()
+            if count:
+                warnings.append(f"{count} 个标的缺少有效 {name},已从基础筛选候选中排除")
+        for name, weight in scoring.items():
+            if not weight:
+                continue
+            value = scoring_value_expr(df.columns, str(name))
+            if value is None:
+                continue
+            count = df.select((~value.cast(pl.Float64, strict=False).is_finite().fill_null(False)).sum()).item()
+            if count:
+                warnings.append(f"{count} 个标的缺少有效 {name},无法评分,已从策略候选中排除")
+        return warnings
 
     @staticmethod
     def _effective_signals(overrides: dict, key: str, default: list[str]) -> list[str]:
@@ -1033,6 +1541,16 @@ class StrategyEngine:
         for _, strategy in selected:
             self.validate_context(strategy, context)
 
+        concept_ids = [sid for sid, _ in selected if self.concept_config_fingerprint(
+            sid, params_map.get(sid), overrides_map.get(sid),
+        )]
+        if concept_ids:
+            if context.is_historical:
+                raise ValueError(HISTORICAL_REASON)
+            snapshot = context.concept_snapshot or load_concept_mapping(self._data_dir, concept_market(context.asset_type))
+            context = self._with_concept_heat(context, snapshot)
+            df = context.current
+
         history_strats = [
             (sid, strategy)
             for sid, strategy in selected
@@ -1063,12 +1581,17 @@ class StrategyEngine:
                         strategy,
                         overrides_map.get(sid),
                         params_map.get(sid),
+                        context.asset_type,
                     )
                 )
             shared_matrix = build_market_data_matrix(
                 shared_history,
                 field_columns=field_columns,
             )
+
+        if concept_ids and shared_matrix is not None:
+            context = self._with_concept_heat(replace(context, market=shared_matrix), context.concept_snapshot)
+            shared_matrix = context.market
 
         results: dict[str, StrategyResult] = {}
 
@@ -1092,6 +1615,7 @@ class StrategyEngine:
         strategy: StrategyDef,
         overrides: dict | None = None,
         params: dict | None = None,
+        asset_type: str = "stock",
     ) -> set[str]:
         fields = set(strategy.matrix_strategy.required_fields())
         # 参数评分字段 (如挖掘策略的因子组合) 需展开为实际数据依赖,
@@ -1108,20 +1632,13 @@ class StrategyEngine:
                     {str(name): 1.0 for name in parameter_fields(params or {})}
                 )
             )
-        basic_filter = dict(strategy.basic_filter or {})
-        if (overrides or {}).get("basic_filter"):
-            basic_filter.update(overrides["basic_filter"])
-        for prefix, field_name in (
-            ("market_cap", "total_shares"),
-            ("float_cap", "float_shares"),
-            ("amount", "amount"),
-            ("turnover", "turnover_rate"),
-        ):
-            if (
-                basic_filter.get(f"{prefix}_min") is not None
-                or basic_filter.get(f"{prefix}_max") is not None
-            ):
-                fields.add(field_name)
+        basic_filter = market_basic_filter(
+            strategy.basic_filter,
+            asset_type,
+            overrides=(overrides or {}).get("basic_filter"),
+            explicit_keys=getattr(strategy, "basic_filter_explicit_keys", frozenset()),
+        )
+        fields.update(basic_filter_dependencies(basic_filter) - {"symbol", "name"})
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         fields.update(scoring_dependencies(scoring))
         order_by = strategy.meta.get("order_by")
@@ -1156,7 +1673,9 @@ class StrategyEngine:
                 return StrategyResult(as_of=as_of, strategy_id=strategy_id)
             market = build_market_data_matrix(
                 source_panel,
-                field_columns=self._matrix_field_columns(strategy, overrides, params),
+                field_columns=self._matrix_field_columns(
+                    strategy, overrides, params, context.asset_type,
+                ),
             )
 
         if source_panel is None or source_panel.is_empty():
@@ -1164,9 +1683,12 @@ class StrategyEngine:
         if source_panel is None or source_panel.is_empty():
             return StrategyResult(as_of=as_of, strategy_id=strategy_id)
 
-        basic_filter = dict(strategy.basic_filter or {})
-        if overrides.get("basic_filter"):
-            basic_filter.update(overrides["basic_filter"])
+        basic_filter = market_basic_filter(
+            strategy.basic_filter,
+            context.asset_type,
+            overrides=overrides.get("basic_filter"),
+            explicit_keys=strategy.basic_filter_explicit_keys,
+        )
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         asset_mask = None
         if pool:
@@ -1177,6 +1699,20 @@ class StrategyEngine:
                 count=len(market.symbols),
             )
 
+        target_frame = self._matrix_target_frame(source_panel, as_of)
+        _validate_filter_data(target_frame, basic_filter)
+        warnings = self._missing_input_warnings(target_frame, basic_filter, {})
+        target_ids = [
+            time_id
+            for time_id, label in enumerate(market.timestamp_labels)
+            if label[:10] == str(as_of)
+        ]
+        if not target_ids:
+            return StrategyResult(as_of=as_of, strategy_id=strategy_id)
+        target_time = target_ids[-1]
+        entry_time_mask = np.zeros(market.shape[0], dtype=bool)
+        entry_time_mask[target_time] = True
+        diagnostics: dict = {}
         signals = MatrixStrategyPipeline().run(
             strategy.matrix_strategy,
             market,
@@ -1188,16 +1724,15 @@ class StrategyEngine:
                 order_by=strategy.meta.get("order_by"),
                 descending=bool(strategy.meta.get("descending", True)),
                 asset_mask=asset_mask,
+                diagnostics=diagnostics,
+                entry_time_mask=entry_time_mask,
             ),
         )
-        target_ids = [
-            time_id
-            for time_id, label in enumerate(market.timestamp_labels)
-            if label[:10] == str(as_of)
-        ]
-        if not target_ids:
-            return StrategyResult(as_of=as_of, strategy_id=strategy_id)
-        target_time = target_ids[-1]
+        unscored = int(diagnostics["unscored_by_date"][target_time])
+        for name, counts in diagnostics.get("score_missing_by_date", {}).items():
+            count = int(counts[target_time])
+            if count:
+                warnings.append(f"{count} 个标的缺少有效 {name},无法评分,已从策略候选中排除")
         entry_active = signals.entry[target_time]
         exit_active = signals.exit[target_time]
         if asset_mask is not None:
@@ -1217,15 +1752,24 @@ class StrategyEngine:
         )
         selected_assets = np.flatnonzero(entry_active != 0)
         if selected_assets.size == 0:
+            if unscored:
+                raise ValueError("策略不可计算,候选标的缺少有效评分数据: " + ", ".join(scoring))
             return StrategyResult(
                 as_of=as_of,
                 strategy_id=strategy_id,
                 elapsed_ms=(time.perf_counter() - started_at) * 1000,
                 entry_signal_hits=entry_signal_hits,
                 exit_signal_hits=exit_signal_hits,
+                warnings=warnings,
             )
 
-        target_frame = self._matrix_target_frame(source_panel, as_of)
+        selected_symbols = [market.symbols[int(asset_id)] for asset_id in selected_assets]
+        score_frame = target_frame.filter(pl.col("symbol").is_in(selected_symbols))
+        warnings.extend(self._missing_input_warnings(score_frame, {}, scoring))
+        if any(weight for weight in scoring.values()) and not np.isfinite(
+            signals.score[target_time, selected_assets]
+        ).any():
+            raise ValueError("策略不可计算,候选标的缺少有效评分数据: " + ", ".join(scoring))
         row_by_symbol = {
             str(row["symbol"]): row
             for row in target_frame.iter_rows(named=True)
@@ -1238,14 +1782,28 @@ class StrategyEngine:
                 continue
             score = float(signals.score[target_time, int(asset_id)])
             ranked.append((score, {**row, "score": score}))
-        ranked.sort(
-            key=lambda item: item[0],
-            reverse=bool(strategy.meta.get("descending", True)),
+        descending = bool(strategy.meta.get("descending", True))
+        weighted = any(weight for weight in scoring.values())
+        # order_by values are already direction-adjusted by build_matrix_score.
+        rank_descending = descending if weighted or strategy.meta.get("order_by") in (None, "score") else True
+        ranked.sort(key=lambda item: (
+            not np.isfinite(item[0]),
+            (-item[0] if rank_descending else item[0]) if np.isfinite(item[0]) else 0.0,
+            str(item[1]["symbol"]),
+        ))
+        # 组合层约束 (与 run() 主路径同语义): 排序后、截断前
+        portfolio_cfg = overrides.get("portfolio", strategy.meta.get("portfolio"))
+        pending = self._constrain_candidates(
+            [row for _, row in ranked], portfolio_cfg, context.asset_type, warnings,
         )
+        ranked = [(float(row.get("score") or 0.0), row) for row in pending]
         limit = self._result_limit(strategy, overrides)
         selected_rows = ranked if limit is None else ranked[:limit]
         rows = _sanitize([row for _, row in selected_rows])
-        scores = {str(row["symbol"]): float(row.get("score") or 0.0) for row in rows}
+        scores = {
+            str(row["symbol"]): float(row["score"])
+            for row in rows if isinstance(row.get("score"), (int, float))
+        }
         return StrategyResult(
             as_of=as_of,
             strategy_id=strategy_id,
@@ -1255,6 +1813,7 @@ class StrategyEngine:
             scores=scores,
             entry_signal_hits=entry_signal_hits,
             exit_signal_hits=exit_signal_hits,
+            warnings=warnings,
         )
 
     def _run_composite_strategy(
@@ -1303,7 +1862,7 @@ class StrategyEngine:
                     loaded = self._override_loader(cid)
                     if isinstance(loaded, dict):
                         child_override = dict(loaded)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
             if shared_basic_filter:
                 child_override["basic_filter"] = shared_basic_filter
@@ -1353,6 +1912,17 @@ class StrategyEngine:
             if sym in row_by_symbol
         ])
         scores = {str(row["symbol"]): float(row.get("score") or 0.0) for row in rows}
+        concept_children = {result.strategy_id: result.concept_heat_metadata
+                            for result in ordered_results if result.concept_heat_metadata}
+        concept_metadata: dict = {}
+        if concept_children:
+            identities = {
+                tuple(metadata.get(name) for name in ("market", "quote_date", "current_market_date", "mapping_version"))
+                for metadata in concept_children.values()
+            }
+            if len(identities) != 1:
+                raise ValueError("叠加策略概念热度来源或行情时点不一致,请重新计算")
+            concept_metadata = {**next(iter(concept_children.values())), "children": concept_children}
 
         return StrategyResult(
             as_of=context.as_of,
@@ -1361,6 +1931,8 @@ class StrategyEngine:
             total=len(rows),
             elapsed_ms=(time.perf_counter() - started_at) * 1000,
             scores=scores,
+            warnings=list(dict.fromkeys(warning for result in ordered_results for warning in result.warnings)),
+            concept_heat_metadata=concept_metadata,
         )
 
     @staticmethod
@@ -1398,38 +1970,23 @@ class StrategyEngine:
     @staticmethod
     def _basic_filter_expr(df: pl.DataFrame, bf: dict) -> pl.Expr | None:
         """构建基础过滤表达式。回测可复用为买入候选 mask，不删除行情行。"""
+        if not bf or not bf.get("enabled", True):
+            return None
+        _validate_filter_data(df, bf)
         exprs: list[pl.Expr] = []
-        if bf.get("price_min") is not None:
-            exprs.append(pl.col("close") >= bf["price_min"])
-        if bf.get("price_max") is not None:
-            exprs.append(pl.col("close") <= bf["price_max"])
-        if bf.get("market_cap_min") is not None and "total_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("total_shares") >= bf["market_cap_min"]
-            )
-        if bf.get("market_cap_max") is not None and "total_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("total_shares") <= bf["market_cap_max"]
-            )
-        # 流通市值
-        if bf.get("float_cap_min") is not None and "float_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("float_shares") >= bf["float_cap_min"]
-            )
-        if bf.get("float_cap_max") is not None and "float_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("float_shares") <= bf["float_cap_max"]
-            )
-        if bf.get("amount_min") is not None:
-            exprs.append(pl.col("amount") >= bf["amount_min"])
-        if bf.get("amount_max") is not None:
-            exprs.append(pl.col("amount") <= bf["amount_max"])
-        # 换手率
-        if bf.get("turnover_min") is not None and "turnover_rate" in df.columns:
-            exprs.append(pl.col("turnover_rate") >= bf["turnover_min"])
-        if bf.get("turnover_max") is not None and "turnover_rate" in df.columns:
-            exprs.append(pl.col("turnover_rate") <= bf["turnover_max"])
-        if bf.get("exclude_st") and "name" in df.columns:
+        for prefix, names in BASIC_FILTER_NUMERIC_FIELDS.items():
+            minimum, maximum = bf.get(f"{prefix}_min"), bf.get(f"{prefix}_max")
+            if minimum is None and maximum is None:
+                continue
+            value = pl.col(names[0]).cast(pl.Float64, strict=False)
+            for name in names[1:]:
+                value = value * pl.col(name).cast(pl.Float64, strict=False)
+            exprs.append(value.is_finite())
+            if minimum is not None:
+                exprs.append(value >= float(minimum))
+            if maximum is not None:
+                exprs.append(value <= float(maximum))
+        if bf.get("exclude_st"):
             exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))
         # 板块过滤
         boards = bf.get("boards")
@@ -1477,9 +2034,12 @@ class StrategyEngine:
         directions: Mapping[str, str] | None = None,
     ) -> pl.DataFrame:
         """通用评分: min-max 归一化 → 加权求和 → 0~100 分"""
-        if not weights:
+        if not weights or df.is_empty():
             return df
 
+        missing = [str(col) for col, weight in weights.items() if weight and scoring_value_expr(df.columns, str(col)) is None]
+        if missing:
+            raise ValueError("策略评分不可计算,缺少字段或依赖: " + ", ".join(sorted(missing)))
         executable = [
             (str(col), value, weight)
             for col, weight in weights.items()
@@ -1489,14 +2049,21 @@ class StrategyEngine:
         if total_weight <= 0:
             return df
 
+        unavailable = [
+            name for name, value, _ in executable
+            if not df.select(value.cast(pl.Float64, strict=False).is_finite().any()).item()
+        ]
+        if unavailable:
+            raise ValueError("策略评分不可计算,字段没有有效数据: " + ", ".join(unavailable))
         score_parts: list[pl.Expr] = []
         for name, value, weight in executable:
+            value = pl.when(value.cast(pl.Float64, strict=False).is_finite()).then(value).otherwise(None)
             w = weight / total_weight
             col_min = value.min()
             col_range = value.max() - col_min
-            normalized = pl.when(col_range > 0).then(
-                (value - col_min) / col_range
-            ).otherwise(pl.lit(0.5))
+            normalized = pl.when(value.is_not_null()).then(
+                pl.when(col_range > 0).then((value - col_min) / col_range).otherwise(0.5)
+            ).otherwise(None)
             if (directions or {}).get(name) == SCORING_DIRECTION_LOW:
                 normalized = 1.0 - normalized
             score_parts.append(normalized * w)

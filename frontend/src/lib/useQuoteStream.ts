@@ -112,13 +112,17 @@ export function useQuoteStream(
     // 连续失败计数 (用于指数退避 + 到阈值弹一次 toast)
     let failCount = 0
     let toastFired = false
+    let pageActive = true
 
     const connect = () => {
+      if (!pageActive || esRef.current) return
+      retryRef.current = undefined
       _setStatus(failCount > 0 ? 'reconnecting' : _streamStatus)
       const es = new EventSource('/api/intraday/stream')
       esRef.current = es
 
       es.onopen = () => {
+        if (!pageActive || esRef.current !== es) return
         // 连接成功: 重置退避与 toast 标记
         failCount = 0
         toastFired = false
@@ -211,6 +215,7 @@ export function useQuoteStream(
       })
 
       es.onerror = () => {
+        if (!pageActive || esRef.current !== es) return
         es.close()
         esRef.current = null
         failCount += 1
@@ -227,15 +232,32 @@ export function useQuoteStream(
       }
     }
 
-    connect()
-
-    return () => {
+    // 整页进入浏览器前进/后退缓存时 React 不会卸载。冻结页面必须释放
+    // SSE 连接，否则连续导航会耗尽同源 HTTP 连接；返回该页面时再恢复。
+    const suspend = () => {
+      pageActive = false
       clearTimeout(retryRef.current)
+      retryRef.current = undefined
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null
       }
       _setStatus('disconnected')
+    }
+    const resume = () => {
+      if (pageActive) return
+      pageActive = true
+      connect()
+    }
+
+    window.addEventListener('pagehide', suspend)
+    window.addEventListener('pageshow', resume)
+    connect()
+
+    return () => {
+      window.removeEventListener('pagehide', suspend)
+      window.removeEventListener('pageshow', resume)
+      suspend()
     }
   }, [qc, handleAlerts])
 }

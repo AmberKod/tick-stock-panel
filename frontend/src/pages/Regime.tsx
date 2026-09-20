@@ -15,12 +15,14 @@ import {
   Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, Filter, X,
 } from 'lucide-react'
 import {
-  api, type RegimeRow, type RegimeState, type MarketPhase,
+  api, type RegimeRow, type RegimeState, type MarketPhase, type MarketCode,
   REGIME_STATE_LABELS, REGIME_STATE_COLORS,
   MARKET_PHASE_LABELS, MARKET_PHASE_COLORS, MARKET_PHASE_ORDER,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
+import { useMarket, MARKETS, MARKET_ORDER } from '@/lib/marketContext'
+import { StrengthLadderPanel } from '@/components/StrengthLadderPanel'
 import { toast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
 import { cn } from '@/lib/cn'
@@ -139,6 +141,7 @@ const cardCls = 'rounded-card border border-border bg-surface/80 shadow-[0_1px_2
 // ── 主组件 ────────────────────────────────────────────────
 export function Regime() {
   const qc = useQueryClient()
+  const { market, setMarket, hasLimitUp } = useMarket()
   const [range, setRange] = useState<RangePreset>('1y')
   // 视图 tab: 市场环境(状态/趋势/日历) 与 情绪周期(阶段/主线) 两组内容同页切换,
   // 避免单页过长需要大幅滚动。两组共用时间范围与重算入口。
@@ -150,8 +153,8 @@ export function Regime() {
 
   // coverage: "全部"模式 + 标题展示依赖
   const coverage = useQuery({
-    queryKey: QK.regimeCoverage,
-    queryFn: () => api.regimeCoverage(),
+    queryKey: QK.regimeCoverage(market),
+    queryFn: () => api.regimeCoverage(market),
     staleTime: 5 * 60 * 1000,
   })
 
@@ -159,31 +162,42 @@ export function Regime() {
   const histRange = resolveHistoryRange(range, coverage.data)
 
   // queryKey 用 range 的完整三元组区分: limit / start+end(全部) / custom天数
+  // 再加 market —— 三市场共用本组件, 不加会命中另一个市场的缓存。
   const history = useQuery({
-    queryKey: ['regime-history', range] as const,
-    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit),
+    queryKey: QK.regimeHistory(market, histRange.start, histRange.end, histRange.limit),
+    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit, market),
     staleTime: 5 * 60 * 1000,
   })
   const states = useQuery({
-    queryKey: QK.regimeStates(days),
-    queryFn: () => api.regimeStates(days),
+    queryKey: QK.regimeStates(market, days),
+    queryFn: () => api.regimeStates(days, market),
     staleTime: 5 * 60 * 1000,
   })
   // 情绪周期阶段段 + 主线排行(与 history 同一时间范围)
+  // 注: 阶段判定(情绪周期)与主线(概念/行业)是 A 股专属, 港美无涨跌停/概念板块,
+  //     故 hk/us 下不请求, 前端也不展示这两块 (见下方 hasLimitUp 分支)。
   const phases = useQuery({
-    queryKey: QK.regimePhases(histRange.start, histRange.end),
-    queryFn: () => api.regimePhases(histRange.start, histRange.end),
+    queryKey: QK.regimePhases(market, histRange.start, histRange.end),
+    queryFn: () => api.regimePhases(histRange.start, histRange.end, market),
     staleTime: 5 * 60 * 1000,
+    enabled: hasLimitUp,
   })
   const [mainlineKind, setMainlineKind] = useState<'concept' | 'industry'>('concept')
   const [filterOpen, setFilterOpen] = useState(false)
   // 时间轴点击选中的交易日 (当日快照联动); null = 未选。窗口切换后失效。
   const [selDate, setSelDate] = useState<string | null>(null)
   useEffect(() => { setSelDate(null) }, [histRange.start, histRange.end])
+  // 切市场时同样清掉选中日 (不同市场的日期轴不一样, 沿用会串)
+  useEffect(() => { setSelDate(null) }, [market])
+  // 港美无涨停/概念板块 → 情绪周期 tab 不可用, 停留在港美时自动退回市场环境 tab
+  useEffect(() => {
+    if (!hasLimitUp && view === 'phase') setView('regime')
+  }, [hasLimitUp, view])
   const mainline = useQuery({
     queryKey: QK.regimeMainline(mainlineKind, histRange.start, histRange.end),
     queryFn: () => api.regimeMainline(histRange.start, histRange.end, 10, mainlineKind),
     staleTime: 5 * 60 * 1000,
+    enabled: hasLimitUp,
   })
   const [recomputing, setRecomputing] = useState(false)
 
@@ -632,15 +646,15 @@ export function Regime() {
   const handleRecompute = async () => {
     setRecomputing(true)
     try {
-      const r = await api.regimeRecompute()
+      const r = await api.regimeRecompute(undefined, undefined, market)
       toast(r.computed > 0 ? `重算完成 · 新增 ${r.computed} 天` : '重算完成 · 数据已是最新', 'success')
       await Promise.all([
-        qc.invalidateQueries({ queryKey: ['regime-history'] }),
-        qc.invalidateQueries({ queryKey: ['regime-states'] }),
-        qc.invalidateQueries({ queryKey: ['regime-latest'] }),
-        qc.invalidateQueries({ queryKey: ['regime-phases'] }),
+        qc.invalidateQueries({ queryKey: ['regime-history', market] }),
+        qc.invalidateQueries({ queryKey: ['regime-states', market] }),
+        qc.invalidateQueries({ queryKey: ['regime-latest', market] }),
+        qc.invalidateQueries({ queryKey: ['regime-phases', market] }),
         qc.invalidateQueries({ queryKey: ['regime-mainline'] }),
-        qc.invalidateQueries({ queryKey: QK.regimeCoverage }),
+        qc.invalidateQueries({ queryKey: QK.regimeCoverage(market) }),
       ])
     } catch (e) {
       toast(`重算失败 · ${String((e as Error)?.message || e)}`, 'error')
@@ -663,9 +677,31 @@ export function Regime() {
           <Activity className="h-5 w-5 text-accent" />
           <h1 className="text-base font-semibold text-foreground">市场环境</h1>
           <span className="text-xs text-muted">
-            {view === 'phase' ? '涨停情绪 · 市场阶段 · 主线脉络' : '每日环境状态 · 赚钱效应 · 趋势分析'}
+            {view === 'phase'
+              ? '涨停情绪 · 市场阶段 · 主线脉络'
+              : hasLimitUp
+                ? '每日环境状态 · 赚钱效应 · 趋势分析'
+                : `${MARKETS[market].label} · 动量+新高合成 · 每日环境状态`}
           </span>
           <div className="ml-auto flex items-center gap-2">
+            {/* 市场切换 — 三市场共用本页, regime 时序按 market 隔离持久化 */}
+            <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
+              {MARKET_ORDER.map(k => (
+                <button
+                  key={k}
+                  onClick={() => setMarket(k)}
+                  title={MARKETS[k].label}
+                  className={cn(
+                    'h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
+                    market === k
+                      ? 'bg-accent text-white shadow-sm'
+                      : 'text-secondary hover:text-foreground',
+                  )}
+                >
+                  {MARKETS[k].short}
+                </button>
+              ))}
+            </div>
             {/* 时间范围按钮组 */}
             <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
               {(['1y', '2y', 'all'] as const).map(k => (
@@ -708,14 +744,27 @@ export function Regime() {
       {/* ── 视图切换: 市场环境 / 情绪周期 (两组内容 tab 隔离, 减少单页高度) ── */}
       <div className="flex items-center gap-2">
         <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
-          {([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const).map(([k, label, Icon]) => (
-            <button key={k} onClick={() => setView(k)}
-              className={cn('inline-flex items-center gap-1.5 h-7 rounded-[5px] px-3 text-xs font-medium transition-colors',
-                view === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground')}>
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </button>
-          ))}
+          {([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const).map(([k, label, Icon]) => {
+            // 情绪周期(阶段/主线)依赖涨停与概念板块, 港美无此制度 → 禁用而非隐藏,
+            // 保留可见性让用户知道"有这个功能, 只是本市场不适用"。
+            const disabled = k === 'phase' && !hasLimitUp
+            return (
+              <button
+                key={k}
+                onClick={() => !disabled && setView(k)}
+                disabled={disabled}
+                title={disabled ? `${MARKETS[market].label}无涨跌停/概念板块, 情绪周期不适用` : undefined}
+                className={cn(
+                  'inline-flex items-center gap-1.5 h-7 rounded-[5px] px-3 text-xs font-medium transition-colors',
+                  view === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground',
+                  disabled && 'cursor-not-allowed opacity-40 hover:text-secondary',
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            )
+          })}
         </div>
         <span className="text-[10px] text-muted">两组内容同页切换 · 共用时间范围</span>
       </div>
@@ -979,6 +1028,7 @@ export function Regime() {
         {filterOpen && (
           <MainlineFilterPanel
             filter={mainline.data?.filter}
+            market={market}
             onDone={async () => {
               await qc.invalidateQueries({ queryKey: ['regime-mainline'] })
               await qc.invalidateQueries({ queryKey: ['regime-phases'] })
@@ -1020,6 +1070,13 @@ export function Regime() {
 
       {/* ══ 市场环境 tab: 最新日概览 + 状态时间轴 + 趋势/分布 + 日历热力图 ══ */}
       <div className={cn('space-y-4', view !== 'regime' && 'hidden')}>
+
+        {/* ── 强度梯队(动量档位) — 仅港美 ──
+            A 股有连板梯队 (LimitUpLadder 页), 港美无涨跌停, 用 20 日动量档位替代。
+            日期跟随时间轴选中日 (selDate), 未选中时用最新交易日。 */}
+        {!hasLimitUp && (
+          <StrengthLadderPanel market={market} date={selDate ?? latest?.date} />
+        )}
 
       {/* ── 最新日概览 (4 个指标卡, 去掉与看板重复的涨停/涨跌/成交额) ── */}
       {latest ? (
@@ -1259,9 +1316,11 @@ export function Regime() {
 // 宽基/风格标签(融资融券/沪深股通等数千成分)会霸占主线榜首。默认按成员数
 // 上限过滤; 用户可调阈值并按名称屏蔽特定概念, 保存后自动重算主线。
 // ST 剔除开关联动情绪周期口径 — 切换时额外触发 regime 全量重算。
-function MainlineFilterPanel({ filter, onDone }: {
+function MainlineFilterPanel({ filter, onDone, market }: {
   filter: { min_members: number; max_members: number; blacklist: string[]; exclude_st?: boolean } | undefined
   onDone: () => Promise<void>
+  /** 重算时透传给后端 — 主线/情绪周期是 A 股专属, 但接口签名要求显式市场 */
+  market: MarketCode
 }) {
   const [minMembers, setMinMembers] = useState(String(filter?.min_members ?? 4))
   const [maxMembers, setMaxMembers] = useState(String(filter?.max_members ?? 600))
@@ -1288,7 +1347,7 @@ function MainlineFilterPanel({ filter, onDone }: {
       const stChanged = excludeSt !== (filter?.exclude_st ?? true)
       if (stChanged) {
         // 口径切换影响情绪周期驱动指标, 需全量重算 regime+主线(较重, 需等待)
-        await api.regimeRecompute()
+        await api.regimeRecompute(undefined, undefined, market)
         toast('过滤已保存, 主线与情绪周期已全量重算', 'success')
       } else {
         await api.regimeMainlineRecompute()

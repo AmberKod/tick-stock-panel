@@ -43,6 +43,153 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
 }
 
 // ===== Capabilities =====
+/** 新闻/舆情 — 热点工作区的"为什么涨"那一维 */
+export interface NewsItem {
+  title: string
+  snippet: string
+  url: string
+  source: string
+  published_date: string | null
+}
+
+export interface NewsResponse {
+  query: string
+  results: NewsItem[]
+  result_count: number
+  provider: string
+  success: boolean
+  error_message: string | null
+  elapsed_s: number
+  symbol?: string
+  stock_name?: string | null
+  topic?: string
+}
+
+export interface NewsProviderStatus {
+  name: string
+  label: string
+  configured: boolean
+  key_count: number
+  masked: string
+}
+
+export interface NewsStatus {
+  providers: NewsProviderStatus[]
+  configured_any: boolean
+}
+
+/** 新闻批量归因 — 单个标的的结果 (POST /api/news/batch-stock) */
+export interface NewsBatchStockItem {
+  symbol: string
+  stock_name: string | null
+  query: string
+  provider: string
+  success: boolean
+  error: string | null
+  result_count: number
+  /** 去重后的**域名**列表: 未做出版方家族归一, 只能数"几个不同域名" */
+  hit_domains: string[]
+  hit_domain_count: number
+  hits: NewsItem[]
+  cached: boolean
+}
+
+export interface NewsBatchStockResult {
+  ok: boolean
+  /** 后端给的口径提示, UI 应原样展示: 域名 != 独立信源 */
+  domain_note: string
+  days: number
+  max_results: number
+  requested: number
+  processed: number
+  cached_count: number
+  error_count: number
+  elapsed_s: number
+  throttle: {
+    serial: boolean
+    min_interval_s: number
+    max_symbols: number
+    time_budget_s: number
+  }
+  provider: string
+  results: Record<string, NewsBatchStockItem>
+}
+
+/** 跨市场态势 (GET /api/overview/posture) — 单市场条目
+ *
+ * 取值与后端 `market_posture.py` 常量严格对齐(不要凭印象改):
+ * - posture: POSTURE_{ATTACK,BALANCED,DEFEND,UNKNOWN}
+ * - vote:    VOTE_{ATTACK,NEUTRAL,DEFEND,UNAVAILABLE}
+ * 收窄成联合类型是为了让拼错在编译期就报错, 而不是运行时静默走 fallback。
+ */
+export type PostureVerdict = 'attack' | 'balanced' | 'defend' | 'unknown'
+export type PostureVote = 'attack' | 'neutral' | 'defend' | 'unavailable'
+
+export interface MarketPostureVote {
+  dim: string
+  label: string
+  vote: PostureVote
+  vote_label: string
+  detail: string
+}
+
+export interface MarketPosture {
+  market: string
+  market_label: string
+  posture: PostureVerdict
+  posture_label: string
+  votes: MarketPostureVote[]
+  /** 不可用的投票维度: **已从票数分母中剔除**, 不得当 0 或防守 */
+  unavailable_dims: string[]
+  evidence: { dim: string; text: string }[]
+  veto: { dim: string; reason: string } | null
+  tally: { attack: number; neutral: number; defend: number; counted: number }
+  as_of: string | null
+  freshness: { regime_as_of: string | null; hotspot_age_hours: number | null }
+  source_errors: string[]
+}
+
+export interface MarketPostureResult {
+  as_of: string | null
+  markets: MarketPosture[]
+}
+
+/** 通用新闻流(RSS 聚合, 不需要 API Key) */
+export interface NewsFeedEntry {
+  title: string
+  url: string
+  source: string
+  published_at: string | null
+  summary: string
+}
+
+export interface NewsCategory {
+  key: string
+  label: string
+  /** rss = 本仓聚合的 RSS 流; search = 走外部检索源(需 Key) */
+  kind: 'rss' | 'search' | string
+  source_count: number
+  sources: string[]
+  note: string
+}
+
+export interface NewsFeedResult {
+  category: string
+  label: string
+  kind: string
+  entries: NewsFeedEntry[]
+  entry_count: number
+  source_errors: string[]
+  source_count: number
+  ok_source_count: number
+  fetched_at: string
+  elapsed_s: number
+  cached: boolean
+  note: string
+  /** 全源都挂掉时为 false —— 前端据此显示"源不可用"而不是"没新闻" */
+  success: boolean
+}
+
 export interface CapabilityLimits {
   rpm: number | null
   batch: number | null
@@ -241,6 +388,8 @@ export interface WatchlistEntry {
   name?: string | null
   /** 所属分组 id 列表 (同一标的可属于多个分组; 空数组=未分组) */
   group_ids?: string[]
+  /** 市场 (P1 跨市场自选): cn / hk / us — 由 symbol 后缀推导 */
+  market?: 'cn' | 'hk' | 'us'
 }
 
 export type WatchlistGroupColor =
@@ -332,11 +481,248 @@ export interface ScreenerResult {
   rows: any[]
   total: number
   elapsed_ms: number
+  warnings?: string[]
+  concept_heat_metadata?: ConceptHeatMetadata | null
+}
+
+export type InternationalMarket = 'hk' | 'us'
+export type StrategyBacktestAsset = 'stock' | 'etf' | 'hk' | 'us'
+export type ScoringContext = 'current' | 'historical'
+
+export interface ConceptHeatMetadata {
+  source_id?: 'ext_gn_ths'
+  market?: 'cn' | 'etf' | 'hk' | 'us'
+  mapping_version?: string | null
+  mapping_updated_at?: string | null
+  quote_date?: string | null
+  current_market_date?: string
+  aggregation?: 'mean'
+  min_members?: number
+  status?: 'available' | 'partial' | 'unavailable'
+  reason?: string | null
+  reason_code?: string | null
+  input_symbols?: number
+  mapped_symbols?: number
+  computable_symbols?: number
+  unmapped_symbols?: number
+  missing_valid_concept_symbols?: number
+  valid_concepts?: number
+  config_fingerprint?: string
+  children?: Record<string, ConceptHeatMetadata>
+}
+
+export interface MarketDataCoverage {
+  symbols: number
+  target_symbols: number
+  extra_symbols: number
+  missing_symbols: number
+  rows: number
+  target_rows: number
+  first_date: string | null
+  last_date: string | null
+  target_last_date: string | null
+}
+
+export interface MarketDataSource {
+  id: string
+  label: string
+  available: boolean
+  reason: string | null
+}
+
+export interface MarketFinancialCoverage {
+  status: 'available' | 'partial' | 'unavailable'
+  reason: string | null
+  sources: string[]
+  rows: number
+  symbols: number
+  first_period_end: string | null
+  last_period_end: string | null
+  first_announce_date: string | null
+  last_announce_date: string | null
+  fields: Record<string, {
+    available_symbols: number
+    missing_symbols: number
+    first_announce_date: string | null
+    last_announce_date: string | null
+  }>
+}
+
+export interface MarketPriceAudit {
+  status: 'verified' | 'partial' | 'unknown'
+  verified_symbols: number
+  unknown_symbols: number
+  mixed_basis_symbols: number
+  adjustment_sources: string[]
+  last_checked_at: string | null
+  warnings: string[]
+}
+
+const MARKET_DATA_SOURCE_LABELS: Record<string, string> = {
+  sina: '新浪财经',
+  sina_hk: '新浪财经',
+  sina_hk_daily: '新浪财经',
+  sina_hk_qfq: '新浪财经复权资料',
+  sina_hk_adj_factor: '新浪财经复权资料',
+  tencent: '腾讯证券',
+  tencent_hk: '腾讯证券',
+  tencent_hk_daily: '腾讯证券',
+  tencent_hk_qfq: '腾讯证券复权资料',
+  hk_daily: '港股日线',
+  hk_quickquote: '港股实时行情',
+  hk_financial: '港股历史财务',
+  hkex: '香港交易所',
+  hkex_instruments: '香港交易所证券资料',
+  hkex_list_of_securities: '香港交易所证券资料',
+  eastmoney: '东方财富',
+  eastmoney_hk: '东方财富港股公告',
+  eastmoney_hk_announcement: '东方财富港股公告',
+  eastmoney_hk_announcements: '东方财富港股公告',
+  eastmoney_hk_financial: '东方财富港股财务',
+  eastmoney_hk_daily_check: '东方财富港股原始日线核验',
+  local: '本地历史记录',
+  local_history: '本地历史记录',
+  tickflow: 'TickFlow',
+  yahoo: '雅虎财经',
+  yfinance: '雅虎财经',
+}
+
+export function marketDataSourceLabel(source: string | null | undefined): string {
+  if (!source) return '来源未记录'
+  const parts = source.split(/[+,]/).map((part) => part.trim()).filter(Boolean)
+  if (parts.length > 1) return [...new Set(parts.map(marketDataSourceLabel))].join('、')
+  return MARKET_DATA_SOURCE_LABELS[source] ?? (/\p{Script=Han}/u.test(source) ? source : '其他数据来源')
+}
+
+const MARKET_FINANCIAL_FIELD_LABELS: Record<string, string> = {
+  eps_ttm: '每股收益（过去十二个月）',
+  bps: '每股净资产',
+  roe: '净资产收益率',
+  gross_margin: '毛利率',
+  net_margin: '净利率',
+  revenue_yoy: '营业收入同比',
+  net_income_yoy: '净利润同比',
+  debt_to_asset_ratio: '资产负债率',
+  total_shares: '总股本',
+  float_shares: '流通股本',
+  pe_ttm: '市盈率（过去十二个月）',
+  pb: '市净率',
+  raw_pb: '市净率（原始价）',
+  turnover_rate: '换手率',
+}
+
+export function marketFinancialFieldLabel(field: string): string {
+  return MARKET_FINANCIAL_FIELD_LABELS[field] ?? '其他财务指标'
+}
+
+export function marketPriceBasisLabel(basis: string | null | undefined): string {
+  if (basis === 'forward_adjusted' || basis === 'forward_adjusted_daily_ohlc' || basis === 'qfq') return '前复权研究价格'
+  if (basis === 'unadjusted' || basis === 'raw') return '不复权原始价格'
+  if (basis === 'backward_adjusted' || basis === 'hfq') return '后复权价格'
+  return '价格口径未核实'
+}
+
+export interface MarketDataStatusResponse {
+  market: 'HK' | 'US'
+  checked_at: string
+  currency: 'HKD' | 'USD'
+  source: string[]
+  data_generation: string
+  instruments: {
+    symbols: number
+    lot_size_available: number
+    lot_size_missing: number
+    verified_not_applicable?: number
+    currencies?: { HKD: number; CNY: number; USD: number; unknown: number }
+    lot_size_future?: number
+    lot_size_conflicts?: number
+    lot_size_as_of?: string | null
+  }
+  daily: MarketDataCoverage
+  enriched: MarketDataCoverage
+  missing_fields: Record<'daily' | 'enriched', Record<string, { missing_rows: number; unknown_rows: number }>>
+  capabilities: {
+    daily_download: boolean
+    daily_provider: string
+    daily_download_reason: string | null
+    recompute_enriched: boolean
+    lot_size_sync: boolean
+    financial_history_sync?: boolean
+    financial_history_reason?: string | null
+  }
+  daily_sources?: (MarketDataSource & { role: 'primary' | 'fallback' })[]
+  adjustment_sources?: MarketDataSource[]
+  verification_sources?: MarketDataSource[]
+  financials?: MarketFinancialCoverage | null
+  price_audit?: MarketPriceAudit | null
+  warnings: string[]
+}
+
+export interface MarketDataSyncItem {
+  symbol: string
+  status: string
+  reason: string | null
+  applicability?: string | null
+  reason_code?: string | null
+  source?: string | null
+  fallback_used?: boolean
+  attempted_sources?: string[]
+  requested_start?: string | null
+  requested_end?: string | null
+  actual_start?: string | null
+  actual_end?: string | null
+  currency?: string | null
+  volume_unit?: string | null
+  price_adjustment?: string | null
+  adjustment_source?: string | null
+  adjustment_version?: string | null
+  verification_source?: string | null
+  verification_cached?: boolean
+  source_conflicts?: {
+    date: string
+    primary?: Record<string, number>
+    fallback?: Record<string, number>
+    verification?: Record<string, number>
+    verification_source?: string
+    selected_source?: string
+    source_url?: string
+    observed_at?: string
+    response_sha256?: string
+    verification_cached?: boolean
+  }[]
+  raw_updated?: boolean
+  enriched_updated?: boolean
+  source_as_of?: string | null
+  observed_at?: string | null
+  fields_available?: string[]
+  fields_missing?: string[]
+}
+
+export interface MarketDataSyncResult {
+  operation: 'daily_download' | 'enriched_recompute' | 'lot_size_sync' | 'financial_sync'
+  market: 'HK' | 'US'
+  status: 'started' | 'completed' | 'completed_with_errors' | 'empty' | 'unsupported' | 'failed' | 'unchanged'
+  requested: number
+  succeeded: number
+  failed: number
+  skipped: number
+  unchanged?: number
+  verified_not_applicable?: number
+  enriched_dates_written: number
+  data_generation: string
+  failures: { symbol: string; reason: string }[]
+  items?: MarketDataSyncItem[]
+  job_id?: string
+  message?: string
+  source?: string
+  as_of?: string
 }
 
 export interface ScreenerResultSummary {
   total: number
   as_of: string
+  warnings?: string[]
+  concept_heat_metadata?: ConceptHeatMetadata | null
 }
 
 export interface ScreenerCachedSummary {
@@ -431,6 +817,13 @@ export interface RpsRotationData {
 }
 
 // ===== 市场环境(Regime) =====
+
+/**
+ * 市场标识 — 与后端 regime / strength_ladder API 的 market 查询参数一致。
+ * cn = A 股, hk = 港股, us = 美股。默认 cn 保持老调用零回归。
+ */
+export type MarketCode = 'cn' | 'hk' | 'us'
+
 export type RegimeState = 'strong' | 'lean_strong' | 'range' | 'lean_weak' | 'weak'
 
 export const REGIME_STATE_LABELS: Record<RegimeState, string> = {
@@ -506,6 +899,39 @@ export interface RegimeCoverage {
   rows: number
   earliest_date: string | null
   latest_date: string | null
+}
+
+// ── 强度梯队(动量档位) ──
+// 港美无涨跌停/连板制度, 用 20 日动量档位替代 A 股连板层级:
+// m25 (>=25%) / m15 (>=15%) / m8 (>=8%) / m3 (>=3%), 动量 <3% 不入档。
+// 后端 market=cn 会返回 400 (A 股走连板梯队, 由 market_phase + monitor 协同)。
+export type StrengthBand = 'm25' | 'm15' | 'm8' | 'm3'
+
+export const STRENGTH_BANDS: StrengthBand[] = ['m25', 'm15', 'm8', 'm3']
+
+/** 档位展示元信息 — 名称与配色按"动量强度"递减 */
+export const STRENGTH_BAND_META: Record<StrengthBand, { label: string; color: string; desc: string }> = {
+  m25: { label: '强动量 ≥25%', color: '#dc2626', desc: '20 日动量 ≥ 25%' },
+  m15: { label: '中强 15~25%', color: '#ea580c', desc: '20 日动量 15% ~ 25%' },
+  m8:  { label: '温和 8~15%', color: '#d97706', desc: '20 日动量 8% ~ 15%' },
+  m3:  { label: '弱动量 3~8%', color: '#0891b2', desc: '20 日动量 3% ~ 8%' },
+}
+
+export interface StrengthLadderRow {
+  date: string
+  market: string
+  band: StrengthBand
+  symbol: string
+  momentum_20d: number
+  last_close: number | null
+  amount: number | null
+}
+
+export interface StrengthLadderResult {
+  market: string
+  date: string | null
+  bands: Partial<Record<StrengthBand, StrengthLadderRow[]>>
+  total_count: number
 }
 
 // ── 市场阶段(情绪周期) 与 主线 ──
@@ -635,6 +1061,12 @@ export interface StrategyDetail {
   timeframes: string[]
   version: string
   basic_filter: Record<string, any>
+  portfolio?: {
+    enabled?: boolean
+    max_same_industry?: number
+    concentration_penalty?: number
+    industry_level?: 1 | 2 | 3
+  } | null
   params: StrategyParamDef[]
   params_defaults: Record<string, any>
   scoring: Record<string, number>
@@ -772,6 +1204,21 @@ export interface AbnormalOverview {
     board: string
     st: boolean
     /** 各窗口双侧阈值 {up: 正向, down: 负向} (小数) */
+    thresholds: Record<string, { up: number; down: number }>
+    note: string
+  }>
+  counts: { triggered: number; edge: number; watch: number }
+  rows: AbnormalRow[]
+}
+
+/** 港美异动总览 (动量口径) — rows/status 与 A股同 schema, 但无指数基准字段 */
+export interface AbnormalHkUsOverview {
+  asof: number
+  as_of: string | null
+  market: 'HK' | 'US'
+  rules: Array<{
+    board: string
+    st: boolean
     thresholds: Record<string, { up: number; down: number }>
     note: string
   }>
@@ -939,6 +1386,12 @@ export interface FactorColumn {
   label: string
   group: string
   desc: string
+}
+
+export interface ScoringColumn extends FactorColumn {
+  available?: boolean
+  reason?: string
+  metadata?: ConceptHeatMetadata
 }
 
 export interface GroupStat {
@@ -1232,6 +1685,32 @@ export interface ResearchCandidateCreate {
 }
 
 // ===== Strategy Backtest =====
+export interface StrategyBacktestRequest {
+  strategy_id: string
+  symbols?: string[] | null
+  start?: string | null
+  end?: string | null
+  params?: Record<string, any> | null
+  overrides?: Record<string, any> | null
+  matching?: 'close_t' | 'open_t+1'
+  entry_fill?: 'close_t' | 'open_t+1' | null
+  exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
+  fees_pct?: number
+  commission_pct?: number
+  stamp_tax_pct?: number
+  buy_stamp_tax_pct?: number
+  slippage_bps?: number
+  max_positions?: number
+  max_exposure_pct?: number
+  initial_capital?: number
+  position_sizing?: 'equal' | 'score_weight'
+  mode?: 'position' | 'full'
+  holding_days?: number
+  asset_type?: StrategyBacktestAsset
+  minute_fill?: boolean
+  regime_filter?: { states?: string[]; min_score?: number } | null
+}
+
 export interface StrategyBacktestTrade {
   symbol: string
   name?: string
@@ -1256,9 +1735,30 @@ export interface StrategyBacktestTrade {
   exit_signal_id?: string | null
 }
 
+export interface BacktestExecutionAssumptions {
+  price_basis?: string | null
+  price_basis_note?: string | null
+  corporate_actions_simulated?: boolean
+  price_sources?: string[]
+  adjustment_sources?: string[]
+  adjustment_versions?: string[]
+  price_verified_range?: {
+    start: string | null
+    end: string | null
+    verified_symbols?: number
+    unknown_symbols?: number
+  } | null
+  lot_size_snapshot_dates?: string[]
+  currency_restriction?: string | null
+  financial_sources?: string[]
+  financial_fields?: string[]
+  financial_availability_rule?: string | null
+}
+
 export interface StrategyBacktestResult {
+  warnings?: string[]
   run_id: string
-  config: Record<string, any>
+  config: Record<string, any> & { execution_assumptions?: BacktestExecutionAssumptions | null }
   stats: Record<string, any>
   equity_curve: { date: string; value: number; cash?: number; positions?: number; exposure?: number }[]
   drawdown_curve: { date: string; value: number }[]
@@ -2007,15 +2507,15 @@ export const api = {
     }),
 
   watchlistList: () => request<{ symbols: WatchlistEntry[] }>('/api/watchlist'),
-  watchlistAdd: (symbol: string, note = '', groupId?: string | null) =>
+  watchlistAdd: (symbol: string, note = '', groupId?: string | null, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>('/api/watchlist', {
       method: 'POST',
-      body: JSON.stringify({ symbol, note, group_id: groupId ?? null }),
+      body: JSON.stringify({ symbol, note, group_id: groupId ?? null, market: market ?? null }),
     }),
-  watchlistBatchAdd: (symbols: string[], note = '', groupId?: string | null) =>
+  watchlistBatchAdd: (symbols: string[], note = '', groupId?: string | null, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[]; added: number }>('/api/watchlist/batch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, note, group_id: groupId ?? null }),
+      body: JSON.stringify({ symbols, note, group_id: groupId ?? null, market: market ?? null }),
     }),
   watchlistGroups: () =>
     request<{ groups: WatchlistGroup[] }>('/api/watchlist/groups'),
@@ -2044,19 +2544,19 @@ export const api = {
       `/api/watchlist/groups/${encodeURIComponent(groupId)}/clear`,
       { method: 'POST' },
     ),
-  watchlistSetGroup: (symbol: string, groupId: string | null) =>
+  watchlistSetGroup: (symbol: string, groupId: string | null, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/group`,
+      `/api/watchlist/${encodeURIComponent(symbol)}/group${market ? `?market=${market}` : ''}`,
       { method: 'PUT', body: JSON.stringify({ group_id: groupId }) },
     ),
-  watchlistGroupAddMember: (groupId: string, symbol: string) =>
+  watchlistGroupAddMember: (groupId: string, symbol: string, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(symbol)}`,
+      `/api/watchlist/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(symbol)}${market ? `?market=${market}` : ''}`,
       { method: 'POST' },
     ),
-  watchlistGroupRemoveMember: (groupId: string, symbol: string) =>
+  watchlistGroupRemoveMember: (groupId: string, symbol: string, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(symbol)}`,
+      `/api/watchlist/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(symbol)}${market ? `?market=${market}` : ''}`,
       { method: 'DELETE' },
     ),
   watchlistOcrStatus: () =>
@@ -2071,14 +2571,14 @@ export const api = {
       quiet,
     })
   },
-  watchlistRemove: (symbol: string) =>
+  watchlistRemove: (symbol: string, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}`,
+      `/api/watchlist/${encodeURIComponent(symbol)}${market ? `?market=${market}` : ''}`,
       { method: 'DELETE' },
     ),
-  watchlistMoveToTop: (symbol: string) =>
+  watchlistMoveToTop: (symbol: string, market?: 'cn' | 'hk' | 'us') =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/top`,
+      `/api/watchlist/${encodeURIComponent(symbol)}/top${market ? `?market=${market}` : ''}`,
       { method: 'POST' },
     ),
   watchlistClear: () =>
@@ -2091,13 +2591,35 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index') => {
+  marketStocks: (market: 'hk' | 'us') =>
+    request<{ results: Array<{ symbol: string; name: string; lot_size?: number | null }> }>(`/api/${market}/stocks`),
+  marketDataStatus: (market: InternationalMarket) =>
+    request<MarketDataStatusResponse>(`/api/${market}/data/status`),
+  marketSyncEnriched: (market: InternationalMarket, symbols?: string[]) =>
+    request<MarketDataSyncResult>(`/api/${market}/enriched/sync${symbols !== undefined ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`, {
+      method: 'POST',
+    }),
+  marketSyncDaily: (market: InternationalMarket, options: { symbols?: string[]; start?: string; end?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (options.symbols !== undefined) query.set('symbols', options.symbols.join(','))
+    if (options.start) query.set('start', options.start)
+    if (options.end) query.set('end', options.end)
+    return request<MarketDataSyncResult>(`/api/${market}/daily/sync?${query}`, { method: 'POST' })
+  },
+  marketSyncLotSizes: () =>
+    request<MarketDataSyncResult>('/api/hk/instruments/lot-sizes/sync', { method: 'POST' }),
+  marketSyncFinancials: (symbols?: string[]) =>
+    request<MarketDataSyncResult>(symbols === undefined
+      ? '/api/hk/financials/sync'
+      : '/api/hk/financials/sync?symbols=' + encodeURIComponent(symbols.join(',')),
+    { method: 'POST' }),
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index' | 'hk' | 'us') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' | 'hk' | 'us' = 'stock') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
       body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType }),
@@ -2120,7 +2642,7 @@ export const api = {
         : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
   screenerCached: (extColumns?: string) =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
+    request<{ as_of: string | null; results: Record<string, ScreenerResultSummary & { rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
       extColumns
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
@@ -2128,34 +2650,45 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+  overviewHk: (asOf?: string) => request<OverviewMarket>(`/api/hk/overview${asOf ? `?as_of=${asOf}` : ''}`),
+  overviewUs: (asOf?: string) => request<OverviewMarket>(`/api/us/overview${asOf ? `?as_of=${asOf}` : ''}`),
+  // 跨市场态势总览: 日级判断, 后端 60s 缓存。markets 传 'cn,hk,us'(默认全量)
+  overviewPosture: (markets?: string) =>
+    request<MarketPostureResult>(`/api/overview/posture${markets ? `?markets=${markets}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>
     request<RpsRotationData>(`/api/rps/rotation?days=${days}${kind ? `&kind=${kind}` : ''}${level ? `&level=${level}` : ''}`),
 
-  // 市场环境(Regime)
-  regimeHistory: (start?: string, end?: string, limit?: number) => {
+  // 市场环境(Regime) — market 透传给后端 (cn/hk/us, 默认 cn 兼容老调用)
+  regimeHistory: (start?: string, end?: string, limit?: number, market: MarketCode = 'cn') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
     if (end) params.set('end', end)
     if (limit) params.set('limit', String(limit))
+    params.set('market', market)
     const qs = params.toString()
     return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
   },
-  regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
-  regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
-  regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
-  regimeRecompute: (start?: string, end?: string) => {
+  regimeLatest: (market: MarketCode = 'cn') =>
+    request<{ row: RegimeRow | null }>(`/api/regime/latest?market=${market}`),
+  regimeStates: (days = 60, market: MarketCode = 'cn') =>
+    request<RegimeStates>(`/api/regime/states?days=${days}&market=${market}`),
+  regimeCoverage: (market: MarketCode = 'cn') =>
+    request<RegimeCoverage>(`/api/regime/coverage?market=${market}`),
+  regimeRecompute: (start?: string, end?: string, market: MarketCode = 'cn') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
     if (end) params.set('end', end)
+    params.set('market', market)
     const qs = params.toString()
     return request<{ ok: boolean; computed: number; phase_days?: number; mainline_rows?: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
   },
-  regimePhases: (start?: string, end?: string) => {
+  regimePhases: (start?: string, end?: string, market: MarketCode = 'cn') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
     if (end) params.set('end', end)
+    params.set('market', market)
     const qs = params.toString()
     return request<PhaseSegments>(`/api/regime/phases${qs ? `?${qs}` : ''}`)
   },
@@ -2167,6 +2700,14 @@ export const api = {
   },
   regimeMainlineRecompute: () =>
     request<{ ok: boolean; rows: number }>('/api/regime/mainline/recompute', { method: 'POST' }),
+
+  // 强度梯队(动量档位) — 仅港美, market=cn 后端返 400
+  strengthLadder: (market: MarketCode = 'hk', date?: string, bands?: StrengthBand[]) => {
+    const params = new URLSearchParams({ market })
+    if (date) params.set('date', date)
+    if (bands?.length) params.set('bands', bands.join(','))
+    return request<StrengthLadderResult>(`/api/strength_ladder?${params.toString()}`)
+  },
   mainlineFilterUpdate: (payload: { min_members?: number; max_members?: number; blacklist?: string[]; exclude_st?: boolean }) =>
     request<MainlineFilter>('/api/settings/preferences/mainline-filter', {
       method: 'PUT',
@@ -2204,6 +2745,16 @@ export const api = {
 
   factorColumns: () =>
     request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns'),
+
+  scoringColumns: ({ assetType = 'stock', context = 'current', asOf }: {
+    assetType?: StrategyBacktestAsset
+    context?: ScoringContext
+    asOf?: string
+  } = {}) => {
+    const query = new URLSearchParams({ purpose: 'scoring', asset_type: assetType, context })
+    if (asOf) query.set('as_of', asOf)
+    return request<{ columns: ScoringColumn[] }>(`/api/backtest/factor/columns?${query}`)
+  },
 
   factorRun: (payload: {
     factor_name: string
@@ -2320,33 +2871,102 @@ export const api = {
       method: 'DELETE',
     }),
 
-  strategyBacktestRun: (payload: {
-    strategy_id: string
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    params?: Record<string, any> | null
-    overrides?: Record<string, any> | null
-    matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
-    fees_pct?: number
-    commission_pct?: number
-    stamp_tax_pct?: number
-    slippage_bps?: number
-    max_positions?: number
-    initial_capital?: number
-    position_sizing?: 'equal' | 'score_weight'
-    asset_type?: 'stock' | 'etf' | 'index'
-    minute_fill?: boolean
-  }) =>
+  strategyBacktestRun: (payload: StrategyBacktestRequest) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  strategyBacktestStreamUrl: (payload: StrategyBacktestRequest | string) => {
+    if (typeof payload === 'string') return '/api/backtest/strategy/stream?' + payload
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries({ ...payload, asset_type: payload.asset_type ?? 'stock' })) {
+      if (value == null || value === '') continue
+      query.set(key, key === 'symbols'
+        ? (value as string[]).join(',')
+        : typeof value === 'object' ? JSON.stringify(value) : String(value))
+    }
+    return '/api/backtest/strategy/stream?' + query.toString()
+  },
+  strategyBacktestCancel: (qs: string) =>
+    request<{ ok: boolean; message?: string; cancelled_count?: number }>('/api/backtest/strategy/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ qs }),
+    }),
+
+  // ── 新闻 / 舆情 ──────────────────────────────────────────────
+  newsStatus: () => request<NewsStatus>('/api/news/status'),
+  newsSearch: (query: string, days = 7, maxResults = 8) =>
+    request<NewsResponse>(
+      `/api/news/search?query=${encodeURIComponent(query)}&days=${days}&max_results=${maxResults}`,
+    ),
+  newsStock: (symbol: string, name?: string, days = 7, maxResults = 8) => {
+    const namePart = name ? `&name=${encodeURIComponent(name)}` : ''
+    return request<NewsResponse>(
+      `/api/news/stock?symbol=${encodeURIComponent(symbol)}${namePart}&days=${days}&max_results=${maxResults}`,
+    )
+  },
+  newsConcept: (topic: string, days = 7, maxResults = 8) =>
+    request<NewsResponse>(
+      `/api/news/concept?topic=${encodeURIComponent(topic)}&days=${days}&max_results=${maxResults}`,
+    ),
+  // 批量归因: 后端串行限速(0.6s/个)+ 结果缓存, 前端**禁止**并发逐条打 /api/news/stock。
+  // 单批上限 200, 时间预算 25s —— 超出部分会标 error, 所以别一次塞几百个 symbol。
+  newsBatchStock: (
+    symbols: string[],
+    names?: Record<string, string>,
+    days = 7,
+    maxResults = 8,
+  ) =>
+    request<NewsBatchStockResult>('/api/news/batch-stock', {
+      method: 'POST',
+      body: JSON.stringify({
+        symbols,
+        names: names ?? {},
+        days,
+        max_results: maxResults,
+      }),
+    }),
+  newsInvalidate: () => request<{ ok: boolean }>('/api/news/cache/invalidate', { method: 'POST' }),
+  newsCategories: () => request<{ categories: NewsCategory[] }>('/api/news/categories'),
+  newsFeeds: (category: string, hours = 48, limit = 40) =>
+    request<NewsFeedResult>(
+      `/api/news/feeds?category=${encodeURIComponent(category)}&hours=${hours}&limit=${limit}`,
+    ),
+  getSearchKey: (provider = 'anspire') =>
+    request<{ provider: string; configured: boolean; key_count: number; masked: string }>(
+      `/api/settings/search-key?provider=${encodeURIComponent(provider)}`,
+    ),
+  saveSearchKey: (apiKey: string, provider = 'anspire') =>
+    request<{ ok: boolean; provider: string; error?: string; masked?: string; key_count?: number }>(
+      '/api/settings/search-key',
+      { method: 'POST', body: JSON.stringify({ provider, api_key: apiKey }) },
+    ),
+  deleteSearchKey: (provider = 'anspire') =>
+    request<{ ok: boolean; provider: string }>(
+      `/api/settings/search-key?provider=${encodeURIComponent(provider)}`,
+      { method: 'DELETE' },
+    ),
 
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
+  ),
+  marketDailyRun: (payload: {
+    market: 'HK' | 'US'
+    start_date: string
+    end_date: string
+    mode?: 'full' | 'incremental'
+    batch_size?: number
+  }) => request<{ status: string; job_id: string; market: string; mode: string }>(
+    '/api/pipeline/market-daily/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  ),
+  marketDailyRetry: (jobId: string, batchSize?: number) => request<{ status: string; job_id: string; market: string; mode: string }>(
+    '/api/pipeline/market-daily/retry', {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId, ...(batchSize ? { batch_size: batchSize } : {}) }),
+    },
   ),
   pipelineJob: (id: string) => request<PipelineJob>(`/api/pipeline/jobs/${id}`),
   pipelineJobs: (limit = 20) =>
@@ -2355,6 +2975,8 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  dataFreshness: () => request<DataFreshness>('/api/data/freshness'),
+  invalidateFreshness: () => request<{ ok: boolean }>('/api/data/freshness/invalidate', { method: 'POST' }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -2805,8 +3427,8 @@ export const api = {
     )
   },
 
-  strategyGet: (id: string) =>
-    request<StrategyDetail>(`/api/strategies/${id}`),
+  strategyGet: (id: string, assetType?: StrategyBacktestAsset) =>
+    request<StrategyDetail>('/api/strategies/' + encodeURIComponent(id) + (assetType ? '?asset_type=' + assetType : '')),
 
   strategyRun: (strategyId: string, params?: Record<string, any>, asOf?: string, pool?: string[]) =>
     request<ScreenerResult>('/api/strategies/run', {
@@ -2868,6 +3490,10 @@ export const api = {
   abnormalOverview: (minCloseness = 0.5, limit = 200) =>
     request<AbnormalOverview>(
       `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}`,
+    ),
+  abnormalHkUsOverview: (market: 'HK' | 'US', minCloseness = 0.5, limit = 200) =>
+    request<AbnormalHkUsOverview>(
+      `/api/abnormal/hk-us/overview?market=${market}&min_closeness=${minCloseness}&limit=${limit}`,
     ),
 
   // ===== Monitor Rules (监控规则) =====
@@ -3035,9 +3661,70 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId, code, name: meta?.name ?? '', description: meta?.description ?? '' }),
     }),
+
+  // ===== 热点工作区 (hotspot) =====
+  // 目前仅 A 股 (cn) 有真实数据源 (akshare 东财概念/行业板块);
+  // 港美返回 quality_status = missing_mapping 的空列表, 前端按"缺失映射"提示。
+  hotspots: (params?: { market?: 'cn' | 'hk' | 'us'; top?: number; refresh?: boolean; includeDetails?: boolean }) => {
+    const qs = new URLSearchParams()
+    if (params?.market) qs.set('market', params.market)
+    if (params?.top) qs.set('top', String(params.top))
+    if (params?.refresh) qs.set('refresh', 'true')
+    if (params?.includeDetails) qs.set('include_details', 'true')
+    const s = qs.toString()
+    return request<HotspotListResult>(`/api/v1/hotspots${s ? `?${s}` : ''}`)
+  },
+
+  hotspotDetail: (topic: string, market: 'cn' | 'hk' | 'us' = 'cn') =>
+    request<HotspotDetailResult>(
+      `/api/v1/hotspots/${encodeURIComponent(topic)}?market=${market}`,
+    ),
+
+  hotspotsRefresh: (market: 'cn' | 'hk' | 'us' = 'cn') =>
+    request<HotspotRefreshResult>(`/api/v1/hotspots/refresh?market=${market}`, { method: 'POST' }),
+
+  hotspotJobState: () => request<HotspotJobState>('/api/v1/hotspots/job-state'),
 }
 
 // ===== Pipeline =====
+export interface MarketDailySyncResult {
+  operation?: MarketDataSyncResult['operation']
+  requested?: number
+  succeeded?: number
+  failed?: number
+  skipped?: number
+  unchanged?: number
+  verified_not_applicable?: number
+  enriched_dates_written?: number
+  data_generation?: string
+  failures?: MarketDataSyncResult['failures']
+  items?: MarketDataSyncItem[]
+  message?: string
+  source?: string
+  as_of?: string
+  job_id?: string
+  market?: 'HK' | 'US' | string
+  provider?: string
+  mode?: 'full' | 'incremental' | 'retry_only' | string
+  universe_fingerprint?: string
+  coverage_start?: string
+  coverage_end?: string
+  symbols_total?: number
+  universe_symbols?: string[]
+  completed_symbols?: string[]
+  failed_symbols?: string[]
+  skipped_symbols?: string[]
+  attempts?: Record<string, number>
+  provider_errors?: Record<string, string>
+  last_success_symbol?: string | null
+  last_success_at?: string | null
+  checkpoint_path?: string
+  status?: string
+  partial_success?: boolean
+  circuit_open?: boolean
+  finished_at?: string
+}
+
 export interface PipelineJob {
   id: string
   status: 'pending' | 'running' | 'succeeded' | 'failed'
@@ -3048,16 +3735,16 @@ export interface PipelineJob {
   started_at: string | null
   finished_at: string | null
   duration_s: number | null
-  result: {
-    universe_size: number
-    daily_days: number
-    adj_factor_symbols: number
-    enriched_days: number
+  result: (MarketDailySyncResult & {
+    universe_size?: number
+    daily_days?: number
+    adj_factor_symbols?: number
+    enriched_days?: number
     index_count?: number
     index_daily_rows?: number
-    minute_rows: number
+    minute_rows?: number
     skipped_stages?: string[]
-  } | null
+  }) | null
   error: string | null
 }
 
@@ -3077,6 +3764,41 @@ interface InstrumentsStats {
   symbols_covered: number
   latest_as_of: string | null
   named: number
+}
+
+/** 单个市场的数据新鲜度 — 底部状态栏消费 */
+export interface MarketFreshness {
+  market: string
+  label: string
+  today: string
+  latest_date: string | null
+  raw_latest_date: string | null
+  earliest_date: string | null
+  history_days: number | null
+  history_insufficient: boolean
+  stale_days: number | null
+  tolerance_days: number
+  coverage_ratio: number
+  coverage_units: number | null
+  /** A 股单位是交易日, 港美是标的 — 展示时必须带上单位 */
+  coverage_unit_label: string
+  status: 'ok' | 'stale' | 'shallow' | 'behind_raw' | 'partial' | 'empty' | 'unknown'
+  gap: { from: string; to: string; missing_days: number; reason: string } | null
+}
+
+export interface DataFreshness {
+  generated_at: string
+  markets: MarketFreshness[]
+  active_job: {
+    id: string
+    status: string | null
+    stage: string | null
+    progress: number | null
+    message: string | null
+    market: string | null
+    started_at: string | null
+  } | null
+  cached: boolean
 }
 
 export interface DataStatus {
@@ -3247,4 +3969,118 @@ export interface AnalysisMenu {
   created_at?: string | null
   updated_at?: string | null
   builtin?: boolean
+}
+
+// ===== 热点工作区 (hotspot) =====
+// 单位契约: change_pct / turnover_rate 一律为小数制 (0.0826 = +8.26%),
+// 前端统一走 fmtPct(v) 渲染。成分股字段可得性受限时后端显式返回 null,
+// 前端渲染 '—', 不做任何推断 (如不从涨幅推断涨停)。
+
+export interface HotspotStockRow {
+  code: string
+  name: string
+  change_pct: number | null
+  amount: number | null
+  turnover_rate: number | null
+  volume_ratio: number | null
+  net_inflow: number | null
+  is_limit_up: boolean
+  active_days: number | null
+  evidence_count: number
+  role: string | null
+  hot_stock_score: number | null
+  source: string | null
+  source_confidence: number | null
+  fallback_used: boolean
+}
+
+export interface HotspotSummaryRow {
+  topic: string
+  name: string
+  source: string | null
+  rank: number | null
+  change_pct: number | null
+  heat_score: number | null
+  trend_score: number | null
+  persistence_score: number | null
+  cooling_score: number | null
+  observations: number
+  state: string | null
+  stage: string | null
+  sample_stock_count: number
+  leaders: string[]
+  leader_stocks: HotspotStockRow[]
+  quality_status: string | null
+  missing_fields: string[]
+  provider_used: string | null
+  fallback_used: boolean
+  source_errors: string[]
+  stale: boolean
+  stale_age_hours: number | null
+  topic_date: string | null
+  snapshot_at: string | null
+  snapshot_market: string | null
+  canonical_topic: string | null
+  aliases: string[]
+}
+
+export interface HotspotDetailResult {
+  enabled: boolean
+  provider: string
+  topic: string
+  name: string | null
+  canonical_topic: string | null
+  aliases: string[]
+  summary: HotspotSummaryRow
+  route: Record<string, any>[]
+  timeline: Record<string, any>[]
+  stocks: HotspotStockRow[]
+  leader_stocks: HotspotStockRow[]
+  stock_count: number
+  quality_status: string | null
+  missing_fields: string[]
+  provider_used: string | null
+  fallback_used: boolean
+  source_errors: string[]
+  stale: boolean
+  stale_age_hours: number | null
+  cache_used: boolean
+  news_search_requested: boolean
+  news_search_status: string
+}
+
+export interface HotspotListResult {
+  enabled: boolean
+  provider: string
+  provider_used: string
+  fallback_used: boolean
+  cache_used: boolean
+  cached_at: number | null
+  stale: boolean
+  stale_age_hours: number | null
+  quality_status: string | null
+  source_errors: string[]
+  market: string
+  hotspots: HotspotSummaryRow[]
+  hotspot_count: number
+  details?: Record<string, HotspotDetailResult | { missing: boolean }>
+}
+
+/** job-state: 最近一次同步状态 (storage.job_state 直出) */
+export interface HotspotJobState {
+  last_run: string | null
+  last_status: string | null
+  rows: number
+  markets: Record<string, number>
+  last_success_at: Record<string, string>
+  provider_used?: string | null
+  message?: string | null
+}
+
+/** status: ok / degraded / empty / error / skipped */
+export interface HotspotRefreshResult {
+  status: string
+  rows: number
+  provider: string | null
+  last_run?: string | null
 }

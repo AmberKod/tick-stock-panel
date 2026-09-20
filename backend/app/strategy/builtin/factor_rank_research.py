@@ -124,6 +124,9 @@ class FactorRankResearchMatrixStrategy:
             fallback=np.zeros(market.shape, dtype=np.float32),
             directions=directions,
         )
+        # Warmup/missing factors cannot emit an entry or a low-score exit.
+        universe &= np.isfinite(score)
+        score = np.where(universe, score, 0.0).astype(np.float32)
         entry = universe & (score >= np.float32(entry_score))
         entry = _limit_top_rank(entry, score, top_rank)
         exit_ = universe & (score <= np.float32(exit_score))

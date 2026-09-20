@@ -9,7 +9,7 @@
 """
 from app.markets.profile import IndexRef, MarketId, MarketProfile, TradingSession
 from app.markets.registry import get_profile, profile_for_symbol, resolve_market
-from app.markets.symbols import normalize, parse, is_valid
+from app.markets.symbols import is_valid, normalize, parse
 
 __all__ = [
     "IndexRef",
@@ -17,9 +17,9 @@ __all__ = [
     "MarketProfile",
     "TradingSession",
     "get_profile",
+    "is_valid",
+    "normalize",
+    "parse",
     "profile_for_symbol",
     "resolve_market",
-    "parse",
-    "normalize",
-    "is_valid",
 ]

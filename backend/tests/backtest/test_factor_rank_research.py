@@ -174,7 +174,7 @@ def test_strategy_direction_changes_score_without_dynamic_formula_execution():
     )
 
     np.testing.assert_allclose(high.score + low.score, 100.0)
-    with pytest.raises(ValueError, match="unsupported matrix feature"):
+    with pytest.raises(ValueError, match="缺少字段或依赖") as exc_info:
         strategy.compute_signals(
             market,
             {
@@ -184,6 +184,8 @@ def test_strategy_direction_changes_score_without_dynamic_formula_execution():
                 "top_rank": 1,
             },
         )
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert "unsupported matrix feature" in str(exc_info.value.__cause__)
 
 
 @pytest.mark.parametrize(

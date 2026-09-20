@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
+import { fetchMarketQuotes, quoteMapBySymbol } from '@/lib/marketQuotes'
 
 interface USIndexQuote {
   symbol: string
@@ -30,11 +31,8 @@ export function USMarketWidget() {
     queryKey: ['us', 'widget', 'indices'],
     queryFn: async () => {
       const r = await fetchJson<{ results: { symbol: string; name: string }[] }>('/api/us/indices')
-      const q = await fetchJson<{ results: Record<string, unknown>[] }>(
-        `/api/us/realtime/batch?symbols=${r.results.map((i) => i.symbol).join(',')}`,
-      )
-      const map = new Map<string, Record<string, unknown>>()
-      for (const row of q.results) map.set(row.symbol as string, row)
+      const quotes = await fetchMarketQuotes('us', r.results.map((item) => item.symbol))
+      const map = quoteMapBySymbol(quotes)
       return r.results.map((idx): USIndexQuote => {
         const row = map.get(idx.symbol)
         const pct = (row?.change_pct as number | undefined) ?? null
@@ -53,11 +51,8 @@ export function USMarketWidget() {
     queryKey: ['us', 'widget', 'leaders'],
     queryFn: async () => {
       const r = await fetchJson<{ results: { symbol: string; name: string }[] }>('/api/us/stocks')
-      const q = await fetchJson<{ results: Record<string, unknown>[] }>(
-        `/api/us/realtime/batch?symbols=${r.results.map((s) => s.symbol).join(',')}`,
-      )
-      const map = new Map<string, Record<string, unknown>>()
-      for (const row of q.results) map.set(row.symbol as string, row)
+      const quotes = await fetchMarketQuotes('us', r.results.map((stock) => stock.symbol))
+      const map = quoteMapBySymbol(quotes)
       const out: USLeaderRow[] = r.results.map((s) => {
         const row = map.get(s.symbol)
         return {

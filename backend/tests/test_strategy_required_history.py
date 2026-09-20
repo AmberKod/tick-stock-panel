@@ -103,6 +103,8 @@ def test_build_strategy_context_loads_history_for_param_lookback(tmp_path, monke
         return pl.DataFrame({"symbol": ["A"], "date": [target_date]})
 
     monkeypatch.setattr(svc, "_load_enriched_history", fake_load)
+    # build_strategy_context 会通过 latest_date() 计算 is_historical，回归测试只需验证 lookback 天数
+    monkeypatch.setattr(svc, "latest_date", lambda: target)
 
     target = date(2026, 7, 15)
     context = svc.build_strategy_context(

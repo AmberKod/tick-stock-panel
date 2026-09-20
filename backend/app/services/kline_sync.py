@@ -7,7 +7,11 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import queue
+import threading
+import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
@@ -42,7 +46,32 @@ def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
 # 标准列(无论 SDK 返回什么形状,我们把它规范成这套)
 CANONICAL_DAILY_COLS = [
     "symbol", "date", "open", "high", "low", "close", "volume", "amount",
+    "source", "price_adjustment", "amount_source", "volume_unit", "currency", "adj_close",
+    "price_schema_version", "adjustment_source", "adjustment_version", "adjustment_as_of",
+    "observed_at", "raw_price_verified", "verification_source",
 ]
+
+
+class DailyCapabilityUnavailableError(RuntimeError):
+    """The configured daily source cannot perform the requested download."""
+
+
+def daily_sync_capability(capset: CapabilitySet | None, market: str | None = None) -> tuple[str, bool, str | None]:
+    """Inspect the existing daily-provider route without starting a download."""
+    provider_name = preferences.get_daily_data_provider()
+    if str(market).upper() in {"HK", "US"} and provider_name == "tickflow":
+        from app.data_providers.registry import get_default_provider
+        provider = get_default_provider(str(market), **({"dataset": "daily"} if str(market).upper() == "HK" else {}))
+        supported = bool(provider.capabilities.daily)
+        reason = None if supported else "当前市场数据源未开放批量日 K 下载能力,已下载行情仍可重算指标"
+        return provider.name, supported, reason
+    if provider_name != "tickflow":
+        from app.data_providers import custom as custom_sources
+        supported = custom_sources.provider_has_dataset(provider_name, "daily")
+    else:
+        supported = bool(capset is not None and capset.has(Cap.KLINE_DAILY_BATCH))
+    reason = None if supported else "当前数据源未开放日 K 下载能力,请在数据源设置中配置"
+    return provider_name, supported, reason
 
 
 def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
@@ -87,6 +116,28 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     return df.select(keep)
 
 
+def _fetch_batch_with_timeout(fetch_fn, timeout_seconds: float | None):
+    """在同步 Provider 外包一层超时边界，避免慢请求阻塞任务主循环。"""
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return fetch_fn()
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result_queue.put((True, fetch_fn()))
+        except BaseException as exc:
+            result_queue.put((False, exc))
+
+    threading.Thread(target=worker, name="daily-provider", daemon=True).start()
+    try:
+        ok, value = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise TimeoutError(f"daily provider timeout after {timeout_seconds:g}s") from exc
+    if ok:
+        return value
+    raise value
+
+
 def sync_daily_batch(symbols: list[str],
                      count: int | None = None,
                      batch_size: int | None = None,
@@ -94,7 +145,11 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     successful_out: list[str] | None = None,
+                     max_retries: int = 2,
+                     retry_backoff_seconds: float = 1.0,
+                     request_timeout_seconds: float | None = 30.0) -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
@@ -102,6 +157,10 @@ def sync_daily_batch(symbols: list[str],
 
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
+    successful_out: 可选出参。追加实际返回有效日 K 的 symbol，支持上层精确记录
+                    分块部分成功状态。
+    max_retries: 临时 Provider 错误的最大重试次数，不含首次请求。
+    retry_backoff_seconds: 指数退避的首个等待秒数。
     """
     tf = get_client()
     out: list[pl.DataFrame] = []
@@ -109,22 +168,41 @@ def sync_daily_batch(symbols: list[str],
     failed_syms: list[str] = []
 
     for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, rpm)
-        try:
-            if start_time and end_time:
-                raw = tf.klines.batch(
-                    chunk, period="1d", adjust="none",
-                    start_time=_datetime_to_ms(start_time),
-                    end_time=_datetime_to_ms(end_time),
-                    count=10000,
-                    as_dataframe=True, show_progress=False,
-                )
-            else:
-                raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
-                                      as_dataframe=True, show_progress=False)
-        except Exception as e:  # noqa: BLE001
+        raw = None
+        last_error: Exception | None = None
+        for attempt in range(max(0, int(max_retries)) + 1):
+            sleep_between_batches(i if attempt == 0 else 0, rpm)
+            try:
+                # B023 豁免: 闭包在同一次循环迭代内经 _fetch_batch_with_timeout 立即调用,
+                # 不逃逸到后续迭代, chunk 绑定无风险。
+                def fetch() -> object:
+                    if start_time and end_time:
+                        return tf.klines.batch(
+                            chunk, period="1d", adjust="none",
+                            start_time=_datetime_to_ms(start_time),
+                            end_time=_datetime_to_ms(end_time),
+                            count=10000,
+                            as_dataframe=True, show_progress=False,
+                        )
+                    return tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
+                                          as_dataframe=True, show_progress=False)
+
+                raw = _fetch_batch_with_timeout(fetch, request_timeout_seconds)
+                break
+            except Exception as e:
+                last_error = e
+                message = str(e).lower()
+                retryable = any(token in message for token in ("timeout", "429", "rate limit", "too many requests", "temporar"))
+                if not retryable or attempt >= max(0, int(max_retries)):
+                    break
+                delay = max(0.0, float(retry_backoff_seconds)) * (2 ** attempt)
+                logger.warning("batch fetch retry %d/%d for %d symbols: %.1fs: %s",
+                               attempt + 1, max_retries, len(chunk), delay, e)
+                if delay:
+                    time.sleep(delay)
+        if last_error is not None and raw is None:
             logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
-                           len(chunk), i + 1, len(chunks), e)
+                           len(chunk), i + 1, len(chunks), last_error)
             failed_syms.extend(chunk)
             continue
 
@@ -133,9 +211,17 @@ def sync_daily_batch(symbols: list[str],
             for sym, sub in raw.items():
                 if sub is None or len(sub) == 0:
                     continue
-                out.append(_normalize_daily(sub, default_symbol=sym))
+                normalized = _normalize_daily(sub, default_symbol=sym)
+                if not normalized.is_empty():
+                    out.append(normalized)
+                    if successful_out is not None and "symbol" in normalized.columns:
+                        successful_out.extend(normalized.get_column("symbol").cast(pl.Utf8).unique().to_list())
         elif raw is not None and len(raw) > 0:
-            out.append(_normalize_daily(raw))
+            normalized = _normalize_daily(raw)
+            if not normalized.is_empty():
+                out.append(normalized)
+                if successful_out is not None and "symbol" in normalized.columns:
+                    successful_out.extend(normalized.get_column("symbol").cast(pl.Utf8).unique().to_list())
 
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
@@ -160,8 +246,18 @@ def sync_and_persist_daily_batch(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     on_chunk_done: Callable[[int, int], None] | None = None,
+    successful_out: list[str] | None = None,
+    failed_out: list[str] | None = None,
+    request_timeout_seconds: float | None = 30.0,
+    asset_type: str | None = None,
+    items_out: list[dict] | None = None,
+    before_publish: Callable[[], None] | None = None,
 ) -> int:
     """批量同步日 K 并落到 Parquet。返回写入的行数。
+
+    successful_out: 可选出参，回传本次实际返回日 K 数据的 symbol，供上层
+    checkpoint 精确确认，避免“分块部分成功却整块标记成功”。
+    failed_out: 可选出参，回传底层批量请求明确失败的 symbol。
 
     start_date/end_date: 外部传入的时间范围(由 pipeline 根据已有数据计算)。
     未传入时默认拉最近 1 年。
@@ -169,35 +265,165 @@ def sync_and_persist_daily_batch(
     if not symbols:
         return 0
 
+    def persist(frame: pl.DataFrame) -> None:
+        if before_publish:
+            before_publish()
+        if asset_type in ("hk", "us"):
+            from app.data_providers.normalizer import normalize_market_symbols
+            actual = frame.get_column("symbol").cast(pl.String).unique().to_list()
+            normalize_market_symbols(actual, asset_type)
+            if set(actual) - set(symbols):
+                raise ValueError("日 K 数据源返回了未请求的标的,拒绝写入")
+            repo.append_daily_asset(asset_type, frame)
+        else:
+            repo.append_daily(frame)
+
     provider_name = preferences.get_daily_data_provider()
+    market_provider = None
+    if asset_type in ("hk", "us") and provider_name == "tickflow":
+        from app.data_providers.registry import get_default_provider
+        market_provider = get_default_provider(asset_type, **({"dataset": "daily"} if asset_type == "hk" else {}))
+        if not market_provider.capabilities.daily:
+            raise DailyCapabilityUnavailableError("当前市场数据源未开放批量日 K 下载能力")
+        provider_name = market_provider.name
     if provider_name != "tickflow":
         from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "daily"):
-            provider = custom_sources.get_provider(provider_name)
+        if market_provider is not None or custom_sources.provider_has_dataset(provider_name, "daily"):
+            provider = market_provider or custom_sources.get_provider(provider_name)
             end_time = end_date or datetime.now()
             days = count or 365
             start_time = start_date or (end_time - timedelta(days=days))
-            df = provider.get_daily(
-                symbols,
-                start_time=start_time,
-                end_time=end_time,
-                on_chunk_done=on_chunk_done,
-            )
+            report_fetch = getattr(provider, "get_daily_with_report", None)
+            if asset_type == "hk" and callable(report_fetch):
+                from app.data_providers.hk_daily_provider import HKDailyProvider
+                from app.services.hk_data_adapter import (
+                    load_hk_raw_verification_archives,
+                    publish_hk_daily_snapshot,
+                )
+                from app.tickflow.market_daily import (
+                    read_legacy_market_daily,
+                    read_market_daily_symbol,
+                )
+
+                root = repo.store.data_dir
+                legacy = read_legacy_market_daily(root, "HK", symbols)
+                report_kwargs = ({"verification_archives": load_hk_raw_verification_archives(root, symbols)}
+                                 if isinstance(provider, HKDailyProvider) else {})
+                maintained_start, maintained_end = start_time, end_time
+                for symbol in symbols:
+                    previous = read_market_daily_symbol(root, symbol, legacy=legacy)
+                    if not previous.is_empty():
+                        maintained_start = min(maintained_start, datetime.combine(previous["date"].min(), datetime.min.time()))
+                        maintained_end = max(maintained_end, datetime.combine(previous["date"].max(), datetime.min.time()))
+                fetched = _fetch_batch_with_timeout(
+                    lambda: report_fetch(symbols, start_time=maintained_start, end_time=maintained_end, asset_type="stock", **report_kwargs),
+                    request_timeout_seconds,
+                )
+                if before_publish:
+                    before_publish()
+                frame = _normalize_daily(fetched.frame)
+                items = {item["symbol"]: dict(item) for item in fetched.items}
+                if set(items) != set(symbols) or len(items) != len(fetched.items):
+                    raise ValueError("日线数据源的逐标的报告与请求不一致")
+                if not frame.is_empty() and set(frame["symbol"].unique().to_list()) - set(symbols):
+                    raise ValueError("日线数据源返回了未请求标的")
+                instrument_path = root / "instruments" / "hk_instruments.parquet"
+                instrument_rows: dict[str, dict] = {}
+                if instrument_path.exists():
+                    instruments = pl.read_parquet(instrument_path)
+                    instrument_rows = {row["symbol"]: row for row in instruments.filter(pl.col("symbol").is_in(symbols)).to_dicts()}
+                count_written = 0
+                for symbol in symbols:
+                    item = items[symbol]
+                    item.update(requested_start=start_time.date().isoformat(), requested_end=end_time.date().isoformat(),
+                                maintenance_start=maintained_start.date().isoformat(), maintenance_end=maintained_end.date().isoformat())
+                    selected = frame.filter(pl.col("symbol") == symbol) if not frame.is_empty() else pl.DataFrame()
+                    if not selected.is_empty():
+                        metadata = instrument_rows.get(symbol, {})
+                        currency = metadata.get("currency")
+                        if not currency and metadata.get("lot_size_source") == "hkex_list_of_securities" and "currency" not in metadata:
+                            currency = "HKD"
+                        if currency in {"HKD", "CNY", "USD"} and "currency" in selected.columns:
+                            selected = selected.with_columns(pl.col("currency").fill_null(currency))
+                        factors = fetched.adjustments.filter(pl.col("symbol") == symbol) if not fetched.adjustments.is_empty() else pl.DataFrame()
+                        try:
+                            item = publish_hk_daily_snapshot(root, symbol, selected, factors=factors, item=item,
+                                                             before_publish=before_publish, legacy=legacy,
+                                                             verification_archives=[archive for archive in getattr(fetched, "verification_archives", ()) if archive.get("symbol") == symbol])
+                            count_written += selected.height
+                        except Exception as exc:
+                            item.update(status="failed", reason=str(exc), reason_code="publication_failed", raw_updated=False, enriched_updated=False)
+                    if item["status"] in {"ok", "unchanged"}:
+                        if successful_out is not None:
+                            successful_out.append(symbol)
+                    elif failed_out is not None:
+                        failed_out.append(symbol)
+                    if items_out is not None:
+                        items_out.append(item)
+                return count_written
+            raw = None
+            last_error: Exception | None = None
+            for attempt in range(3):
+                try:
+                    raw = _fetch_batch_with_timeout(
+                        lambda: provider.get_daily(
+                            symbols,
+                            start_time=start_time,
+                            end_time=end_time,
+                            **({"asset_type": "stock"} if market_provider is not None else {"on_chunk_done": on_chunk_done}),
+                        ),
+                        request_timeout_seconds,
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    message = str(exc).lower()
+                    retryable = any(
+                        token in message
+                        for token in ("timeout", "429", "rate limit", "too many requests", "temporar")
+                    )
+                    if not retryable or attempt >= 2:
+                        break
+                    delay = 1.0 * (2 ** attempt)
+                    logger.warning(
+                        "custom daily provider retry %d/2 for %d symbols: %.1fs: %s",
+                        attempt + 1,
+                        len(symbols),
+                        delay,
+                        exc,
+                    )
+                    time.sleep(delay)
+            if last_error is not None and raw is None:
+                if failed_out is not None:
+                    failed_out.extend(symbols)
+                raise last_error
+            df = _normalize_daily(raw) if isinstance(raw, pl.DataFrame) else pl.DataFrame()
+            returned: set[str] = set()
+            if not df.is_empty() and "symbol" in df.columns:
+                returned = set(df.get_column("symbol").cast(pl.Utf8).unique().to_list())
+            if failed_out is not None:
+                failed_out.extend(symbol for symbol in symbols if symbol not in returned)
             if df.is_empty():
                 return 0
-            repo.append_daily(df)
+            persist(df)
+            if successful_out is not None:
+                successful_out.extend(sorted(returned))
             try:
                 d = repo.store.data_dir.as_posix()
                 repo.db.execute(
                     f"""CREATE OR REPLACE VIEW kline_daily AS
                         SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("refresh view failed: %s", e)
             return df.height
-        # 自定义源未配置 daily → 回退 TickFlow
+        if asset_type in ("hk", "us"):
+            raise DailyCapabilityUnavailableError("当前数据源未配置日 K 能力,未切换到其他源")
+        # Preserve the legacy CN provider fallback.
 
     if not capset.has(Cap.KLINE_DAILY_BATCH):
+        if asset_type in ("hk", "us"):
+            raise DailyCapabilityUnavailableError("当前数据源未开放日 K 下载能力")
         return 0
 
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH, default_batch=100)
@@ -209,12 +435,17 @@ def sync_and_persist_daily_batch(
         symbols, count=count, batch_size=limit.batch, rpm=limit.rpm,
         start_time=start_time, end_time=end_time,
         on_chunk_done=on_chunk_done,
+        failed_out=failed_out,
+        successful_out=None,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     if df.is_empty():
         return 0
 
-    repo.append_daily(df)
+    persist(df)
+    if successful_out is not None and "symbol" in df.columns:
+        successful_out.extend(df.get_column("symbol").cast(pl.Utf8).unique().to_list())
 
     try:
         d = repo.store.data_dir.as_posix()
@@ -222,7 +453,7 @@ def sync_and_persist_daily_batch(
             f"""CREATE OR REPLACE VIEW kline_daily AS
                 SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("refresh view failed: %s", e)
 
     return df.height
@@ -234,7 +465,6 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
     返回写入的行数。
     """
-    from datetime import date as _date
 
     from app.tickflow.client import get_client
 
@@ -251,7 +481,7 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
 
     records = []
     for q in resp:
-        ext = q.get("ext") or {}
+        q.get("ext") or {}
         records.append({
             "symbol": q.get("symbol"),
             "open": q.get("open"),
@@ -397,7 +627,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             if not normalized.is_empty():
                 all_dfs.append(normalized)
             logger.debug("adj_factor chunk %d/%d: %d symbols", i + 1, len(chunks), len(chunk))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("adj_factor chunk %d/%d failed: %s", i + 1, len(chunks), e)
             failed_syms.extend(chunk)
 
@@ -555,7 +785,7 @@ def _resolve_minute_provider(
             return (None, True, None)
         provider = custom_sources.get_provider(provider_name)
         return (provider, False, None)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return (None, True, str(e))
 
 
@@ -607,7 +837,7 @@ def _try_custom_minute(
             asset_type=asset_type, freq=freq, on_chunk_done=wrapped_cb,
         )
         return (df, False)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("custom minute provider %s call failed, falling back to TickFlow: %s",
                        provider_name, e)
         return (None, True)
@@ -679,15 +909,15 @@ def sync_minute_batch(
     # 段内累积: 每段拉完即 flush, 避免全量攒内存 (OOM 根因)
     seg_out: list[pl.DataFrame] = []
 
-    for seg_idx, (cur_start, cur_end) in enumerate(time_segments):
+    for _seg_idx, (cur_start, cur_end) in enumerate(time_segments):
         # 当前的日期段描述 (供进度展示)
         if cur_start and cur_end:
             seg_label = f"{cur_start.strftime('%m-%d')}~{cur_end.strftime('%m-%d')}"
         else:
             seg_label = "最新"
-        seg_total = len(time_segments)
+        len(time_segments)
         chunks = chunked(symbols, batch_size)
-        for i, chunk in enumerate(chunks):
+        for _i, chunk in enumerate(chunks):
             sleep_between_batches(step, rpm)
             step += 1
             try:
@@ -704,7 +934,7 @@ def sync_minute_batch(
                     raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
                                           adjust="forward",
                                           as_dataframe=True, show_progress=False)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
                 continue
 
@@ -822,7 +1052,7 @@ def fetch_intraday_monitor_batch(
         elif source == "minute_single":
             raw = tf.klines.get(symbols[0], period="1m", count=300, as_dataframe=True)
             frames.extend(_normalize_intraday_raw(raw, default_symbol=symbols[0]))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("intraday monitor fetch failed (%s, %d symbols): %s", source, len(symbols), e)
         return pl.DataFrame()
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
@@ -881,7 +1111,7 @@ def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
     tf = get_client()
     try:
         raw = tf.klines.ex_factors([symbol], as_dataframe=True, show_progress=False)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("fetch_adj_factor_single(%s) failed: %s", symbol, e)
         return pl.DataFrame()
     return _normalize_adj_factor(raw)
@@ -896,7 +1126,7 @@ def _latest_minute_datetime(repo: KlineRepository) -> datetime | None:
             if isinstance(d, datetime):
                 return d
             return datetime.fromisoformat(str(d))
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return None
 
@@ -910,7 +1140,7 @@ def _earliest_minute_datetime(repo: KlineRepository) -> datetime | None:
             if isinstance(d, datetime):
                 return d
             return datetime.fromisoformat(str(d))
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return None
 
@@ -931,7 +1161,7 @@ def _cleanup_null_datetime_minute(repo: KlineRepository) -> None:
                 f.unlink()
                 n += 1
             logger.info("cleaned %d corrupted minute-K parquet files (null datetime)", n)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("minute cleanup check failed: %s", e)
 
 
@@ -956,7 +1186,7 @@ def _migrate_symbol_to_date_partition(repo: KlineRepository) -> None:
                     df = df.filter(pl.col("datetime").is_not_null())
                 if not df.is_empty():
                     all_frames.append(df)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     if not all_frames:
@@ -987,10 +1217,8 @@ def _migrate_symbol_to_date_partition(repo: KlineRepository) -> None:
             if f.is_file():
                 f.unlink()
         # 移除空目录
-        try:
+        with contextlib.suppress(OSError):
             d.rmdir()
-        except OSError:
-            pass
 
     logger.info("minute-K migration done: %d rows migrated", combined.height)
 
@@ -1100,7 +1328,7 @@ def sync_and_persist_minute(
             f"""CREATE OR REPLACE VIEW kline_minute AS
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)"""
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("refresh kline_minute view failed: %s", e)
 
     logger.info("minute K synced: %d rows (%d symbols)", written, len(symbols))

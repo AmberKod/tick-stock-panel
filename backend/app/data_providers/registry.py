@@ -7,6 +7,7 @@ resolve_provider_for_symbol 供 M1 港股/M2 美股接入。
 from __future__ import annotations
 
 from app.data_providers.base import MarketDataProvider
+from app.data_providers.hk_daily_provider import HKDailyProvider
 from app.data_providers.hk_quickquote_provider import HKQuickQuoteProvider
 from app.data_providers.tickflow_provider import TickFlowProvider
 from app.data_providers.yfinance_provider import YFinanceProvider
@@ -18,7 +19,7 @@ from app.markets.registry import resolve_market
 # US: yfinance (日K + 延迟 15min 实时; 全市场池不可用 → 热门池)
 _MARKET_PROVIDERS: dict[str, dict[str, type]] = {
     "CN": {"tickflow": TickFlowProvider},
-    "HK": {"hk_quickquote": HKQuickQuoteProvider},
+    "HK": {"hk_quickquote": HKQuickQuoteProvider, "hk_daily": HKDailyProvider},
     "US": {"yfinance": YFinanceProvider},
 }
 
@@ -40,6 +41,10 @@ def get_provider(name: str = "tickflow", market: str = "CN") -> MarketDataProvid
     """
     key = (name or "tickflow").lower()
     market_key = (market or "CN").strip().upper()
+    if market_key == "HK" and key == "hk_financial":
+        from app.data_providers.hk_financial_provider import HKFinancialProvider
+
+        return HKFinancialProvider()
     providers = _MARKET_PROVIDERS.get(market_key)
     if providers is None:
         registered = ", ".join(sorted(_MARKET_PROVIDERS))
@@ -48,6 +53,16 @@ def get_provider(name: str = "tickflow", market: str = "CN") -> MarketDataProvid
     if provider_cls is None:
         raise ValueError(f"Unsupported data provider: {name} for market {market_key}")
     return provider_cls()
+
+
+def get_default_provider(market: str, *, dataset: str | None = None) -> MarketDataProvider:
+    """Resolve the registered default without changing global preferences."""
+    market_key = str(market).strip().upper()
+    if market_key not in _MARKET_DEFAULT_PROVIDER:
+        raise ValueError(f"Unsupported market: {market_key}")
+    if market_key == "HK" and dataset in {"daily", "adj_factor", "financial"}:
+        return get_provider("hk_financial" if dataset == "financial" else "hk_daily", market="HK")
+    return get_provider(_MARKET_DEFAULT_PROVIDER[market_key], market=market_key)
 
 
 def resolve_provider_for_symbol(symbol: str) -> MarketDataProvider:
@@ -62,4 +77,4 @@ def resolve_provider_for_symbol(symbol: str) -> MarketDataProvider:
             f"Market {market} not yet available (symbol={symbol!r}); "
             f"registered: {sorted(_MARKET_PROVIDERS)}. See app/markets/registry.py"
         )
-    return get_provider(_MARKET_DEFAULT_PROVIDER[market], market=market)
+    return get_default_provider(market)

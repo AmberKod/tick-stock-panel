@@ -8,8 +8,6 @@ from __future__ import annotations
 import random
 from datetime import date, datetime, timedelta
 
-import pytest
-
 from app.markets import profile_for_symbol, resolve_market
 from app.markets.cn import CN_PROFILE
 from app.markets.hk import HK_PROFILE
@@ -25,7 +23,8 @@ def test_hk_basic_attributes():
     assert HK.market == "HK"
     assert HK.tz_name == "Asia/Hong_Kong"
     assert HK.currency == "HKD"
-    assert HK.settlement == "T+0"
+    assert HK.settlement == "T+2"
+    assert HK.same_day_sell_allowed is True
     assert HK.lot_size is None
     assert HK.symbol_suffixes == (".HK",)
     assert HK.trading_minutes_total == 330.0
@@ -147,6 +146,7 @@ def test_now_and_today():
 def test_normalize_symbol_5digit_to_hk():
     """M1 H3b: 5 位数字代码 → .HK 兜底 (不走 CN 的 6 位规则)。"""
     import polars as pl
+
     from app.services.ext_data import normalize_symbol
     r = normalize_symbol(pl.Series(["00700", "09988", "03690"]))
     assert r.to_list() == ["00700.HK", "09988.HK", "03690.HK"]
@@ -155,6 +155,7 @@ def test_normalize_symbol_5digit_to_hk():
 def test_normalize_symbol_mixed():
     """5 位 → .HK; 6 位 → CN 兜底; 含 . → 透传。"""
     import polars as pl
+
     from app.services.ext_data import normalize_symbol
     r = normalize_symbol(pl.Series([
         "00700",      # 5 位 → HK
@@ -171,6 +172,7 @@ def test_normalize_symbol_mixed():
 def test_normalize_symbol_hk_fallback_ambiguity():
     """5 位数字 00005 / 00010 等小码 → .HK (无歧义, 因为 A 股 5xxxx 已退市不存在)。"""
     import polars as pl
+
     from app.services.ext_data import normalize_symbol
     r = normalize_symbol(pl.Series(["00005", "00005a", "80000"]))
     assert r.to_list() == ["00005.HK", "00005a", "80000.HK"]
@@ -181,22 +183,22 @@ def test_normalize_symbol_hk_fallback_ambiguity():
 def test_polars_price_limit_pct_hk_returns_null():
     """H4 软门控在 polars 表达式层: 港股 00700.HK → null, A 股 → 10%。"""
     import polars as pl
+
     from app.price_limits import polars_price_limit_pct
     df = pl.DataFrame({
         "symbol": ["600519.SH", "00700.HK", "AAPL.US", "000001.SZ"],
         "date": pl.date_range(date(2026, 1, 1), date(2026, 1, 4), eager=True),
         "name": ["茅台", "腾讯", "苹果", "平安"],
     })
-    got = df.with_columns(
-        pct := polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.lit(False))
+    df.with_columns(
+        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.lit(False))
     )
     # 改列名为 limit_pct 输出
     result = polars_price_limit_pct(df["symbol"], df["date"], pl.lit(False))
     # 用 DataFrame 计算
     out = df.with_columns(result.alias("limit_pct"))
     # 600519.SH → 0.10, 00700.HK → null, AAPL.US → null, 000001.SZ → 0.10
-    rows = out.select(["symbol", "limit_pct"]).to_dict(as_series=False)
-    vals = dict(zip(out["symbol"].to_list(), out["limit_pct"].to_list()))
+    vals = dict(zip(out["symbol"].to_list(), out["limit_pct"].to_list(), strict=True))
     assert vals["600519.SH"] == 0.10
     assert vals["00700.HK"] is None
     assert vals["AAPL.US"] is None

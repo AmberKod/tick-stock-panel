@@ -13,6 +13,8 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { Logo } from './Logo'
 import { cn } from '@/lib/cn'
+import { MarketTab, type Market } from './MarketTab'
+import { marketFromLocation } from '@/lib/backtestMarket'
 
 /**
  * 工作区定义 — 多维工作台的一级导航。
@@ -26,12 +28,14 @@ export interface WorkspaceDef {
   label: string
   icon: LucideIcon
   color: string
+  // 是否为股票域（港美股是股票域的子市场，需要在顶部显示 MarketTab）
+  isStockDomain?: boolean
 }
 
 export const WORKSPACES: WorkspaceDef[] = [
-  { id: 'stock', to: '/',        label: '股票', icon: CandlestickChart, color: '#3b82f6' },
-  { id: 'hk',    to: '/hk',      label: '港股', icon: TrendingUp,       color: '#dc2626' },
-  { id: 'us',    to: '/us',      label: '美股', icon: LineChart,        color: '#2563eb' },
+  { id: 'stock', to: '/',        label: '股票', icon: CandlestickChart, color: '#3b82f6', isStockDomain: true },
+  { id: 'hk',    to: '/hk',      label: '港股', icon: TrendingUp,       color: '#dc2626', isStockDomain: true },
+  { id: 'us',    to: '/us',      label: '美股', icon: LineChart,        color: '#2563eb', isStockDomain: true },
   { id: 'news',  to: '/news',    label: '热点', icon: Newspaper,        color: '#f97316' },
   { id: 'image', to: '/image',   label: '图片', icon: ImageIcon,        color: '#a855f7' },
   { id: 'novel', to: '/novel',   label: '小说', icon: BookOpen,         color: '#22c55e' },
@@ -40,9 +44,17 @@ export const WORKSPACES: WorkspaceDef[] = [
 
 /** 由当前路径推断激活工作区：非 stock 前缀命中即切换，否则回落股票域 */
 export function useActiveWorkspaceId(): string {
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
+  const market = marketFromLocation(pathname, search)
+  if (market !== 'cn') return market
   const hit = WORKSPACES.find(ws => ws.id !== 'stock' && pathname.startsWith(ws.to))
   return hit?.id ?? 'stock'
+}
+
+/** 由当前路径推断激活市场（仅在股票域内有效） */
+function useActiveMarket(): Market {
+  const { pathname, search } = useLocation()
+  return marketFromLocation(pathname, search)
 }
 
 /** 工作区快捷键 Alt+1..5 — 全局监听一次 */
@@ -169,12 +181,46 @@ function MobileWorkspaceBar() {
  * 工作台外壳 — Rail + 内容区。
  * 桌面：左侧 56px Rail；移动：底部 Tab Bar（内容区预留 3.5rem 底边距）。
  * 股票域的 Layout 整体作为「股票工作区」挂在本壳的内容区里，零侵入。
+ *
+ * 股票域顶部显示 MarketTab（A股/港股/美股 切换），其他域不显示。
  */
 export function WorkspaceShell() {
+  const activeId = useActiveWorkspaceId()
+  const currentWorkspace = WORKSPACES.find(ws => ws.id === activeId)
+  const showMarketTab = currentWorkspace?.isStockDomain ?? false
+  const activeMarket = useActiveMarket()
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  const handleMarketChange = (m: Market) => {
+    const path = location.pathname
+    if (path === '/backtest' || /^\/(hk|us)\/backtest$/.test(path)) {
+      if (m === activeMarket) return
+      const query = new URLSearchParams({ tab: 'strategy', market: m === 'cn' ? 'stock' : m })
+      navigate('/backtest?' + query.toString())
+      return
+    }
+    const module = path.match(/^\/(?:hk|us)(\/[^/]+)?/)?.[1] ?? ''
+    const routeByMarket: Record<Market, string> = {
+      cn: module || '/',
+      hk: `/hk${module}` || '/hk',
+      us: `/us${module}` || '/us',
+    }
+    navigate(routeByMarket[m])
+  }
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-base text-foreground">
       <DesktopRail />
       <div className="relative flex min-w-0 flex-1 flex-col pb-14 md:pb-0">
+        {showMarketTab && (
+          <div className="border-b border-border bg-surface/80 backdrop-blur-sm px-4 py-2 sticky top-0 z-10">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted/80">市场</span>
+              <MarketTab active={activeMarket} onChange={handleMarketChange} />
+            </div>
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense
             fallback={

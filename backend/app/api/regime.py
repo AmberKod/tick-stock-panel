@@ -21,6 +21,9 @@ _cache: dict[str, Any] | None = None
 _cache_ts: float = 0.0
 _cache_lock = threading.Lock()
 
+# 缓存键按 market 拆分, 避免跨市场串; market 由各 endpoint 通过 Query 注入。
+_MARKET_PATTERN = "^(cn|hk|us)$"
+
 
 def invalidate_regime_cache() -> None:
     """清空 regime 查询缓存。批算/重算后调用。"""
@@ -49,13 +52,14 @@ def _df_to_records(df) -> list[dict]:
 @router.get("/history")
 def regime_history(
     request: Request,
+    market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn",
     start: date | None = Query(None),
     end: date | None = Query(None),
     limit: int = Query(120, ge=1, le=1000),
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
     global _cache, _cache_ts
-    cache_key = f"hist|{start}|{end}|{limit}"
+    cache_key = f"hist|{market}|{start}|{end}|{limit}"
     with _cache_lock:
         if (
             _cache is not None
@@ -64,7 +68,7 @@ def regime_history(
         ):
             return _cache["data"]
 
-    df = regime_builder.load_regime_history(_data_dir(request))
+    df = regime_builder.load_regime_history(_data_dir(request), market=market)
     if df.is_empty():
         result: dict = {"rows": [], "total": 0}
     else:
@@ -95,9 +99,9 @@ def pl_col_date(df, op: str, value: date):
 
 
 @router.get("/latest")
-def regime_latest(request: Request):
+def regime_latest(request: Request, market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn"):
     """最新一日环境(轻量)。"""
-    df = regime_builder.load_regime_history(_data_dir(request))
+    df = regime_builder.load_regime_history(_data_dir(request), market=market)
     if df.is_empty():
         return {"row": None}
     latest = df.sort("date", descending=True).head(1)
@@ -108,10 +112,11 @@ def regime_latest(request: Request):
 @router.get("/states")
 def regime_states(
     request: Request,
+    market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn",
     days: int = Query(60, ge=1, le=1000),
 ):
     """状态分布统计(各状态天数/占比)。"""
-    df = regime_builder.load_regime_history(_data_dir(request))
+    df = regime_builder.load_regime_history(_data_dir(request), market=market)
     if df.is_empty():
         return {"distribution": [], "days": 0}
     df = df.sort("date", descending=True).head(days)
@@ -130,13 +135,18 @@ def regime_states(
 
 
 @router.get("/coverage")
-def regime_coverage(request: Request):
+def regime_coverage(request: Request, market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn"):
     """regime 数据覆盖元信息(供数据画像)。"""
-    return regime_builder.get_regime_coverage(_data_dir(request))
+    return regime_builder.get_regime_coverage(_data_dir(request), market=market)
 
 
 @router.post("/recompute")
-def regime_recompute(request: Request, start: date | None = None, end: date | None = None):
+def regime_recompute(
+    request: Request,
+    market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn",
+    start: date | None = None,
+    end: date | None = None,
+):
     """手动触发重算(全量或指定区间)。管理员操作。
 
     - 不传 start: 强制全量重算(enriched 最早日 ~ 今天), 覆盖所有已有行。
@@ -145,21 +155,22 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
     - 传 start: 仅重算 [start, end] 区间。
     - 重算后统一重标情绪周期阶段(refresh_phase_labels)并回填主线
       (概念+行业, 概念成分为当前快照回看历史, 早年有归属漂移)。
+    - market: cn/hk/us, 决定扫哪个 enriched 目录与指数基准。
     """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
     end = end or date.today()
     if start is None:
         # 全量: 从 enriched 最早日强制重算到今天
-        earliest = regime_builder.earliest_enriched_date(repo)
+        earliest = regime_builder.earliest_enriched_date(repo, market=market)
         if earliest is None:
             invalidate_regime_cache()
             return {"ok": True, "computed": 0}
         start = earliest
-    new_rows = regime_builder.run_regime_batch(repo, start=start, end=end)
+    new_rows = regime_builder.run_regime_batch(repo, start=start, end=end, market=market)
     if not new_rows.is_empty():
-        regime_builder.upsert_regime_history(data_dir, new_rows)
-    phase_days = regime_builder.refresh_phase_labels(data_dir)
+        regime_builder.upsert_regime_history(data_dir, new_rows, market=market)
+    phase_days = regime_builder.refresh_phase_labels(data_dir, market=market)
 
     from app.services import market_mainline
 
@@ -182,6 +193,7 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
 @router.get("/phases")
 def regime_phases(
     request: Request,
+    market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn",
     start: date | None = None,
     end: date | None = None,
 ):
@@ -194,7 +206,7 @@ def regime_phases(
     from app.services.market_phase import PHASE_LABELS
 
     data_dir = _data_dir(request)
-    df = regime_builder.load_regime_history(data_dir)
+    df = regime_builder.load_regime_history(data_dir, market=market)
     if df.is_empty() or "phase" not in df.columns:
         return {"segments": [], "total": 0}
     if start:
@@ -287,7 +299,7 @@ def _segment_mainlines(mainline: pl.DataFrame, start: date, end: date, top: int 
 
 
 @router.post("/mainline/recompute")
-def mainline_recompute(request: Request):
+def mainline_recompute(request: Request, market: Annotated[str, Query(pattern=_MARKET_PATTERN)] = "cn"):
     """全量重算主线(概念+行业), 应用当前过滤配置。窄扫描, 秒级。
 
     修改过滤配置(preferences mainline-filter)后调用本接口生效,
@@ -297,7 +309,7 @@ def mainline_recompute(request: Request):
 
     repo = request.app.state.repo
     data_dir = _data_dir(request)
-    earliest = regime_builder.earliest_enriched_date(repo)
+    earliest = regime_builder.earliest_enriched_date(repo, market=market)
     if earliest is None:
         return {"ok": True, "rows": 0}
     rows = 0

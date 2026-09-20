@@ -5,12 +5,13 @@
 关键差异:
 - DST 时钟: ZoneInfo("America/New_York") 自动处理 EDT/EST (比固定 UTC 更准)
 - 无涨跌停: has_price_limit()=False, limit_pct()=None
-- T+0 交收 (settlement 实际分 T+1 但美股按标的, 简化标 T+0)
+- 可当日卖出,标准证券结算周期 T+1(自 2024-05-28 起;回测不模拟结算台账)
 - 字母代码: AAPL / MSFT (1-5 位字母), 与 A 股 6 位数字/HK 5 位数字区分
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 from app.markets.profile import IndexRef, TradingSession
@@ -32,8 +33,9 @@ class USProfile:
     sessions = (_SESSION,)
     trading_minutes_total = float(_SESSION.minutes)  # 390.0
     currency = "USD"
-    settlement = "T+0"
-    lot_size = None  # 美股每股 1 股起, 无每手概念
+    settlement = "T+1"
+    same_day_sell_allowed = True
+    lot_size = 1  # 本批按整数股成交,不模拟零股
     symbol_suffixes = (".US",)
 
     # 美股核心指数 (标准普尔/纳斯达克/道琼斯)
@@ -89,9 +91,9 @@ class USProfile:
     def limit_pct(
         self,
         symbol: str,
-        trade_date: date,  # noqa: ARG002
+        trade_date: date,
         *,
-        is_risk_warning: bool = False,  # noqa: ARG002
+        is_risk_warning: bool = False,
     ) -> float | None:
         return None  # 美股无涨跌停
 

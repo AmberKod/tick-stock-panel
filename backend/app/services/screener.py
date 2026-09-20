@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -81,6 +82,11 @@ class ScreenerService:
                             df = df.join(df_i.select(inst_cols), on="symbol", how="left")
                     return df
 
+        if self.asset_type in ("hk", "us"):
+            return self.repo.read_market_enriched(
+                self.asset_type, start=target_date, end=target_date,
+            )
+
         # 历史日期: 从 parquet 读取 14 列, 即时计算指标 (慢路径)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         ds = target_date.isoformat()
@@ -91,7 +97,7 @@ class ScreenerService:
 
         try:
             df = pl.read_parquet(target_parquet)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("load_enriched_for_date failed: %s", e)
             return pl.DataFrame()
 
@@ -124,7 +130,7 @@ class ScreenerService:
             try:
                 lf = pl.scan_parquet(target_parquet)
                 cols = lf.collect_schema().names()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("load_prior_consecutive scan failed for %s: %s", candidate, e)
                 return pl.DataFrame()
             # 存储列理论上必含 consec_col; 若该分区缺列则继续向前找 (与旧循环一致)
@@ -135,7 +141,7 @@ class ScreenerService:
                     "symbol",
                     pl.col(consec_col).alias("prev_consec"),
                 ).collect()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("load_prior_consecutive read failed for %s: %s", candidate, e)
                 return pl.DataFrame()
         return pl.DataFrame()
@@ -168,7 +174,7 @@ class ScreenerService:
             )
             available = [c for c in read_cols if c in lf.schema]
             df_hist = lf.select(available).collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("warmup history load failed: %s", e)
             df_hist = df_target
 
@@ -205,6 +211,11 @@ class ScreenerService:
         优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
         缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
         """
+        if self.asset_type in ("hk", "us"):
+            return self.repo.get_market_enriched_snapshot(
+                self.asset_type, end=target_date, lookback_days=lookback_days,
+            )[0]
+
         # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
         t0 = time.perf_counter()
         if self.asset_type == "stock":
@@ -256,7 +267,7 @@ class ScreenerService:
             )
             available = [c for c in read_cols if c in lf.collect_schema().names()]
             df_hist = lf.select(available).collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("load_enriched_history failed: %s", e)
             return pl.DataFrame()
 
@@ -347,15 +358,13 @@ class ScreenerService:
             if limit:
                 sql += f" LIMIT {limit}"
             df_result = con.execute(sql).pl()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("screener SQL query failed: %s", e)
             df_result = pl.DataFrame()
         finally:
             if con is not None:
-                try:
+                with contextlib.suppress(Exception):
                     con.close()
-                except Exception:  # noqa: BLE001
-                    pass
 
         rows = df_result.to_dicts() if not df_result.is_empty() else []
         elapsed = (time.perf_counter() - t0) * 1000
@@ -384,6 +393,16 @@ class ScreenerService:
         """按调用方要求装配标准策略数据上下文，不解释策略公式。"""
         from app.strategy.engine import StrategyDataContext
 
+        generation = self.repo.get_matrix_data_generation(self.asset_type) if self.asset_type == "hk" else None
+        latest_date = self.latest_date()
+        if latest_date is not None and as_of < latest_date and any(
+            engine.concept_config_fingerprint(
+                sid, (params_map or {}).get(sid), (overrides_map or {}).get(sid),
+            ) for sid in strategy_ids
+        ):
+            from app.strategy.concept_heat import HISTORICAL_REASON
+
+            raise ValueError(HISTORICAL_REASON)
         if current is None:
             current = self._load_enriched_for_date(as_of)
         history_bars = engine.required_history_bars(
@@ -394,6 +413,12 @@ class ScreenerService:
         history = None
         if history_bars > 1:
             history = self._load_enriched_history(as_of, history_bars)
+        if generation is not None:
+            from app.enriched_generation import EnrichedGenerationUnavailableError
+
+            if self.repo.get_matrix_data_generation(self.asset_type) != generation:
+                raise EnrichedGenerationUnavailableError("港股数据在筛选上下文读取期间发生变化")
+            cache_key = f"{cache_key or 'hk_screener'}:{generation}"
         return StrategyDataContext(
             asset_type=self.asset_type,
             timeframe=timeframe,
@@ -402,6 +427,8 @@ class ScreenerService:
             history=history,
             market=market,
             cache_key=cache_key,
+            data_generation=generation,
+            is_historical=as_of < (latest_date or as_of),
         )
 
     def latest_date(self) -> date | None:
@@ -419,6 +446,6 @@ class ScreenerService:
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         return None

@@ -1,7 +1,10 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useQueryClient } from '@tanstack/react-query'
 import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download, Layers, Plus, Trash2 } from 'lucide-react'
-import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
+import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection, type ScoringContext, type StrategyBacktestAsset } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
+import { BACKTEST_MARKETS, isInternationalAsset } from '@/lib/backtestMarket'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { color } from '@/lib/colors'
 import { SignalPicker } from './SignalPicker'
@@ -31,6 +34,9 @@ interface Props {
   onSaved?: (displayLimit: number | null) => void
   onAiModify?: () => void
   onDeleted?: () => void
+  assetType?: StrategyBacktestAsset
+  context?: ScoringContext
+  asOf?: string
 }
 
 // ===== 可折叠区域 =====
@@ -95,7 +101,7 @@ function RangeField({ label, minVal, maxVal, onMinChange, onMaxChange, unit, ste
         onChange={e => onMinChange(e.target.value === '' ? null : Number(e.target.value))}
         placeholder="最小"
         step={step}
-        className="w-20 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+        className="w-20 min-w-0 flex-1 max-w-20 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
       />
       <span className="text-[10px] text-muted">~</span>
       <input
@@ -104,7 +110,7 @@ function RangeField({ label, minVal, maxVal, onMinChange, onMaxChange, unit, ste
         onChange={e => onMaxChange(e.target.value === '' ? null : Number(e.target.value))}
         placeholder="最大"
         step={step}
-        className="w-20 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+        className="w-20 min-w-0 flex-1 max-w-20 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
       />
       {unit && <span className="text-[10px] text-muted shrink-0">{unit}</span>}
     </div>
@@ -174,11 +180,17 @@ function ParamField({ def, value, onChange }: {
   )
 }
 
-export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModify, onDeleted }: Props) {
+export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModify, onDeleted, assetType = 'stock', context = 'current', asOf }: Props) {
+  const queryClient = useQueryClient()
+  const international = isInternationalAsset(assetType)
+  const currency = BACKTEST_MARKETS[assetType].currency
   const [detail, setDetail] = useState<StrategyDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [resetting, setResetting] = useState(false)
+  const [loadRevision, setLoadRevision] = useState(0)
+  const [scoringRevision, setScoringRevision] = useState(0)
+  const [actionError, setActionError] = useState('')
 
   // 编辑状态
   const [strategyName, setStrategyName] = useState('')
@@ -193,6 +205,12 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   const [exitSignals, setExitSignals] = useState<string[]>([])
   const [displayLimit, setDisplayLimit] = useState<number | null>(null)
   const [basicFilterEnabled, setBasicFilterEnabled] = useState(true)
+  const [portfolio, setPortfolio] = useState({
+    enabled: false,
+    max_same_industry: 2,
+    concentration_penalty: 0,
+    industry_level: 1 as 1 | 2 | 3,
+  })
   // 叠加策略: 子策略列表与权重(composite 专属, 编辑权重后随 override 保存)
   const [compositeChildren, setCompositeChildren] = useState<CompositeChildInfo[]>([])
   // 可选子策略列表 + 添加面板开关(composite 设置用)
@@ -209,16 +227,27 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
 
   // 加载策略详情
   useEffect(() => {
-    if (!strategyId) return
+    let active = true
+    setDetail(null)
+    setActionError('')
+    setShowAddChild(false)
+    setShowDeleteConfirm(false)
+    setDeleteError('')
+    setAllStrategies([])
+    if (!strategyId) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
-    api.strategyGet(strategyId)
+    api.strategyGet(strategyId, assetType)
       .then(d => {
+        if (!active) return
         setDetail(d)
         setStrategyName(d.name ?? '')
         setStrategyDesc(d.description ?? '')
         // 确保 boards 有默认值
         const bf = { ...d.basic_filter }
-        if (!bf.boards) bf.boards = ALL_BOARDS
+        if (!isInternationalAsset(assetType) && !bf.boards) bf.boards = ALL_BOARDS
         setBasicFilter(bf)
         setParams(d.params_defaults)
         setScoring(d.scoring)
@@ -229,17 +258,37 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         setExitSignals(d.exit_signals ?? [])
         setDisplayLimit(d.display_limit ?? null)
         setBasicFilterEnabled(d.basic_filter?.enabled !== false)
+        setPortfolio({
+          enabled: d.portfolio?.enabled === true,
+          max_same_industry: d.portfolio?.max_same_industry ?? 2,
+          concentration_penalty: d.portfolio?.concentration_penalty ?? 0,
+          industry_level: (d.portfolio?.industry_level ?? 1) as 1 | 2 | 3,
+        })
         setCompositeChildren(d.composite_children ?? [])
         // composite 策略: 加载全部可选子策略(排除自身和其他 composite)供添加
         if (d.source === 'composite') {
-          api.screenerStrategies().then(data => {
+          api.screenerStrategies(assetType).then(data => {
+            if (!active) return
             setAllStrategies((data.presets ?? []).filter(s => s.id !== strategyId && s.source !== 'composite'))
-          }).catch(() => setAllStrategies([]))
+          }).catch(() => { if (active) setAllStrategies([]) })
         }
       })
-      .catch(() => setDetail(null))
-      .finally(() => setLoading(false))
-  }, [strategyId])
+      .catch(() => { if (active) setDetail(null) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [strategyId, assetType, loadRevision])
+
+  const invalidateStrategyQueries = async (id: string) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: QK.strategyDetail(id) }),
+      queryClient.invalidateQueries({ queryKey: QK.screenerStrategies().slice(0, 1) }),
+      queryClient.invalidateQueries({ queryKey: QK.screener }),
+      queryClient.invalidateQueries({ queryKey: QK.screenerCachedSummary.slice(0, 1) }),
+      queryClient.invalidateQueries({ queryKey: QK.marketScreener('hk') }),
+      queryClient.invalidateQueries({ queryKey: QK.marketScreener('us') }),
+      queryClient.invalidateQueries({ queryKey: QK.scoringColumnsRoot }),
+    ])
+  }
 
   // 叠加策略: 权重归一(总和→1.0)
   const compositeTotal = compositeChildren.reduce((s, c) => s + (c.weight || 0), 0)
@@ -257,13 +306,25 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
 
   // 保存
   const handleSave = async () => {
-    if (!strategyId) return
+    if (!strategyId || !detail || loading) return
     setSaving(true)
+    setActionError('')
     try {
-      await api.strategySaveConfig(strategyId, {
+      const initialBasicFilter: Record<string, any> = { ...detail.basic_filter, enabled: detail.basic_filter?.enabled !== false }
+      if (!international && !initialBasicFilter.boards) initialBasicFilter.boards = ALL_BOARDS
+      const basicFilterChanges = Object.fromEntries(
+        Object.entries({ ...basicFilter, enabled: basicFilterEnabled })
+          .filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(initialBasicFilter[key])),
+      )
+      // 市场适配的默认值只用于展示；仅保存用户改过的字段，保留其它市场的规则。
+      const savedBasicFilter = Object.keys(basicFilterChanges).length > 0
+        ? { ...(international ? (await api.strategyGet(strategyId)).basic_filter : detail.basic_filter), ...basicFilterChanges }
+        : undefined
+      await api.strategyPatchConfig(strategyId, {
         name: strategyName,
         description: strategyDesc,
-        basic_filter: { ...basicFilter, enabled: basicFilterEnabled },
+        ...(savedBasicFilter ? { basic_filter: savedBasicFilter } : {}),
+        portfolio,
         params,
         ...(detail?.source !== 'composite' ? {
           scoring,
@@ -280,8 +341,11 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
           ? { children: compositeChildren.map(c => ({ strategy_id: c.id, weight: c.weight })) }
           : {}),
       })
+      await invalidateStrategyQueries(strategyId)
       onSaved?.(displayLimit)
       onClose()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '保存失败，请重试。')
     } finally {
       setSaving(false)
     }
@@ -291,15 +355,17 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   const handleReset = async () => {
     if (!strategyId) return
     setResetting(true)
+    setActionError('')
     try {
       await api.strategyResetConfig(strategyId)
+      await invalidateStrategyQueries(strategyId)
       // 重新加载默认值
-      const d = await api.strategyGet(strategyId)
+      const d = await api.strategyGet(strategyId, assetType)
       setDetail(d)
       setStrategyName(d.name ?? '')
       setStrategyDesc(d.description ?? '')
       const bf = { ...d.basic_filter }
-      if (!bf.boards) bf.boards = ALL_BOARDS
+      if (!international && !bf.boards) bf.boards = ALL_BOARDS
       setBasicFilter(bf)
       setParams(d.params_defaults)
       setScoring(d.scoring)
@@ -310,7 +376,17 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
       setExitSignals(d.exit_signals ?? [])
       setDisplayLimit(d.display_limit ?? null)
       setBasicFilterEnabled(d.basic_filter?.enabled !== false)
+      setPortfolio({
+        enabled: d.portfolio?.enabled === true,
+        max_same_industry: d.portfolio?.max_same_industry ?? 2,
+        concentration_penalty: d.portfolio?.concentration_penalty ?? 0,
+        industry_level: (d.portfolio?.industry_level ?? 1) as 1 | 2 | 3,
+      })
       setCompositeChildren(d.composite_children ?? [])
+      setScoringRevision(previous => previous + 1)
+      onSaved?.(d.display_limit ?? null)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '恢复默认失败，请重试。')
     } finally {
       setResetting(false)
     }
@@ -353,15 +429,15 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
       onClose={onClose}
       labelledBy="strategy-settings-title"
       overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
-      panelClassName="w-[980px] max-h-[88vh] bg-surface/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+      panelClassName="w-[980px] max-w-[calc(100vw-1.5rem)] max-h-[88vh] bg-surface/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
     >
           {/* 标题 */}
-          <div className="flex items-center justify-between px-5 py-3 border-b border-border/50">
-            <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-border/50 sm:px-5">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
               <Settings2 className="h-4 w-4 text-accent" />
-              <span id="strategy-settings-title" className="text-sm font-semibold text-foreground">{detail?.name ?? strategyId}</span>
+              <span id="strategy-settings-title" className="truncate text-sm font-semibold text-foreground">{detail?.name ?? strategyId}</span>
               {detail && <span className="text-[10px] px-1.5 py-0.5 rounded bg-elevated text-muted">{{ builtin: '内置', custom: '自定义', ai: 'AI', composite: '叠加' }[detail.source] ?? detail.source}</span>}
-              <span className="text-[10px] text-muted/40 font-mono">{strategyId}</span>
+              <span className="hidden text-[10px] text-muted/40 font-mono sm:inline">{strategyId}</span>
             </div>
             <div className="flex items-center gap-2">
               {detail && (detail.source === 'ai' || detail.source === 'custom') && (
@@ -380,23 +456,23 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
           </div>
 
           {/* 内容 */}
-          <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 space-y-5 sm:px-5 sm:py-5">
             {loading ? (
               <div className="flex items-center justify-center py-16"><div className="w-6 h-6 border-2 border-accent/30 border-t-accent rounded-full animate-spin" /></div>
             ) : detail ? (
               <>
                 {/* 名称 + 描述 + 显示上限 */}
-                <div className="flex items-end gap-4">
-                  <div className="flex-1 space-y-2">
+                <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-end">
+                  <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-muted/70 uppercase tracking-wider w-8 shrink-0">名称</span>
                       <input type="text" value={strategyName} onChange={e => setStrategyName(e.target.value)}
-                        className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
+                        className="min-w-0 flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-muted/70 uppercase tracking-wider w-8 shrink-0">描述</span>
                       <input type="text" value={strategyDesc} onChange={e => setStrategyDesc(e.target.value)}
-                        className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
+                        className="min-w-0 flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 pb-0.5 shrink-0">
@@ -488,8 +564,9 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   )
                 })()
                 : (
-                <div className="grid grid-cols-3 gap-5 items-start">
+                <div className="grid grid-cols-1 gap-4 items-start md:grid-cols-2 lg:grid-cols-3">
                   {/* 列1：选股条件 */}
+                  <div className="min-w-0 space-y-3">
                     <Section icon={Filter} title="基础参数" accent="text-sky-400">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[10px] text-muted">启用基础参数过滤</span>
@@ -499,11 +576,11 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         </button>
                       </div>
                       <div className={`space-y-2 transition-opacity duration-200 ${basicFilterEnabled ? '' : 'opacity-25 pointer-events-none'}`}>
-                      <RangeField label="价格" minVal={basicFilter.price_min} maxVal={basicFilter.price_max} onMinChange={v => setBF('price_min', v)} onMaxChange={v => setBF('price_max', v)} unit="元" step="1" />
-                      <RangeField label="流通市值" minVal={basicFilter.float_cap_min != null ? basicFilter.float_cap_min / 1e8 : null} maxVal={basicFilter.float_cap_max != null ? basicFilter.float_cap_max / 1e8 : null} onMinChange={v => setBF('float_cap_min', v != null ? v * 1e8 : null)} onMaxChange={v => setBF('float_cap_max', v != null ? v * 1e8 : null)} unit="亿" step="5" />
-                      <RangeField label="成交额" minVal={basicFilter.amount_min != null ? basicFilter.amount_min / 1e8 : null} maxVal={basicFilter.amount_max != null ? basicFilter.amount_max / 1e8 : null} onMinChange={v => setBF('amount_min', v != null ? v * 1e8 : null)} onMaxChange={v => setBF('amount_max', v != null ? v * 1e8 : null)} unit="亿" step="0.5" />
+                      <RangeField label="价格" minVal={basicFilter.price_min} maxVal={basicFilter.price_max} onMinChange={v => setBF('price_min', v)} onMaxChange={v => setBF('price_max', v)} unit={international ? currency : '元'} step="1" />
+                      <RangeField label="流通市值" minVal={basicFilter.float_cap_min != null ? basicFilter.float_cap_min / 1e8 : null} maxVal={basicFilter.float_cap_max != null ? basicFilter.float_cap_max / 1e8 : null} onMinChange={v => setBF('float_cap_min', v != null ? v * 1e8 : null)} onMaxChange={v => setBF('float_cap_max', v != null ? v * 1e8 : null)} unit={international ? `亿 ${currency}` : '亿'} step="5" />
+                      <RangeField label="成交额" minVal={basicFilter.amount_min != null ? basicFilter.amount_min / 1e8 : null} maxVal={basicFilter.amount_max != null ? basicFilter.amount_max / 1e8 : null} onMinChange={v => setBF('amount_min', v != null ? v * 1e8 : null)} onMaxChange={v => setBF('amount_max', v != null ? v * 1e8 : null)} unit={international ? `亿 ${currency}` : '亿'} step="0.5" />
                       <RangeField label="换手率" minVal={basicFilter.turnover_min} maxVal={basicFilter.turnover_max} onMinChange={v => setBF('turnover_min', v)} onMaxChange={v => setBF('turnover_max', v)} unit="%" step="0.5" />
-                      <div className="space-y-1.5">
+                      {!international && <div className="space-y-1.5">
                         <div className="flex items-start gap-1.5">
                           <span className="text-[11px] text-secondary w-16 shrink-0 text-right pt-0.5">板块</span>
                           <div className="flex flex-wrap gap-0.5">
@@ -522,9 +599,44 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                           <button onClick={() => setBF('exclude_st', !basicFilter.exclude_st)}
                             className={`px-1.5 py-0.5 rounded text-[10px] font-medium border transition-colors cursor-pointer ${basicFilter.exclude_st ? 'border-danger/40 bg-danger/10 text-danger' : 'border-border bg-base text-muted hover:border-danger/30'}`}>{basicFilter.exclude_st ? '排除' : '包含'}</button>
                         </div>
-                      </div>
+                      </div>}
                     </div>
                   </Section>
+
+                  <Section icon={Layers} title="组合约束" accent="text-violet-400" defaultOpen={false}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-muted">限制同行业集中度</span>
+                      <button onClick={() => setPortfolio(prev => ({ ...prev, enabled: !prev.enabled }))}
+                        className={`relative w-8 h-[18px] rounded-full transition-colors ${portfolio.enabled ? 'bg-violet-500' : 'bg-border'}`}>
+                        <span className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${portfolio.enabled ? 'left-[16px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                    <div className={`space-y-2 transition-opacity duration-200 ${portfolio.enabled ? '' : 'opacity-25 pointer-events-none'}`}>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-secondary w-16 shrink-0 text-right">同行业最多</span>
+                        <input type="number" min={1} max={99} step={1} value={portfolio.max_same_industry}
+                          onChange={e => setPortfolio(prev => ({ ...prev, max_same_industry: Math.max(1, Number(e.target.value) || 1) }))}
+                          className="w-20 h-6 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+                        <span className="text-[10px] text-muted">只</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-secondary w-16 shrink-0 text-right">集中度惩罚</span>
+                        <input type="number" min={0} max={1} step={0.05} value={portfolio.concentration_penalty}
+                          onChange={e => setPortfolio(prev => ({ ...prev, concentration_penalty: Math.min(1, Math.max(0, Number(e.target.value) || 0)) }))}
+                          className="w-20 h-6 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+                        <span className="text-[10px] text-muted">0~1</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-secondary w-16 shrink-0 text-right">行业分级</span>
+                        <select value={portfolio.industry_level} onChange={e => setPortfolio(prev => ({ ...prev, industry_level: Number(e.target.value) as 1 | 2 | 3 }))}
+                          className="w-20 h-6 px-1 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
+                          <option value={1}>一级</option><option value={2}>二级</option><option value={3}>三级</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="text-[10px] leading-4 text-muted/70 pt-1 border-t border-border/20">按评分从高到低保留候选，超过同行业上限的标的会被剔除。</div>
+                  </Section>
+                  </div>
 
                   {/* 列2：策略参数 */}
                   <div className="space-y-3">
@@ -543,7 +655,10 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   <div className="space-y-3">
                     <Section icon={Star} title="评分权重" accent="text-amber-400">
                       <ScoringEditor
-                        key={detail.id}
+                        key={`${detail.id}:${assetType}:${context}:${asOf ?? ''}:${scoringRevision}`}
+                        assetType={assetType}
+                        context={context}
+                        asOf={asOf}
                         value={scoring}
                         directions={scoringDirections}
                         fallbackLabels={FIELD_LABEL}
@@ -606,14 +721,18 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                 )}
               </>
             ) : (
-              <div className="flex items-center justify-center py-16 text-sm text-muted">加载失败</div>
+              <div className="flex flex-wrap items-center justify-center gap-3 py-16 text-sm text-muted" role="alert">
+                <span>策略设置加载失败</span>
+                <button type="button" onClick={() => setLoadRevision(previous => previous + 1)} className="text-accent underline">重试加载</button>
+              </div>
             )}
           </div>
 
           {/* 底部按钮 */}
-          <div className="flex items-center justify-between px-5 py-3 border-t border-border/50 bg-surface/50">
-            <div className="flex items-center gap-2">
-              <button onClick={handleReset} disabled={resetting}
+          {actionError && <p className="break-words px-4 py-2 text-xs text-danger" role="alert">{actionError}</p>}
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-border/50 bg-surface/50 sm:px-5">
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={handleReset} disabled={resetting || saving || loading || !detail}
                 className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border bg-surface text-xs text-secondary hover:text-danger hover:border-danger/30 transition-colors cursor-pointer disabled:opacity-50">
                 <RotateCcw className="h-3.5 w-3.5" />{resetting ? '重置中…' : '重置默认'}
               </button>
@@ -622,14 +741,14 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   className="text-[10px] text-danger hover:text-danger/80 transition-colors">删除策略</button>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              {(detail?.source === 'ai' || detail?.source === 'custom') && (
+            <div className="flex flex-wrap items-center gap-2">
+              {onAiModify && (detail?.source === 'ai' || detail?.source === 'custom') && (
                 <button onClick={onAiModify}
                   className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-amber-400/30 bg-amber-400/8 text-amber-400 text-xs font-medium hover:bg-amber-400/15 transition-colors cursor-pointer">
                   <Sparkles className="h-3.5 w-3.5" />AI 修改
                 </button>
               )}
-              <button onClick={handleSave} disabled={saving}
+              <button onClick={handleSave} disabled={saving || resetting || loading || !detail}
                 className="inline-flex items-center gap-1.5 h-8 px-4 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors cursor-pointer disabled:opacity-50">
                 <Save className="h-3.5 w-3.5" />{saving ? '保存中…' : '保存设置'}
               </button>

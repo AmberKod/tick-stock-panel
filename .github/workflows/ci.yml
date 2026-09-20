@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Ruff and pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      TICKFLOW_ENV_FILE: ${{ runner.temp }}/tick-stock-panel-ci.env
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 and uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # dev is an optional extra; it supplies pytest and Ruff.
+      - name: Install backend dependencies
+        run: uv sync --frozen --extra multi-market --extra dev
+
+      # The launcher test checks the installed Vite entry point, and the
+      # stock-sdk bridge test executes Node. Neither test starts a dev server.
+      - name: Set up pnpm for launcher dependencies
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install launcher dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Isolate test files
+        # Keep DATA_DIR in an env file so tests can override it via their own
+        # Settings(_env_file=...) without a process-level DATA_DIR taking priority.
+        run: |
+          mkdir -p .pytest_tmp_codex "$RUNNER_TEMP/tick-stock-panel-ci-runtime"
+          printf 'DATA_DIR=%s\n' "$RUNNER_TEMP/tick-stock-panel-ci-runtime" > "$TICKFLOW_ENV_FILE"
+
+      - name: Check backend with Ruff
+        id: lint
+        working-directory: .
+        # Preserve the extras already installed by the frozen sync.
+        # 基线已于 09-17 清零 (batch-1..3), lint 恢复硬门禁。
+        run: uv run --project backend --no-sync ruff check backend/
+
+      - name: Run all backend tests
+        # Report tests even when lint fails; the failed lint step still fails the job.
+        if: ${{ !cancelled() && (success() || steps.lint.outcome == 'failure') }}
+        run: uv run --no-sync pytest tests/ --basetemp=.pytest_tmp_codex -p no:cacheprovider
+
+  frontend:
+    name: Frontend (typecheck and build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check TypeScript
+        run: pnpm exec tsc -b
+
+      - name: Build frontend
+        run: pnpm build

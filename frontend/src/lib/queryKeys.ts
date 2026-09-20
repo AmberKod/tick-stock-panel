@@ -8,6 +8,19 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  // 新闻 / 舆情
+  newsStatus:     ['news-status'] as const,
+  newsSearch:     (query: string, days: number) => ['news', 'search', query, days] as const,
+  newsStock:      (symbol: string, days: number) => ['news', 'stock', symbol, days] as const,
+  // 批量归因: symbols 排序后拼接, 保证同一批标的复用同一份缓存(后端也按 symbol 缓存,
+  // 重复发同一批会命中缓存、不消耗 provider 配额)。
+  newsBatchStock: (symbols: readonly string[], days: number) =>
+    ['news', 'batch-stock', [...symbols].sort().join(','), days] as const,
+  newsConcept:    (topic: string, days: number) => ['news', 'concept', topic, days] as const,
+  searchKey:      (provider: string) => ['search-key', provider] as const,
+  newsCategories: ['news-categories'] as const,
+  newsFeeds:      (category: string, hours: number) => ['news', 'feeds', category, hours] as const,
+
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
   settings:       ['settings'] as const,
@@ -18,6 +31,9 @@ export const QK = {
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
+  // 跨市场态势(日级判断)。**故意不进 SSE_INVALIDATE_PREFIXES** —— 它是 T3 慢数据,
+  // 若被 1s/次的行情推送失效会整屏重拉、且后端 60s 缓存会被打穿。
+  overviewPosture: (markets?: string) => ['overview-posture', markets ?? 'all'] as const,
   indexQuotes:    ['index-quotes'] as const,
   indexList:      ['index-list'] as const,
 
@@ -28,6 +44,9 @@ export const QK = {
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
   // 异动边缘总览 (开启监控时才查询, 参数为 min_closeness/limit)
   abnormalOverview:     (minCloseness: number, limit: number) => ['abnormal-overview', minCloseness, limit] as const,
+  // 港美异动总览 (动量口径, 与 A股分缓存)
+  abnormalHkUsOverview: (market: 'HK' | 'US', minCloseness: number, limit: number) =>
+    ['abnormal-hk-us-overview', market, minCloseness, limit] as const,
   // 不用 watchlist- 前缀: 日K历史盘中几乎不变, 若被 SSE quotes_updated 高频失效
   // (expert 1s) 会导致全自选日K每秒重拉, staleTime 形同虚设。
   // 刷新点: staleTime 过期 + Watchlist 增删自选/改蜡烛天数时的手动失效;
@@ -41,6 +60,11 @@ export const QK = {
   // Screener
   screener:             ['screener'] as const,
   screenerStrategies:   (assetType: string = 'stock') => ['screener-strategies', assetType] as const,
+  marketStocks:         (market: 'hk' | 'us') => [market, 'stocks'] as const,
+  marketDataStatus:     (market: 'hk' | 'us') => [market, 'data-status'] as const,
+  marketScreener:       (market: 'hk' | 'us', strategyId?: string, symbols?: string[], marketDate?: string) => strategyId === undefined
+    ? [market, 'screener'] as const
+    : [market, 'screener', strategyId, symbols?.join(',') ?? 'default', marketDate ?? 'latest'] as const,
   screenerCachedSummary: ['screener-cached', 'summary'] as const,
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
@@ -51,6 +75,9 @@ export const QK = {
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
   factorColumns:        ['backtest-factor-columns'] as const,
+  scoringColumnsRoot:   ['scoring-columns'] as const,
+  scoringColumns:       (assetType: 'stock' | 'etf' | 'hk' | 'us', context: 'current' | 'historical', asOf?: string) =>
+                          ['scoring-columns', assetType, context, asOf || 'latest'] as const,
   miningRuns:           ['backtest-mining-runs'] as const,
   miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
                           ['backtest-mining-availability', assetType, profile, start, end] as const,
@@ -61,10 +88,13 @@ export const QK = {
   strategyLinkOptions: (assetType?: 'stock' | 'etf') => assetType
     ? ['strategy-link-options', assetType] as const
     : ['strategy-link-options'] as const,
-  strategyDetail:       (id: string) => ['strategy-detail', id] as const,
+  strategyDetail:       (id: string, assetType?: string) => assetType
+    ? ['strategy-detail', id, assetType] as const
+    : ['strategy-detail', id] as const,
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  dataFreshness:        ['data-freshness'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
   extData:              ['ext-data'] as const,
@@ -105,13 +135,25 @@ export const QK = {
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
 
+  // 热点工作区 (A 股 topic + 成分股; 港美目前无数据源)
+  hotspots:             (market: string, top: number) => ['hotspots', market, top] as const,
+  hotspotDetail:        (market: string, topic: string) => ['hotspot-detail', market, topic] as const,
+  hotspotJobState:      ['hotspot-job-state'] as const,
+
   // 市场环境(Regime) — 日级离线计算, 不进 SSE 刷新
-  regimeHistory:        (limit?: number) => ['regime-history', limit ?? 0] as const,
-  regimeLatest:         ['regime-latest'] as const,
-  regimeStates:         (days: number) => ['regime-states', days] as const,
-  regimeCoverage:       ['regime-coverage'] as const,
-  regimePhases:         (start?: string, end?: string) => ['regime-phases', start ?? '', end ?? ''] as const,
+  // market 必须进 key: 三市场共用一套组件, 否则切市场会命中另一个市场的缓存(串数据)。
+  // regimeHistory 原先只有 limit, 漏了 start/end —— 切时间范围会命中旧缓存, 一并修。
+  regimeHistory:        (market: string, start?: string, end?: string, limit?: number) =>
+    ['regime-history', market, start ?? '', end ?? '', limit ?? 0] as const,
+  regimeLatest:         (market: string) => ['regime-latest', market] as const,
+  regimeStates:         (market: string, days: number) => ['regime-states', market, days] as const,
+  regimeCoverage:       (market: string) => ['regime-coverage', market] as const,
+  regimePhases:         (market: string, start?: string, end?: string) =>
+    ['regime-phases', market, start ?? '', end ?? ''] as const,
   regimeMainline:       (kind: string, start?: string, end?: string) => ['regime-mainline', kind, start ?? '', end ?? ''] as const,
+  // 强度梯队(动量档位) — 仅港美
+  strengthLadder:       (market: string, date?: string, bands?: string[]) =>
+    ['strength-ladder', market, date ?? '', bands?.join(',') ?? ''] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

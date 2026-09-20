@@ -48,6 +48,7 @@ import { RegimeConfigCard } from '@/components/data/RegimeConfigCard'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
 import { PageSettingsModal, getCardVisibility, getCardOrder, type CardKey } from '@/components/data/PageSettingsModal'
 import { QuoteConfigCard } from '@/components/data/QuoteConfigCard'
+import { MarketDailySyncPanel } from '@/components/data/MarketDailySyncPanel'
 import { EnrichedSchemaModal } from '@/components/data/SchemaModal'
 import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
@@ -75,8 +76,8 @@ export function Data() {
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
   // 同步任务完成后刷新一次; 平时 30s 轮询与 status 对齐。
   const regimeCoverage = useQuery({
-    queryKey: QK.regimeCoverage,
-    queryFn: () => api.regimeCoverage(),
+    queryKey: QK.regimeCoverage('cn'),
+    queryFn: () => api.regimeCoverage('cn'),
     refetchInterval: activeJobId ? false : 30_000,
   })
 
@@ -271,7 +272,7 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
-      qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      qc.invalidateQueries({ queryKey: QK.regimeCoverage('cn') })
       // 同步重写了指数日K/enriched/日K → 失效消费这些数据的查询。
       // 侧边栏指数查询挂在 Layout 常驻不重挂载 (refetchOnWindowFocus 已关),
       // 不失效会一直显示同步前的旧值; 自选相关查询在页面正打开时同理。
@@ -683,6 +684,8 @@ export function Data() {
             </motion.div>
           )}
         </AnimatePresence>
+
+        <MarketDailySyncPanel />
 
         {/* 实时行情 + 存储 + 调度 */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

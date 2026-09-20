@@ -30,6 +30,20 @@ def _synthetic_panel() -> pl.DataFrame:
     rows = []
     for sym_idx, sym in enumerate(symbols):
         base = 10.0 + sym_idx * 5
+        # 先补足评分预热历史, 保持正式区间的随机样本序列不变。
+        for t in range(-80, 0):
+            rows.append({
+                "symbol": sym,
+                "date": date(2025, 1, 2) + timedelta(days=int(t * 1.5)),
+                "open": base,
+                "high": base + 0.2,
+                "low": base - 0.2,
+                "close": base,
+                "volume": 2_000_000.0,
+                "raw_close": base,
+                "raw_high": base + 0.2,
+                "raw_low": base - 0.2,
+            })
         for t in range(n_days):
             d = date(2025, 1, 2) + timedelta(days=int(t * 1.5))
             if t < 50:

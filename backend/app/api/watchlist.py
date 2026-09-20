@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from datetime import date
 
 import anyio
 import polars as pl
@@ -13,6 +11,7 @@ from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import watchlist
+from app.services.watchlist import _infer_market
 from app.services.watchlist_ocr import import_watchlist_image
 from app.services.watchlist_ocr.provider import get_ocr_provider
 
@@ -37,12 +36,14 @@ class AddRequest(BaseModel):
     symbol: str
     note: str = ""
     group_id: str | None = None
+    market: str | None = None
 
 
 class BatchAddRequest(BaseModel):
     symbols: list[str]
     note: str = ""
     group_id: str | None = None
+    market: str | None = None
 
 
 class GroupNameRequest(BaseModel):
@@ -67,7 +68,7 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
         if not name_by_symbol:
             return rows
         return [{**row, "name": name_by_symbol.get(row.get("symbol"))} for row in rows]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("attach watchlist names failed: %s", e)
         return rows
 
@@ -80,7 +81,7 @@ def list_all(request: Request):
 @router.post("")
 def add_one(req: AddRequest, request: Request):
     try:
-        rows = watchlist.add(req.symbol, req.note, req.group_id)
+        rows = watchlist.add(req.symbol, req.note, req.group_id, req.market)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"symbols": _with_names(rows, request)}
@@ -89,7 +90,7 @@ def add_one(req: AddRequest, request: Request):
 @router.post("/batch")
 def add_batch(req: BatchAddRequest, request: Request):
     try:
-        rows, added = watchlist.add_batch(req.symbols, req.note, req.group_id)
+        rows, added = watchlist.add_batch(req.symbols, req.note, req.group_id, req.market)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"symbols": _with_names(rows, request), "added": added}
@@ -185,7 +186,7 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(503, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import-image failed")
         raise HTTPException(500, f"识别失败: {e}") from e
 
@@ -195,16 +196,25 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
 
 
 @router.post("/{symbol}/top")
-def move_one_to_top(symbol: str, request: Request):
-    rows = watchlist.move_to_top(symbol)
+def move_one_to_top(
+    symbol: str,
+    request: Request,
+    market: str | None = None,
+):
+    rows = watchlist.move_to_top(symbol, market)
     return {"symbols": _with_names(rows, request)}
 
 
 @router.put("/{symbol}/group")
-def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
+def assign_group(
+    symbol: str,
+    req: GroupAssignRequest,
+    request: Request,
+    market: str | None = None,
+):
     """互斥设定分组(仅保留此组; None=移出全部分组)。多组操作用 members 端点。"""
     try:
-        rows = watchlist.set_group(symbol, req.group_id)
+        rows = watchlist.set_group(symbol, req.group_id, market)
     except KeyError as e:
         raise HTTPException(404, "自选标的不存在") from e
     except ValueError as e:
@@ -213,10 +223,15 @@ def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
 
 
 @router.post("/groups/{group_id}/members/{symbol}")
-def add_member(group_id: str, symbol: str, request: Request):
+def add_member(
+    group_id: str,
+    symbol: str,
+    request: Request,
+    market: str | None = None,
+):
     """把标的加入分组(多组成员关系: 不影响其他分组)。"""
     try:
-        rows = watchlist.add_to_group(symbol, group_id)
+        rows = watchlist.add_to_group(symbol, group_id, market)
     except KeyError as e:
         raise HTTPException(404, "自选标的不存在") from e
     except ValueError as e:
@@ -225,10 +240,15 @@ def add_member(group_id: str, symbol: str, request: Request):
 
 
 @router.delete("/groups/{group_id}/members/{symbol}")
-def remove_member(group_id: str, symbol: str, request: Request):
+def remove_member(
+    group_id: str,
+    symbol: str,
+    request: Request,
+    market: str | None = None,
+):
     """把标的移出分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
     try:
-        rows = watchlist.remove_from_group(symbol, group_id)
+        rows = watchlist.remove_from_group(symbol, group_id, market)
     except KeyError as e:
         raise HTTPException(404, "自选标的不存在") from e
     except ValueError as e:
@@ -237,8 +257,12 @@ def remove_member(group_id: str, symbol: str, request: Request):
 
 
 @router.delete("/{symbol}")
-def remove_one(symbol: str, request: Request):
-    rows = watchlist.remove(symbol)
+def remove_one(
+    symbol: str,
+    request: Request,
+    market: str | None = None,
+):
+    rows = watchlist.remove(symbol, market)
     return {"symbols": _with_names(rows, request)}
 
 
@@ -287,17 +311,26 @@ def watchlist_enriched(
     t0 = time.perf_counter()
 
     repo = request.app.state.repo
-    symbols = [r["symbol"] for r in watchlist.list_symbols()]
-    if not symbols:
+    entries = watchlist.list_symbols()
+    if not entries:
         return {"rows": [], "as_of": None, "elapsed_ms": 0}
 
-    # 按资产拆分自选 symbol; ETF enriched 是独立缓存, 仅自选真的含 ETF 才去加载
-    # (避免无 ETF 用户在缓存冷启动时触发 ETF 全量懒加载)
+    # Keep one row per (market, symbol); same symbols may exist in different markets.
+    symbols = [entry["symbol"] for entry in entries]
     etf_set = repo.get_etf_symbol_set()
     index_set = repo.get_index_symbol_set()
-    etf_symbols = [s for s in symbols if s in etf_set]
-    index_symbols = [s for s in symbols if s not in etf_set and s in index_set]
-    stock_symbols = [s for s in symbols if s not in etf_set and s not in index_set]
+    etf_entries = [entry for entry in entries if entry["symbol"] in etf_set]
+    index_entries = [
+        entry for entry in entries
+        if entry["symbol"] not in etf_set and entry["symbol"] in index_set
+    ]
+    stock_entries = [
+        entry for entry in entries
+        if entry["symbol"] not in etf_set and entry["symbol"] not in index_set
+    ]
+    etf_symbols = [entry["symbol"] for entry in etf_entries]
+    index_symbols = [entry["symbol"] for entry in index_entries]
+    stock_symbols = [entry["symbol"] for entry in stock_entries]
 
     df_e, cache_date = repo.get_enriched_latest()
 
@@ -306,11 +339,11 @@ def watchlist_enriched(
     # 旧实现是 df_e.filter(is_in(stock_symbols)), 方向反了 (以 enriched 为主),
     # 会把不在缓存 universe 里的自选股静默丢弃.
     if stock_symbols:
-        watchlist_df = pl.DataFrame({"symbol": stock_symbols})
-        if df_e.is_empty():
-            df = watchlist_df
-        else:
-            df = watchlist_df.join(df_e, on="symbol", how="left")
+        watchlist_df = pl.DataFrame({
+            "symbol": stock_symbols,
+            "market": [entry.get("market") or _infer_market(entry["symbol"]) for entry in stock_entries],
+        })
+        df = watchlist_df if df_e.is_empty() else watchlist_df.join(df_e, on="symbol", how="left")
     else:
         df = pl.DataFrame()
 
@@ -318,7 +351,10 @@ def watchlist_enriched(
     etf_date = None
     if etf_symbols:
         df_etf_all, etf_date = repo.get_enriched_latest_asset("etf")
-        etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
+        etf_watchlist_df = pl.DataFrame({
+            "symbol": etf_symbols,
+            "market": [entry.get("market") or _infer_market(entry["symbol"]) for entry in etf_entries],
+        })
         if not df_etf_all.is_empty():
             # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
             df_etf = etf_watchlist_df.join(df_etf_all, on="symbol", how="left")
@@ -330,7 +366,10 @@ def watchlist_enriched(
     index_date = None
     if index_symbols:
         df_idx_all, index_date = repo.get_enriched_latest_asset("index")
-        idx_watchlist_df = pl.DataFrame({"symbol": index_symbols})
+        idx_watchlist_df = pl.DataFrame({
+            "symbol": index_symbols,
+            "market": [entry.get("market") or _infer_market(entry["symbol"]) for entry in index_entries],
+        })
         if not df_idx_all.is_empty():
             df_idx = idx_watchlist_df.join(df_idx_all, on="symbol", how="left")
         else:
@@ -358,8 +397,12 @@ def watchlist_enriched(
         pl.col("symbol").replace_strict(asset_map, default="stock", return_dtype=pl.Utf8).alias("asset_type")
     )
 
+    # market 已由自选主表带入; 仅处理极旧数据或异常 join 结果。
+    if "market" not in df.columns:
+        df = df.with_columns(pl.lit("cn", dtype=pl.Utf8).alias("market"))
+
     # 选择内置需要的列
-    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type"] if c in df.columns]
+    keep = [c for c in [*_WATCHLIST_COLS, "name", "float_shares", "asset_type", "market"] if c in df.columns]
     df = df.select(keep)
 
     # 动态 JOIN 扩展数据表
@@ -367,8 +410,8 @@ def watchlist_enriched(
     if ext_specs:
         db = repo.store.db
         data_dir = repo.store.data_dir
-        from app.services.ext_data import ExtConfigStore
         from app.api.ext_data import _read_ext_dataframe
+        from app.services.ext_data import ExtConfigStore
 
         ext_store = ExtConfigStore(data_dir)
         configs = {c.id: c for c in ext_store.load_all()}

@@ -10,9 +10,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime
@@ -362,7 +362,7 @@ class JobStore:
             now = datetime.now(start_dt.tzinfo)
             stalled_s = (now - alive_dt).total_seconds()
             total_s = (now - start_dt).total_seconds()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return
         if stalled_s > timeout_s:
             logger.warning(
@@ -395,10 +395,8 @@ class JobStore:
             self._active_jobs.clear()
             self._active_id = None
             for f in self._store_dir.glob("*.json"):
-                try:
+                with contextlib.suppress(Exception):
                     f.unlink()
-                except Exception:
-                    pass
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
 
@@ -425,7 +423,7 @@ def _duration_s(j: dict[str, Any]) -> float | None:
         s = datetime.fromisoformat(j["started_at"])
         e = datetime.fromisoformat(j["finished_at"])
         return round((e - s).total_seconds(), 2)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

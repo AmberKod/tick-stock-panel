@@ -8,7 +8,7 @@ import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { TIER_RANK, tierRank, tierStyle } from '@/lib/capability-labels'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
-import { TickFlowKeyConfig } from './Keys'
+import { SearchKeyConfig, TickFlowKeyConfig } from './Keys'
 
 const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
@@ -1017,6 +1017,9 @@ function TickFlowDetail({ active, onSwitch, switching, route }: {
 
       {/* TickFlow API Key 配置 + 订阅档位 + 可用功能 (原 account tab 内容) */}
       <TickFlowKeyConfig />
+
+      {/* 新闻搜索源 Key (热点页「新闻」tab 依赖, 未配置时该 tab 显示配置入口) */}
+      <SearchKeyConfig />
     </div>
   )
 }

@@ -89,7 +89,32 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]   # 长行交给 fmt
+# 长行交给 fmt; RUF001/2/3 针对英文代码库的 homoglyph 混淆攻击, 对中文
+# 项目 (运行时文案/docstring/注释大量使用全角标点) 是纯误报 —— 09-17 实测
+# 779 处全是中文标点。豁免后剩余违规才有工程意义。
+# 其余豁免均为惯例冲突而非缺陷 (09-17 batch-3 逐类人工判定):
+# - SIM102: 嵌套 if 是带注释分层的可读性写法, 合并降低可读性;
+# - E402/N806/N815: 历史代码的晚导入与函数内大写常量惯例 (BATCH/_SENTINEL);
+# - RUF012: 市场 profile/档位表类属性 dict 是只读配置, 无 mutation 路径;
+# - SIM105/108/113/117: 风格偏好, 现写法更直白。
+ignore = [
+    "E501", "RUF001", "RUF002", "RUF003",
+    "SIM102", "SIM105", "SIM108", "SIM113", "SIM117",
+    "E402", "N806", "N815", "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI Query default 在路由参数声明处求值是框架签名约定, 所有 api/
+# 路由文件统一豁免 B008, 不改业务代码迁就 lint。
+"app/api/*.py" = ["B008"]
+# B023 (loop-variable binding): 两处闭包均在同一次迭代内立即调用不逃逸
+# (engine._scheduled_reason / kline_sync.fetch 经 _fetch_batch_with_timeout),
+# 代码内有注释说明; 行级 noqa 挡不住函数体内的循环变量引用。
+"app/backtest/engine.py" = ["B023"]
+"app/services/kline_sync.py" = ["B023"]
+# N801 (类名应 CapWords): 测试桩用嵌套类模拟 repo.store 这类生产属性, 类名必须
+# 与属性名逐字一致(小写), 改大写会让桩对象失去 store 属性而测试全崩。
+"tests/**" = ["N801"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

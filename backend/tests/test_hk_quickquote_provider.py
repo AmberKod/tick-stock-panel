@@ -8,22 +8,19 @@ M1 范围:
 """
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from app.data_providers.hk_quickquote_provider import (
     HKQuickQuoteProvider,
-    _is_hk_stock_symbol,
     _is_hk_index,
+    _is_hk_stock_symbol,
+    _normalize_internal_symbol,
+    _sina_symbol,
     _stock_code,
     _tencent_symbol,
-    _sina_symbol,
     batch_quotes_to_df,
     fetch_quote_sync,
-    _normalize_internal_symbol,
 )
-
 
 # ── 内部辅助函数 ──
 
@@ -195,3 +192,99 @@ def test_provider_get_realtime_empty_symbols():
     p = HKQuickQuoteProvider()
     assert p.get_realtime(symbols=None).is_empty()
     assert p.get_realtime(symbols=[]).is_empty()
+
+
+# ── 批量解析与字段修复 (M1 批量并发改造) ──
+
+def test_parse_sina_fields_correct_mapping():
+    """修复: 新浪港股字段正确映射 (现价[6]/昨收[3]/今开[2]/高[4]/低[5]/额[11]/量[12])。"""
+    from app.data_providers.hk_quickquote_provider import _parse_sina_fields
+    fields = ["TENCENT", "腾讯控股", "446.400", "453.000", "447.600", "440.600", "441.400", "-11.600", "-2.561", "441.39999", "441.60001", "8990301596", "20289781"]
+    q = _parse_sina_fields(fields, "00700.HK")
+    assert q is not None
+    assert q["name"] == "腾讯控股"
+    assert q["open"] == 446.400
+    assert q["pre_close"] == 453.000
+    assert q["high"] == 447.600
+    assert q["low"] == 440.600
+    assert q["price"] == 441.400
+    assert q["change_pct"] == -2.561
+    assert q["amount"] == 8990301596
+    assert q["volume"] == 20289781
+    assert q["source"] == "sina"
+
+
+def test_parse_tencent_fields_volume_in_shares():
+    """腾讯港股 fields[6] 实测为"股", 不应 ×100 (手)。"""
+    from app.data_providers.hk_quickquote_provider import _parse_tencent_fields
+    fields = [""] * 40
+    fields[1] = "腾讯控股"
+    fields[2] = "00700"
+    fields[3] = "441.4"
+    fields[4] = "453.0"
+    fields[5] = "446.4"
+    fields[6] = "20289781"
+    fields[32] = "-2.56"
+    fields[33] = "447.6"
+    fields[34] = "440.6"
+    fields[37] = "8990301596"
+    q = _parse_tencent_fields(fields, "00700.HK")
+    assert q is not None
+    assert q["volume"] == 20289781.0
+    assert q["price"] == 441.4
+    assert q["change_pct"] == -2.56
+
+
+def test_symbol_from_tencent_key():
+    from app.data_providers.hk_quickquote_provider import _symbol_from_tencent_key
+    assert _symbol_from_tencent_key("r_hk00700") == "00700.HK"
+    assert _symbol_from_tencent_key("hkHSI") == "HSI.HK"
+    assert _symbol_from_tencent_key("unknown") is None
+
+
+def test_symbol_from_sina_key():
+    from app.data_providers.hk_quickquote_provider import _symbol_from_sina_key
+    assert _symbol_from_sina_key("hk00700") == "00700.HK"
+    assert _symbol_from_sina_key("hkHSI") == "HSI.HK"
+    assert _symbol_from_sina_key("sh600519") is None
+
+
+def test_fetch_quotes_batch_sync_tencent_primary_sina_fallback(monkeypatch):
+    """批量: 腾讯成功即返回, 腾讯漏掉的走新浪补漏, 顺序与输入一致。"""
+    from app.data_providers import hk_quickquote_provider as m
+
+    tencent_ok = {"00700.HK": {"symbol": "00700.HK", "name": "腾讯控股", "source": "tencent", "price": 441.4}}
+    sina_ok = {"09988.HK": {"symbol": "09988.HK", "name": "阿里", "source": "sina", "price": 110.4}}
+
+    monkeypatch.setattr(
+        m, "_fetch_tencent_batch_sync",
+        lambda symbols, timeout=5.0: {s: tencent_ok[s] for s in symbols if s in tencent_ok},
+    )
+    monkeypatch.setattr(
+        m, "_fetch_sina_batch_sync",
+        lambda symbols, timeout=5.0: {s: sina_ok[s] for s in symbols if s in sina_ok},
+    )
+
+    quotes = m.fetch_quotes_batch_sync(["00700.HK", "09988.HK"], timeout=5.0)
+    assert len(quotes) == 2
+    assert quotes[0]["source"] == "tencent"
+    assert quotes[1]["source"] == "sina"
+
+
+def test_fetch_quotes_batch_sync_empty():
+    from app.data_providers.hk_quickquote_provider import fetch_quotes_batch_sync
+    assert fetch_quotes_batch_sync(None) == []
+    assert fetch_quotes_batch_sync([]) == []
+
+
+def test_hk_realtime_post_batch_reuses_provider_and_normalizes_symbols(monkeypatch):
+    from app.api import hk
+
+    monkeypatch.setattr(
+        hk,
+        "fetch_quotes_batch_sync",
+        lambda symbols, timeout=3.0: [{"symbol": symbols[0], "price": 1.0}],
+    )
+    result = hk.post_hk_realtime_batch(hk.RealtimeBatchRequest(symbols=["00700.HK", "09988.HK"]))
+    assert result["requested"] == 2
+    assert result["results"][0]["symbol"] == "00700.HK"

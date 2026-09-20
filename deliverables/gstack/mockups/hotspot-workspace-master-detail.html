@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>热点工作区 · 设计稿（变体 B 主从工作台）</title>
+<style>
+/* ============================================================
+ * 设计稿说明
+ * - 复刻 tick-stock-panel §6.0 设计语言 token（暗色默认）
+ * - 全静态 + 少量 vanilla JS 演示交互（选中/筛选/搜索/键盘导航）
+ * - 数据为假数据，字段与后端 HotspotSummary / HotspotStock 对齐
+ * ============================================================ */
+:root {
+  --base: #0A0A0B;
+  --surface: #18181B;
+  --elevated: #212126;
+  --border: #353539;
+  --fg: #FAFAFA;
+  --secondary: #C4C4CB;
+  --muted: #9999A1;
+  --accent: #3B82F6;
+  --bull: #F04438;   /* A 股语义: 红涨 */
+  --bear: #12B76A;   /* A 股语义: 绿跌 */
+  --warning: #F79009;
+  --danger: #F04438;
+  --radius-card: 8px;
+  --radius-btn: 6px;
+  --radius-input: 4px;
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+* { box-sizing: border-box; border-color: var(--border); }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--base);
+  color: var(--fg);
+  font-family: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', system-ui, sans-serif;
+  font-feature-settings: 'cv02','cv03','cv04','cv11';
+  font-size: 13px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.mono { font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── 页头（对齐 Regime.tsx 头部卡片样式）────────────── */
+.page-header {
+  position: relative; overflow: hidden;
+  margin: 12px 16px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: linear-gradient(to right, rgba(24,24,27,.9), rgba(24,24,27,.7));
+  padding: 10px 16px 10px 18px;
+}
+.page-header::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: linear-gradient(to bottom, var(--accent), rgba(59,130,246,.2));
+}
+.page-header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.page-title { display: flex; align-items: center; gap: 10px; }
+.page-title .icon { color: var(--accent); width: 18px; height: 18px; }
+.page-title h1 { margin: 0; font-size: 15px; font-weight: 600; }
+.page-title .sub { font-size: 12px; color: var(--muted); }
+.header-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* pill 按钮组（对齐 Regime 市场切换器: border bg-base/60 p-0.5, active accent） */
+.pill-group {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--border); border-radius: var(--radius-btn);
+  background: rgba(10,10,11,.6); padding: 2px;
+}
+.pill-group button {
+  border: 0; cursor: pointer; height: 24px; padding: 0 10px;
+  border-radius: 5px; background: transparent;
+  font: inherit; font-size: 12px; font-weight: 500; color: var(--secondary);
+  transition: color .15s var(--ease-smooth), background .15s var(--ease-smooth);
+}
+.pill-group button:hover { color: var(--fg); }
+.pill-group button.active { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-btn);
+  background: var(--base); color: var(--secondary);
+  font: inherit; font-size: 12px; transition: color .15s, border-color .15s;
+}
+.btn:hover { color: var(--accent); border-color: rgba(59,130,246,.4); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+.btn.primary:hover { background: rgba(59,130,246,.9); color: #fff; }
+.btn svg { width: 13px; height: 13px; }
+
+/* ── 元信息条 ─────────────────────────────────────── */
+.meta-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  margin: 10px 16px 0; padding: 7px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: var(--surface);
+  font-size: 11px; color: var(--muted);
+}
+.meta-strip b { font-weight: 400; color: var(--secondary); }
+.meta-strip .ok { color: var(--bull); }
+.meta-strip .stale { color: var(--warning); }
+
+/* ── 告警条（保留现状 3 种之一做演示）───────────────── */
+.alert {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 10px 16px 0; padding: 8px 12px;
+  border: 1px solid rgba(247,144,9,.4); border-radius: var(--radius-card);
+  background: rgba(247,144,9,.1); font-size: 12px; color: var(--secondary);
+}
+.alert svg { width: 15px; height: 15px; color: var(--warning); flex-shrink: 0; margin-top: 1px; }
+
+/* ── 阶段分布条 ───────────────────────────────────── */
+.stage-strip {
+  margin: 10px 16px 0;
+  display: grid; grid-template-columns: 1fr auto auto; gap: 10px;
+}
+.stage-card {
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: rgba(24,24,27,.8); padding: 8px 12px;
+}
+.stage-bar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; }
+.stage-bar span { height: 100%; min-width: 2px; }
+.stage-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 10px; color: var(--muted); }
+.stage-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.stage-legend b { color: var(--secondary); font-weight: 500; margin-left: 3px; }
+.mini-stat { display: flex; flex-direction: column; justify-content: center; min-width: 108px; }
+.mini-stat .v { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.mini-stat .l { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* ── 工作台主体（主从分栏）───────────────────────── */
+.workbench {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(340px, 5fr) minmax(480px, 7fr);
+  gap: 10px; padding: 10px 16px 16px;
+}
+.panel {
+  display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: rgba(24,24,27,.8);
+}
+.panel-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* 左列: 工具栏 + 主题列表 */
+.list-toolbar { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.search-row { display: flex; gap: 8px; }
+.search-input {
+  flex: 1; height: 28px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-input);
+  background: var(--base); color: var(--fg); font: inherit; font-size: 12px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--muted); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip {
+  border: 0; cursor: pointer; padding: 3px 9px; border-radius: 4px;
+  background: var(--elevated); color: var(--secondary);
+  font: inherit; font-size: 11px; transition: all .15s var(--ease-smooth);
+}
+.chip:hover { color: var(--fg); }
+.chip.active { background: var(--accent); color: #fff; }
+.chip.active[data-tone="neutral"]  { background: #52525B; }
+.chip.active[data-tone="neutral"]  { background: #52525B; }
+.chip.active[data-tone="accent"]   { background: var(--accent); }
+.chip.active[data-tone="bull"]    { background: var(--bull); }
+.chip.active[data-tone="warning"] { background: var(--warning); }
+.chip.active[data-tone="danger"]  { background: var(--danger); }
+.sort-label { font-size: 10px; color: var(--muted); margin-left: auto; }
+
+/* 列表行 */
+.topic-list { display: flex; flex-direction: column; }
+.topic-row {
+  display: grid; grid-template-columns: 30px 1fr 64px 58px 88px;
+  align-items: center; gap: 8px;
+  padding: 7px 12px; cursor: pointer; text-align: left;
+  border: 0; border-bottom: 1px solid rgba(53,53,57,.6); background: transparent;
+  font: inherit; color: inherit; position: relative;
+  transition: background .12s;
+}
+.topic-row:hover { background: var(--elevated); }
+.topic-row.selected { background: rgba(59,130,246,.1); }
+.topic-row.selected::before {
+  content: ''; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2.5px;
+  border-radius: 99px; background: var(--accent);
+}
+.topic-row .rank { font-size: 11px; color: var(--muted); }
+.topic-row .name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.topic-row .name svg { width: 11px; height: 11px; color: var(--accent); flex-shrink: 0; }
+.topic-row .name span { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topic-row .name .count { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.topic-row .sub { font-size: 10px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pct { text-align: right; font-size: 12px; }
+.up { color: var(--bull); } .down { color: var(--bear); }
+.heat-cell { display: flex; align-items: center; gap: 6px; }
+.heat-track { height: 4px; width: 46px; border-radius: 99px; background: var(--elevated); overflow: hidden; flex-shrink: 0; }
+.heat-fill { height: 100%; border-radius: 99px; background: var(--accent); }
+.heat-val { font-size: 11px; color: var(--secondary); width: 24px; text-align: right; }
+
+/* 阶段徽标 */
+.badge {
+  display: inline-block; padding: 2px 6px; border-radius: 3px;
+  font-size: 10px; line-height: 1.3; white-space: nowrap;
+}
+.badge.stage-initial { background: var(--elevated); color: var(--secondary); }
+.badge.stage-confirm  { background: rgba(59,130,246,.15); color: #60A5FA; }
+.badge.stage-accel    { background: rgba(240,68,56,.15); color: var(--bull); }
+.badge.stage-diverge  { background: rgba(247,144,9,.15); color: var(--warning); }
+.badge.stage-cool     { background: rgba(240,68,56,.12); color: var(--danger); }
+.badge.role-core  { background: rgba(240,68,56,.15); color: var(--bull); }
+.badge.role-assist{ background: rgba(59,130,246,.15); color: #60A5FA; }
+.badge.role-fill   { background: var(--elevated); color: var(--secondary); }
+.badge.role-back   { background: var(--elevated); color: var(--muted); }
+.badge.role-drop   { background: rgba(240,68,56,.1); color: var(--danger); }
+.badge.limit-up   { background: rgba(240,68,56,.15); color: var(--bull); }
+.badge.quality-ok { background: rgba(18,183,106,.15); color: var(--bear); }
+.badge.quality-partial { background: rgba(247,144,9,.15); color: var(--warning); }
+
+/* 右列: 详情面板 */
+.detail-head { padding: 12px 14px 10px; border-bottom: 1px solid var(--border); }
+.detail-head .row1 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.detail-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.detail-head .meta { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.detail-head .meta .sep { color: var(--border); }
+.big-pct { margin-left: auto; font-size: 22px; font-weight: 700; }
+.detail-body { padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+
+/* SectionTitle（对齐 Regime: 渐变竖条 + icon + 标题 + 右侧 hint）*/
+.sec-title { display: flex; align-items: center; gap: 8px; }
+.sec-title .bar { height: 12px; width: 2.5px; border-radius: 99px; background: linear-gradient(to bottom, var(--accent), rgba(59,130,246,.3)); }
+.sec-title svg { width: 13px; height: 13px; color: var(--accent); }
+.sec-title h3 { margin: 0; font-size: 12px; font-weight: 600; }
+.sec-title .hint { margin-left: auto; font-size: 10px; color: var(--muted); }
+
+/* 指标卡 */
+.metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.metric { border: 1px solid var(--border); border-radius: var(--radius-btn); background: var(--elevated); padding: 7px 9px; }
+.metric .l { font-size: 10px; color: var(--muted); }
+.metric .v { font-size: 13px; margin-top: 3px; }
+.metric .delta { font-size: 10px; margin-top: 1px; }
+
+/* 时间线卡 */
+.timeline-card { border: 1px solid var(--border); border-radius: var(--radius-card); padding: 10px 12px; background: rgba(24,24,27,.8); }
+.timeline-svg { display: block; width: 100%; height: 120px; }
+.stage-track { display: flex; gap: 1px; margin-top: 6px; }
+.stage-track span { flex: 1; height: 12px; border-radius: 2px; min-width: 2px; }
+.timeline-axis { display: flex; justify-content: space-between; margin-top: 4px; font-size: 9px; color: var(--muted); }
+
+/* 关联链路 */
+.route-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.route-node { padding: 3px 9px; border-radius: 4px; background: var(--elevated); font-size: 11px; color: var(--secondary); }
+.route-arrow { color: var(--muted); font-size: 11px; }
+
+/* 成分股表 */
+.stock-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.stock-table th {
+  text-align: right; font-weight: 500; font-size: 10px; color: var(--muted);
+  padding: 5px 8px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--surface); z-index: 1;
+}
+.stock-table th:first-child, .stock-table td:first-child { text-align: left; padding-left: 0; }
+.stock-table td { padding: 5px 8px; border-bottom: 1px solid rgba(53,53,57,.5); text-align: right; color: var(--secondary); }
+.stock-table td.name-cell { text-align: left; }
+.stock-table .code { display: block; font-size: 9px; color: var(--muted); margin-top: 1px; }
+.stock-table .sname { color: var(--fg); }
+.stock-table tr:hover td { background: var(--elevated); }
+
+/* 空状态（新闻检索死区 — 设计预留位）*/
+.empty-slot {
+  border: 1px dashed var(--border); border-radius: var(--radius-card);
+  padding: 14px; text-align: center; font-size: 11px; color: var(--muted);
+}
+.empty-slot .t { font-size: 12px; color: var(--secondary); font-weight: 500; margin-bottom: 3px; }
+
+/* 设计标注层 */
+.annot {
+  position: absolute; pointer-events: none; z-index: 40;
+  border: 1px dashed rgba(59,130,246,.55); border-radius: 6px;
+  display: none;
+}
+body.show-annot .annot { display: block; }
+.annot .tag {
+  position: absolute; top: -9px; left: 8px; padding: 1px 7px;
+  background: var(--accent); color: #fff; border-radius: 3px;
+  font-size: 10px; white-space: nowrap;
+}
+.mock-banner {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 16px; font-size: 11px; color: var(--muted);
+  background: rgba(10,10,11,.92); border-bottom: 1px solid var(--border); backdrop-filter: blur(4px);
+}
+.mock-banner .tag { background: var(--accent); color: #fff; border-radius: 3px; padding: 1px 7px; font-size: 10px; }
+.mock-banner .right { margin-left: auto; display: flex; gap: 8px; }
+.mock-banner .hint-key { color: var(--secondary); }
+
+@media (max-width: 1100px) {
+  body { overflow: auto; }
+  .workbench { grid-template-columns: 1fr; }
+  .panel { max-height: none; }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<div class="mock-banner">
+  <span class="tag">设计稿</span>
+  <span>变体 B「主从工作台」· 静态假数据（字段对齐 HotspotSummary 26 字段 / HotspotStock）</span>
+  <span class="right">
+    <span class="hint-key">↑↓ 键盘切换主题</span>
+    <button class="btn" id="annot-toggle" style="height:22px;padding:0 8px;font-size:11px;">显示设计标注</button>
+  </span>
+</div>
+
+<!-- ══ 页头（对齐 Regime 头部卡片）══ -->
+<header class="page-header">
+  <div class="page-header-row">
+    <div class="page-title">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+      <h1>热点工作区</h1>
+      <span class="sub" id="header-sub">A股来源为东财概念/行业板块 · 盘中每 30 分钟自动同步</span>
+    </div>
+    <div class="header-controls">
+      <!-- 市场切换: 接全局 marketContext（对齐 Regime:144 样板，非局部 state） -->
+      <div class="pill-group" role="tablist" aria-label="市场切换">
+        <button class="active" data-market="cn">A股</button>
+        <button data-market="hk">港股</button>
+        <button data-market="us">美股</button>
+      </div>
+      <div class="pill-group" id="top-group">
+        <button>20</button><button class="active">50</button><button>100</button>
+      </div>
+      <button class="btn primary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 3 1 3 2.5 0 1-1 1.5-1 2.5 0 1 1 1.5 2 1.5"/></svg>
+        同步
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ══ 元信息条 ══ -->
+<div class="meta-strip" id="meta-strip">
+  <span>数据源 <b>东财概念/行业</b></span>
+  <span>主题数 <b class="mono">47</b></span>
+  <span>最近同步 <b class="mono">14:32:05</b></span>
+  <span>状态 <b class="ok">同步成功</b></span>
+  <span>快照日期 <b class="mono">2026-09-15</b></span>
+  <span>数据质量 <span class="badge quality-ok">数据完整</span></span>
+</div>
+
+<!-- ══ 告警条（stale 演示，默认 cn 不显示）══ -->
+<div class="alert" id="stale-alert" style="display:none;">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+  <span id="stale-text"></span>
+</div>
+
+<!-- ══ 阶段分布条 ══ -->
+<div class="stage-strip">
+  <div class="stage-card">
+    <div class="stage-bar" id="stage-bar"></div>
+    <div class="stage-legend" id="stage-legend"></div>
+  </div>
+  <div class="stage-card mini-stat">
+    <span class="v" style="color:#60A5FA;" id="stat-emerging">3</span>
+    <span class="l">今日新晋主题（初次异动）</span>
+  </div>
+  <div class="stage-card mini-stat">
+    <span class="v" style="color:var(--warning);" id="stat-diverging">3</span>
+    <span class="l">分歧/退潮预警（需换手确认）</span>
+  </div>
+</div>
+
+<!-- ══ 工作台主体 ══ -->
+<main class="workbench">
+
+  <!-- ── 左列: 主题列表（master）── -->
+  <section class="panel" style="position:relative;">
+    <span class="annot" style="inset:0;"><span class="tag">左列 · 扫描区：搜索 + 阶段筛选 + 排序 + 紧凑列表</span></span>
+    <div class="list-toolbar">
+      <div class="search-row">
+        <input class="search-input" id="search" placeholder="搜索主题 / 领涨股 / 成分股代码…">
+      </div>
+      <div class="chip-row" id="stage-chips">
+        <button class="chip active" data-stage="all">全部 47</button>
+        <button class="chip" data-stage="初次异动">初次异动</button>
+        <button class="chip" data-stage="确认扩散">确认扩散</button>
+        <button class="chip" data-stage="加速主升">加速主升</button>
+        <button class="chip" data-stage="分歧放量">分歧放量</button>
+        <button class="chip" data-stage="降温退潮">降温退潮</button>
+      </div>
+      <div class="chip-row">
+        <span style="font-size:10px;color:var(--muted);">排序</span>
+        <button class="chip active" data-sort="heat">热度</button>
+        <button class="chip" data-sort="change">涨跌幅</button>
+        <button class="chip" data-sort="persistence">持续性</button>
+        <span class="sort-label mono">快照 2026-09-15 14:30</span>
+      </div>
+    </div>
+    <div class="panel-scroll">
+      <div class="topic-list" id="topic-list"></div>
+      <div style="padding:14px;text-align:center;font-size:11px;color:var(--muted);display:none;" id="list-empty">无匹配主题</div>
+    </div>
+  </section>
+
+  <!-- ── 右列: 详情面板（detail，常驻不遮挡列表）── -->
+  <section class="panel" style="position:relative;">
+    <span class="annot" style="inset:0;"><span class="tag">右列 · 详情区：常驻联动，替换现有 Modal 抽屉</span></span>
+
+    <div class="detail-head">
+      <div class="row1">
+        <h2 id="d-name">—</h2>
+        <span id="d-stage"></span>
+        <span class="big-pct" id="d-change">—</span>
+      </div>
+      <div class="meta">
+        <span id="d-state">—</span>
+        <span class="sep">·</span>
+        <span>样本 <span class="mono" id="d-sample">—</span></span>
+        <span class="sep">·</span>
+        <span>成分 <span class="mono" id="d-count">—</span></span>
+        <span class="sep">·</span>
+        <span>快照 <span class="mono" id="d-date">—</span></span>
+        <span class="sep">·</span>
+        <span id="d-quality"></span>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <!-- 指标行 -->
+      <div class="metrics">
+        <div class="metric"><div class="l">热度</div><div class="v mono" id="m-heat">—</div><div class="delta" id="m-heat-d"></div></div>
+        <div class="metric"><div class="l">趋势</div><div class="v mono" id="m-trend">—</div><div class="delta" id="m-trend-d"></div></div>
+        <div class="metric"><div class="l">持续性</div><div class="v mono" id="m-persist">—</div><div class="delta" id="m-persist-d"></div></div>
+        <div class="metric"><div class="l">降温</div><div class="v mono" id="m-cool">—</div><div class="delta">越低越好</div></div>
+        <div class="metric"><div class="l">领涨股</div><div class="v" id="m-leaders" style="font-size:12px;line-height:1.5;">—</div></div>
+      </div>
+
+      <!-- 热度时间线（timeline 死区的目标形态）-->
+      <div class="timeline-card" style="position:relative;">
+        <span class="annot" style="inset:0;"><span class="tag">时间线: 现有 timeline 死区的目标形态（SVG 折线 + 阶段色带）</span></span>
+        <div class="sec-title">
+          <span class="bar"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+          <h3>热度时间线 · 近 20 日</h3>
+          <span class="hint">折线=heat_score · 色带=阶段 · hover 看当日</span>
+        </div>
+        <svg class="timeline-svg" id="timeline-svg" viewBox="0 0 640 120" preserveAspectRatio="none"></svg>
+        <div class="stage-track" id="stage-track"></div>
+        <div class="timeline-axis"><span class="mono">08-19</span><span class="mono">08-29</span><span class="mono">09-08</span><span class="mono">09-15</span></div>
+      </div>
+
+      <!-- 关联链路（route 死区的目标形态）-->
+      <div class="timeline-card">
+        <div class="sec-title">
+          <span class="bar"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3"/><path d="M12 6h.01"/><path d="M12 12h.01"/><path d="M12 18h.01"/><path d="M12 6v12"/></svg>
+          <h3>关联链路</h3>
+          <span class="hint">题材传导路径（route 数据接入后渲染）</span>
+        </div>
+        <div class="route-row" id="route-row"></div>
+      </div>
+
+      <!-- 成分股表 -->
+      <div class="timeline-card" style="position:relative;">
+        <span class="annot" style="inset:0;"><span class="tag">成分股: 角色徽标 + 涨停标记，与现有抽屉表格同列</span></span>
+        <div class="sec-title">
+          <span class="bar"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-4"/><path d="M11 16V8"/><path d="M15 16v-7"/><path d="M19 16v-3"/></svg>
+          <h3>成分股</h3>
+          <span class="hint" id="stock-hint">按 hot_stock_score 排序</span>
+        </div>
+        <table class="stock-table" style="margin-top:8px;">
+          <thead>
+            <tr>
+              <th>成分股</th><th>角色</th><th>涨跌幅</th><th>成交额</th><th>换手</th><th>量比</th><th>评分</th>
+            </tr>
+          </thead>
+          <tbody id="stock-body"></tbody>
+        </table>
+      </div>
+
+      <!-- 新闻检索（死区预留位）-->
+      <div class="timeline-card">
+        <div class="sec-title">
+          <span class="bar"></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></svg>
+          <h3>主题新闻</h3>
+          <span class="hint">后端新闻检索待接入 · 接入前显示空状态</span>
+        </div>
+        <div class="empty-slot" style="margin-top:8px;">
+          <div class="t">新闻检索暂未接入</div>
+          该主题相关新闻聚合（催化事件 / 政策 / 公告）将在后端 news 接口就绪后填充，占位不冒充数据。
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ── 假数据（字段对齐 HotspotSummary / HotspotStock）────────── */
+const STAGE_COLOR = { '初次异动':'#71717A', '确认扩散':'#3B82F6', '加速主升':'#F04438', '分歧放量':'#F79009', '降温退潮':'#F04438' };
+const STAGE_CLASS = { '初次异动':'stage-initial', '确认扩散':'stage-confirm', '加速主升':'stage-accel', '分歧放量':'stage-diverge', '降温退潮':'stage-cool' };
+const STATE_LABEL = { persistent_hot:'持续热门', weakening:'走弱', cooling:'降温', emerging:'新起' };
+const ROLE_CLASS  = { '核心龙头':'role-core','助攻':'role-assist','补涨':'role-fill','后排':'role-back','掉队':'role-drop' };
+
+const TOPICS = [
+  { topic:'机器人执行器', name:'人形机器人', rank:1, stage:'加速主升', state:'persistent_hot', change_pct:4.82, heat_score:82, trend_score:76, persistence_score:64, cooling_score:18, sample_stock_count:86, topic_date:'2026-09-15', quality:'available', leaders:['三花智控','拓普集团','鸣志电器'], route:['机器人','减速器','执行器','电机'], stocks:[
+    {name:'三花智控',code:'002050.SZ',role:'核心龙头',change_pct:10.01,amount:'86.4亿',turnover:'9.84%',ratio:4.12,score:92.1,limit:true},
+    {name:'拓普集团',code:'601689.SH',role:'核心龙头',change_pct:8.35,amount:'64.2亿',turnover:'6.21%',ratio:3.87,score:88.4,limit:false},
+    {name:'鸣志电器',code:'603728.SH',role:'助攻',change_pct:10.01,amount:'41.8亿',turnover:'12.4%',ratio:5.02,score:86.0,limit:true},
+    {name:'绿的谐波',code:'688017.SH',role:'助攻',change_pct:6.72,amount:'28.9亿',turnover:'8.06%',ratio:3.31,score:81.2,limit:false},
+    {name:'北特科技',code:'603009.SH',role:'补涨',change_pct:5.18,amount:'19.3亿',turnover:'7.45%',ratio:2.94,score:74.6,limit:false},
+    {name:'珠城科技',code:'301280.SZ',role:'后排',change_pct:2.31,amount:'8.7亿',turnover:'5.12%',ratio:1.88,score:62.3,limit:false},
+    {name:'中大力德',code:'002896.SZ',role:'掉队',change_pct:-1.04,amount:'6.2亿',turnover:'3.98%',ratio:0.92,score:48.7,limit:false}]},
+  { topic:'固态电池', name:'固态电池', rank:2, stage:'加速主升', state:'persistent_hot', change_pct:3.96, heat_score:78, trend_score:71, persistence_score:69, cooling_score:22, sample_stock_count:52, topic_date:'2026-09-15', quality:'available', leaders:['德尔股份','上海洗霸','三祥新材'], route:['锂电池','固态电解质','硫化物路线'], stocks:[
+    {name:'德尔股份',code:'300473.SZ',role:'核心龙头',change_pct:10.01,amount:'32.6亿',turnover:'14.2%',ratio:5.44,score:89.3,limit:true},
+    {name:'上海洗霸',code:'603200.SH',role:'助攻',change_pct:9.98,amount:'21.4亿',turnover:'11.8%',ratio:4.61,score:84.5,limit:true},
+    {name:'三祥新材',code:'603663.SH',role:'助攻',change_pct:7.12,amount:'15.8亿',turnover:'9.03%',ratio:3.72,score:79.8,limit:false},
+    {name:'金龙羽',code:'002882.SZ',role:'补涨',change_pct:4.87,amount:'9.1亿',turnover:'6.67%',ratio:2.55,score:70.2,limit:false},
+    {name:'珈伟新能',code:'300317.SZ',role:'后排',change_pct:1.62,amount:'5.4亿',turnover:'4.11%',ratio:1.44,score:58.9,limit:false}]},
+  { topic:'创新药', name:'创新药', rank:3, stage:'加速主升', state:'persistent_hot', change_pct:3.12, heat_score:72, trend_score:68, persistence_score:71, cooling_score:25, sample_stock_count:118, topic_date:'2026-09-15', quality:'available', leaders:['恒瑞医药','百济神州','药明康德'], route:['医药','创新药','出海授权','CXO'], stocks:[
+    {name:'恒瑞医药',code:'600276.SH',role:'核心龙头',change_pct:6.28,amount:'58.7亿',turnover:'3.42%',ratio:3.08,score:85.6,limit:false},
+    {name:'百济神州',code:'688235.SH',role:'助攻',change_pct:5.94,amount:'26.1亿',turnover:'2.88%',ratio:2.76,score:82.1,limit:false},
+    {name:'药明康德',code:'603259.SH',role:'助攻',change_pct:4.65,amount:'44.3亿',turnover:'2.94%',ratio:2.41,score:80.4,limit:false},
+    {name:'荣昌生物',code:'688331.SH',role:'补涨',change_pct:3.87,amount:'12.6亿',turnover:'4.18%',ratio:2.12,score:72.3,limit:false},
+    {name:'科伦药业',code:'002422.SZ',role:'后排',change_pct:1.05,amount:'7.8亿',turnover:'1.62%',ratio:1.21,score:59.8,limit:false}]},
+  { topic:'算力租赁', name:'算力租赁', rank:4, stage:'确认扩散', state:'persistent_hot', change_pct:2.75, heat_score:75, trend_score:70, persistence_score:58, cooling_score:31, sample_stock_count:34, topic_date:'2026-09-15', quality:'available', leaders:['鸿博股份','润建股份','并行科技'], route:['AI','算力','IDC','液冷'], stocks:[
+    {name:'鸿博股份',code:'002229.SZ',role:'核心龙头',change_pct:9.98,amount:'28.4亿',turnover:'16.3%',ratio:5.87,score:87.2,limit:true},
+    {name:'润建股份',code:'002929.SZ',role:'助攻',change_pct:5.36,amount:'14.2亿',turnover:'7.15%',ratio:3.24,score:78.6,limit:false},
+    {name:'并行科技',code:'839493.BJ',role:'助攻',change_pct:11.24,amount:'8.9亿',turnover:'9.88%',ratio:4.02,score:77.4,limit:false},
+    {name:'数据港',code:'603881.SH',role:'补涨',change_pct:3.42,amount:'11.1亿',turnover:'5.34%',ratio:2.18,score:69.5,limit:false},
+    {name:'奥飞数据',code:'300738.SZ',role:'后排',change_pct:0.98,amount:'6.3亿',turnover:'3.86%',ratio:1.35,score:57.2,limit:false}]},
+  { topic:'低空经济', name:'低空经济', rank:5, stage:'分歧放量', state:'weakening', change_pct:1.32, heat_score:70, trend_score:54, persistence_score:66, cooling_score:48, sample_stock_count:74, topic_date:'2026-09-15', quality:'partial', leaders:['宗申动力','万丰奥威','莱斯信息'], route:['低空经济','eVTOL','空管','通航'], stocks:[
+    {name:'宗申动力',code:'001696.SZ',role:'核心龙头',change_pct:7.24,amount:'24.8亿',turnover:'10.6%',ratio:3.65,score:83.4,limit:false},
+    {name:'万丰奥威',code:'002085.SZ',role:'助攻',change_pct:4.11,amount:'18.2亿',turnover:'7.94%',ratio:2.88,score:76.1,limit:false},
+    {name:'莱斯信息',code:'688631.SH',role:'补涨',change_pct:2.66,amount:'9.4亿',turnover:'6.42%',ratio:2.03,score:68.9,limit:false},
+    {name:'深城交',code:'301091.SZ',role:'掉队',change_pct:-2.31,amount:'7.1亿',turnover:'5.88%',ratio:0.87,score:51.4,limit:false},
+    {name:'中信海直',code:'000099.SZ',role:'掉队',change_pct:-1.87,amount:'5.8亿',turnover:'4.73%',ratio:0.79,score:49.8,limit:false}]},
+  { topic:'商业航天', name:'商业航天', rank:6, stage:'确认扩散', state:'persistent_hot', change_pct:2.18, heat_score:66, trend_score:62, persistence_score:55, cooling_score:34, sample_stock_count:41, topic_date:'2026-09-15', quality:'available', leaders:['上海瀚讯','铖昌科技','臻镭科技'], route:['卫星互联网','火箭链','星座组网'], stocks:[
+    {name:'上海瀚讯',code:'300762.SZ',role:'核心龙头',change_pct:8.12,amount:'19.7亿',turnover:'12.1%',ratio:4.33,score:84.8,limit:false},
+    {name:'铖昌科技',code:'001270.SZ',role:'助攻',change_pct:6.45,amount:'13.9亿',turnover:'9.67%',ratio:3.51,score:79.2,limit:false},
+    {name:'臻镭科技',code:'688270.SH',role:'补涨',change_pct:3.18,amount:'8.2亿',turnover:'7.34%',ratio:2.47,score:70.6,limit:false},
+    {name:'航天电子',code:'600879.SH',role:'后排',change_pct:1.44,amount:'10.6亿',turnover:'2.15%',ratio:1.52,score:61.3,limit:false}]},
+  { topic:'汽车芯片', name:'汽车芯片', rank:7, stage:'初次异动', state:'emerging', change_pct:5.41, heat_score:62, trend_score:74, persistence_score:21, cooling_score:15, sample_stock_count:38, topic_date:'2026-09-15', quality:'available', leaders:['兆易创新','纳芯微','上海贝岭'], route:['半导体','车规芯片','国产替代'], stocks:[
+    {name:'兆易创新',code:'603986.SH',role:'核心龙头',change_pct:7.88,amount:'38.4亿',turnover:'5.62%',ratio:3.94,score:86.7,limit:false},
+    {name:'纳芯微',code:'688052.SH',role:'助攻',change_pct:6.32,amount:'16.8亿',turnover:'6.88%',ratio:3.42,score:80.3,limit:false},
+    {name:'上海贝岭',code:'600171.SH',role:'补涨',change_pct:4.05,amount:'11.2亿',turnover:'5.14%',ratio:2.61,score:72.8,limit:false},
+    {name:'杰华特',code:'688141.SH',role:'后排',change_pct:1.73,amount:'5.9亿',turnover:'4.36%',ratio:1.66,score:60.5,limit:false}]},
+  { topic:'AI 终端', name:'AI 眼镜', rank:8, stage:'分歧放量', state:'weakening', change_pct:0.87, heat_score:63, trend_score:51, persistence_score:62, cooling_score:52, sample_stock_count:29, topic_date:'2026-09-15', quality:'partial', leaders:['博士眼镜','明月镜片','亿道信息'], route:['消费电子','AI 终端','光学'], stocks:[
+    {name:'博士眼镜',code:'300622.SZ',role:'核心龙头',change_pct:6.02,amount:'15.3亿',turnover:'13.7%',ratio:3.88,score:81.9,limit:false},
+    {name:'明月镜片',code:'301101.SZ',role:'助攻',change_pct:3.34,amount:'8.8亿',turnover:'9.12%',ratio:2.74,score:74.2,limit:false},
+    {name:'亿道信息',code:'001314.SZ',role:'补涨',change_pct:2.09,amount:'6.4亿',turnover:'7.56%',ratio:2.02,score:67.4,limit:false},
+    {name:'康耐特光学',code:'301278.SZ',role:'掉队',change_pct:-1.35,amount:'4.2亿',turnover:'3.41%',ratio:0.84,score:52.6,limit:false}]},
+  { topic:'可控核聚变', name:'可控核聚变', rank:9, stage:'初次异动', state:'emerging', change_pct:4.28, heat_score:59, trend_score:71, persistence_score:18, cooling_score:12, sample_stock_count:22, topic_date:'2026-09-15', quality:'available', leaders:['联创光电','国光电气','合锻智能'], route:['核电','聚变装置','超导磁体'], stocks:[
+    {name:'联创光电',code:'600363.SH',role:'核心龙头',change_pct:8.94,amount:'17.6亿',turnover:'8.24%',ratio:4.46,score:85.2,limit:false},
+    {name:'国光电气',code:'688776.SH',role:'助攻',change_pct:5.67,amount:'9.8亿',turnover:'6.92%',ratio:3.18,score:78.4,limit:false},
+    {name:'合锻智能',code:'603011.SH',role:'补涨',change_pct:3.88,amount:'7.2亿',turnover:'5.47%',ratio:2.36,score:69.7,limit:false}]},
+  { topic:'6G 概念', name:'6G 概念', rank:10, stage:'初次异动', state:'emerging', change_pct:2.94, heat_score:55, trend_score:66, persistence_score:16, cooling_score:14, sample_stock_count:26, topic_date:'2026-09-15', quality:'available', leaders:['信科移动','盛路通信','通宇通讯'], route:['通信','6G','卫星通信'], stocks:[
+    {name:'信科移动',code:'688387.SH',role:'核心龙头',change_pct:6.83,amount:'12.4亿',turnover:'9.35%',ratio:3.72,score:82.6,limit:false},
+    {name:'盛路通信',code:'002446.SZ',role:'助攻',change_pct:4.29,amount:'8.1亿',turnover:'7.08%',ratio:2.84,score:75.3,limit:false},
+    {name:'通宇通讯',code:'002792.SZ',role:'补涨',change_pct:2.62,amount:'5.7亿',turnover:'5.89%',ratio:2.11,score:67.1,limit:false}]},
+  { topic:'稀土永磁', name:'稀土永磁', rank:11, stage:'降温退潮', state:'cooling', change_pct:-1.24, heat_score:42, trend_score:31, persistence_score:54, cooling_score:71, sample_stock_count:45, topic_date:'2026-09-15', quality:'available', leaders:['金力永磁','宁波韵升','正海磁材'], route:['稀土','永磁材料','机器人上游'], stocks:[
+    {name:'金力永磁',code:'300748.SZ',role:'核心龙头',change_pct:-0.87,amount:'9.6亿',turnover:'3.28%',ratio:0.94,score:55.2,limit:false},
+    {name:'宁波韵升',code:'600366.SH',role:'掉队',change_pct:-2.42,amount:'6.1亿',turnover:'2.94%',ratio:0.71,score:46.8,limit:false},
+    {name:'正海磁材',code:'300224.SZ',role:'掉队',change_pct:-3.15,amount:'7.4亿',turnover:'3.62%',ratio:0.64,score:43.2,limit:false}]},
+  { topic:'光伏 TOPCon', name:'光伏 TOPCon', rank:12, stage:'降温退潮', state:'cooling', change_pct:-2.15, heat_score:35, trend_score:24, persistence_score:47, cooling_score:78, sample_stock_count:39, topic_date:'2026-09-15', quality:'stale', leaders:['钧达股份','捷佳伟创','帝尔激光'], route:['光伏','电池片','设备'], stocks:[
+    {name:'钧达股份',code:'002865.SZ',role:'核心龙头',change_pct:-1.92,amount:'8.3亿',turnover:'2.87%',ratio:0.82,score:51.7,limit:false},
+    {name:'捷佳伟创',code:'300724.SZ',role:'掉队',change_pct:-3.46,amount:'6.8亿',turnover:'2.41%',ratio:0.58,score:42.5,limit:false},
+    {name:'帝尔激光',code:'300776.SZ',role:'掉队',change_pct:-2.88,amount:'5.2亿',turnover:'2.16%',ratio:0.63,score:44.1,limit:false}]},
+  { topic:'海南自贸', name:'海南自贸', rank:13, stage:'降温退潮', state:'cooling', change_pct:-0.68, heat_score:39, trend_score:28, persistence_score:44, cooling_score:74, sample_stock_count:31, topic_date:'2026-09-15', quality:'partial', leaders:['海南机场','海南发展','海汽集团'], route:['区域','海南','免税'], stocks:[
+    {name:'海南机场',code:'600515.SH',role:'核心龙头',change_pct:0.24,amount:'4.6亿',turnover:'1.88%',ratio:1.02,score:53.4,limit:false},
+    {name:'海南发展',code:'002163.SZ',role:'后排',change_pct:-1.16,amount:'3.1亿',turnover:'2.04%',ratio:0.77,score:47.3,limit:false}]},
+  { topic:'券商', name:'证券', rank:14, stage:'分歧放量', state:'weakening', change_pct:-0.42, heat_score:48, trend_score:38, persistence_score:51, cooling_score:57, sample_stock_count:49, topic_date:'2026-09-15', quality:'available', leaders:['锦龙股份','中国银河','东方财富'], route:['金融','券商','并购重组'], stocks:[
+    {name:'锦龙股份',code:'000712.SZ',role:'核心龙头',change_pct:2.18,amount:'12.6亿',turnover:'6.72%',ratio:1.94,score:68.2,limit:false},
+    {name:'中国银河',code:'601881.SH',role:'助攻',change_pct:0.86,amount:'21.4亿',turnover:'1.42%',ratio:1.36,score:62.8,limit:false},
+    {name:'东方财富',code:'300059.SZ',role:'后排',change_pct:-0.34,amount:'48.2亿',turnover:'1.12%',ratio:0.91,score:57.4,limit:false}]},
+];
+
+/* 生成 20 日热度序列（确定性伪随机，形状贴合阶段）*/
+function genTimeline(t) {
+  const pts = []; let v = Math.max(12, t.heat_score - (t.stage === '初次异动' ? 38 : t.stage === '确认扩散' ? 26 : t.stage === '加速主升' ? 34 : 18));
+  for (let i = 0; i < 19; i++) {
+    const wave = Math.sin(i * 0.6 + t.rank) * 2.2;
+    const drift = (t.stage === '加速主升' || t.stage === '确认扩散') ? 2.4 : (t.stage === '初次异动' ? 0.8 : -1.4);
+    v = Math.max(8, Math.min(96, v + drift + wave + ((i * 7 + t.rank * 13) % 5) - 2));
+    pts.push(Math.round(v));
+  }
+  pts.push(t.heat_score);
+  return pts;
+}
+function stageOfPoint(t, i) {
+  // 末段 = 当前阶段；往前按阶段回退模拟生命周期
+  if (i >= 16) return t.stage;
+  const order = ['初次异动','确认扩散','加速主升','分歧放量','降温退潮'];
+  const cur = order.indexOf(t.stage);
+  const back = Math.min(4, Math.floor((19 - i) / 5) + (cur > 0 ? 1 : 0));
+  return order[Math.max(0, cur - back)];
+}
+TOPICS.forEach(t => { t.timeline = genTimeline(t); });
+
+/* ── 渲染: 阶段分布条 ── */
+(function renderStageStrip() {
+  const counts = {};
+  TOPICS.forEach(t => counts[t.stage] = (counts[t.stage] ?? 0) + 1);
+  const order = ['初次异动','确认扩散','加速主升','分歧放量','降温退潮'];
+  const bar = document.getElementById('stage-bar');
+  const legend = document.getElementById('stage-legend');
+  order.forEach(s => {
+    if (!counts[s]) return;
+    const seg = document.createElement('span');
+    seg.style.flex = counts[s]; seg.style.background = STAGE_COLOR[s];
+    seg.title = `${s} ${counts[s]}`;
+    bar.appendChild(seg);
+    const li = document.createElement('span');
+    li.innerHTML = `<i style="background:${STAGE_COLOR[s]}"></i>${s}<b class="mono">${counts[s]}</b>`;
+    legend.appendChild(li);
+  });
+  document.getElementById('stat-emerging').textContent = counts['初次异动'] ?? 0;
+  document.getElementById('stat-diverging').textContent = (counts['分歧放量'] ?? 0) + (counts['降温退潮'] ?? 0);
+})();
+
+/* ── 渲染: 左列列表 ── */
+let filterStage = 'all', sortBy = 'heat', keyword = '';
+function visibleTopics() {
+  let rows = TOPICS.filter(t =>
+    (filterStage === 'all' || t.stage === filterStage) &&
+    (!keyword || t.name.includes(keyword) || t.topic.includes(keyword) ||
+      (t.leaders ?? []).some(l => l.includes(keyword)) ||
+      (t.stocks ?? []).some(s => s.name.includes(keyword) || s.code.includes(keyword))));
+  rows.sort((a, b) => sortBy === 'change' ? b.change_pct - a.change_pct
+    : sortBy === 'persistence' ? b.persistence_score - a.persistence_score
+    : b.heat_score - a.heat_score);
+  return rows;
+}
+function renderList() {
+  const list = document.getElementById('topic-list');
+  const rows = visibleTopics();
+  list.innerHTML = '';
+  document.getElementById('list-empty').style.display = rows.length ? 'none' : 'block';
+  rows.forEach((t, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'topic-row' + (selected === t.topic ? ' selected' : '');
+    btn.innerHTML = `
+      <span class="rank mono">${i + 1}</span>
+      <span>
+        <span class="name">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+          <span>${t.name}</span><span class="count">${t.sample_stock_count}只</span>
+        </span>
+        <span class="sub">${STATE_LABEL[t.state] ?? t.state} · ${t.leaders.slice(0,2).join(' / ')}</span>
+      </span>
+      <span><span class="badge ${STAGE_CLASS[t.stage]}">${t.stage}</span></span>
+      <span class="pct mono ${t.change_pct >= 0 ? 'up' : 'down'}">${t.change_pct >= 0 ? '+' : ''}${t.change_pct.toFixed(2)}%</span>
+      <span class="heat-cell"><span class="heat-track"><span class="heat-fill" style="width:${t.heat_score}%"></span></span><span class="heat-val mono">${t.heat_score}</span></span>`;
+    btn.onclick = () => selectTopic(t.topic);
+    list.appendChild(btn);
+  });
+}
+
+/* ── 渲染: 右列详情 ── */
+let selected = null;
+function fmtDelta(d) { return (d >= 0 ? '+' : '') + d.toFixed(1); }
+function renderDetail() {
+  const t = TOPICS.find(x => x.topic === selected);
+  if (!t) return;
+  document.getElementById('d-name').textContent = t.name;
+  document.getElementById('d-stage').innerHTML = `<span class="badge ${STAGE_CLASS[t.stage]}">${t.stage}</span>`;
+  const chg = document.getElementById('d-change');
+  chg.textContent = (t.change_pct >= 0 ? '+' : '') + t.change_pct.toFixed(2) + '%';
+  chg.className = 'big-pct mono ' + (t.change_pct >= 0 ? 'up' : 'down');
+  document.getElementById('d-state').textContent = STATE_LABEL[t.state] ?? t.state;
+  document.getElementById('d-sample').textContent = t.sample_stock_count;
+  document.getElementById('d-count').textContent = t.stocks.length;
+  document.getElementById('d-date').textContent = t.topic_date;
+  const q = t.quality === 'available' ? ['quality-ok','数据完整'] : ['quality-partial', t.quality === 'stale' ? '缓存过期' : '部分字段缺失'];
+  document.getElementById('d-quality').innerHTML = `<span class="badge ${q[0]}">${q[1]}</span>`;
+
+  const n = t.timeline.length, prev = t.timeline[n - 2] ?? t.heat_score;
+  document.getElementById('m-heat').textContent = t.heat_score.toFixed(1);
+  document.getElementById('m-heat-d').innerHTML = `<span class="${t.heat_score >= prev ? 'up' : 'down'} mono">${fmtDelta(t.heat_score - prev)} 昨日</span>`;
+  document.getElementById('m-trend').textContent = t.trend_score.toFixed(1);
+  document.getElementById('m-trend-d').innerHTML = `<span class="${t.trend_score >= 50 ? 'up' : 'down'}">动能${t.trend_score >= 50 ? '向上' : '减弱'}</span>`;
+  document.getElementById('m-persist').textContent = t.persistence_score.toFixed(1);
+  document.getElementById('m-persist-d').innerHTML = `<span class="${t.persistence_score >= 50 ? 'up' : 'down'}">${t.persistence_score >= 50 ? '主线级' : '短线脉冲'}</span>`;
+  document.getElementById('m-cool').textContent = t.cooling_score.toFixed(1);
+  document.getElementById('m-leaders').innerHTML = t.leaders.map(l =>
+    `<span style="color:var(--secondary);">${l}</span>`).join('<span style="color:var(--muted)"> · </span>');
+
+  // 时间线 SVG
+  const svg = document.getElementById('timeline-svg');
+  const W = 640, H = 120, PAD = 6;
+  const maxV = 100;
+  const pts = t.timeline.map((v, i) => [PAD + i * (W - 2 * PAD) / (n - 1), H - PAD - (v / maxV) * (H - 2 * PAD)]);
+  const line = pts.map(p => p.join(',')).join(' ');
+  const area = `${PAD},${H - PAD} ${line} ${W - PAD},${H - PAD}`;
+  let stageCells = '';
+  t.timeline.forEach((v, i) => {
+    const st = stageOfPoint(t, i);
+    stageCells += `<span style="background:${STAGE_COLOR[st]};opacity:.75" title="${i + 1}/20 日 · ${st} · 热度 ${v}"></span>`;
+  });
+  svg.innerHTML = `
+    <defs><linearGradient id="g-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3B82F6" stop-opacity=".22"/><stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="${area}" fill="url(#g-area)"/>
+    <polyline points="${line}" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+    ${pts.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === n - 1 ? 3.4 : 2}" fill="${i === n - 1 ? '#3B82F6' : 'transparent'}" stroke="#3B82F6" stroke-width="1"><title>第 ${i + 1} 日 · 热度 ${t.timeline[i]} · ${stageOfPoint(t, i)}</title></circle>`).join('')}`;
+  document.getElementById('stage-track').innerHTML = stageCells;
+
+  // 关联链路
+  document.getElementById('route-row').innerHTML = (t.route ?? []).map((r, i) =>
+    (i ? '<span class="route-arrow">→</span>' : '') + `<span class="route-node">${r}</span>`).join('');
+
+  // 成分股
+  const body = document.getElementById('stock-body');
+  body.innerHTML = t.stocks.map(s => `
+    <tr>
+      <td class="name-cell"><span class="sname">${s.name}</span>${s.limit ? ' <span class="badge limit-up">涨停</span>' : ''}<span class="code mono">${s.code}</span></td>
+      <td><span class="badge ${ROLE_CLASS[s.role] ?? 'role-back'}">${s.role}</span></td>
+      <td class="mono ${s.change_pct >= 0 ? 'up' : 'down'}">${s.change_pct >= 0 ? '+' : ''}${s.change_pct.toFixed(2)}%</td>
+      <td class="mono">${s.amount}</td>
+      <td class="mono">${s.turnover}</td>
+      <td class="mono">${s.ratio.toFixed(2)}</td>
+      <td class="mono">${s.score.toFixed(1)}</td>
+    </tr>`).join('');
+  document.getElementById('stock-hint').textContent = `${t.stocks.length} 只 · 按 hot_stock_score 排序`;
+}
+
+function selectTopic(topic) {
+  selected = topic;
+  renderList(); renderDetail();
+}
+
+/* ── 交互绑定 ── */
+document.querySelectorAll('#stage-chips .chip').forEach(c => {
+  c.onclick = () => {
+    document.querySelectorAll('#stage-chips .chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    filterStage = c.dataset.stage;
+    if (filterStage !== 'all') {
+      c.classList.add('active');
+      c.dataset.tone = { '初次异动':'neutral', '确认扩散':'accent', '加速主升':'bull', '分歧放量':'warning', '降温退潮':'danger' }[filterStage] || 'neutral';
+    }
+    renderList();
+  };
+});
+document.querySelectorAll('.chip[data-sort]').forEach(c => {
+  c.onclick = () => {
+    document.querySelectorAll('.chip[data-sort]').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    sortBy = c.dataset.sort;
+    renderList();
+  };
+});
+document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); renderList(); });
+document.getElementById('top-group').querySelectorAll('button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('#top-group button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+  };
+});
+
+/* 市场切换演示: cn=实时, hk/us=本地行业聚合 + stale 快照告警 */
+document.querySelectorAll('[data-market]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('[data-market]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    const m = b.dataset.market;
+    const alert = document.getElementById('stale-alert');
+    if (m === 'cn') {
+      document.getElementById('header-sub').textContent = 'A股来源为东财概念/行业板块 · 盘中每 30 分钟自动同步';
+      document.getElementById('meta-strip').querySelectorAll('b')[0].textContent = '东财概念/行业';
+      document.getElementById('meta-strip').querySelectorAll('.mono')[1].textContent = '2026-09-15';
+      alert.style.display = 'none';
+    } else {
+      const label = m === 'hk' ? '港股' : '美股';
+      document.getElementById('header-sub').textContent = `${label}为本地行业分类 × 行情聚合（盘中实时 / 盘后回落上一交易日快照）`;
+      document.getElementById('meta-strip').querySelectorAll('b')[0].textContent = '本地行业聚合';
+      document.getElementById('meta-strip').querySelectorAll('.mono')[1].textContent = '2026-09-14';
+      document.getElementById('stale-text').textContent =
+        `当前展示 2026-09-14 的快照(非当日): ${label}热点由本地行业分类聚合行情得出, 盘中取实时、盘后回落上一交易日快照。数据照出但不冒充实时, 可点「同步」重试。`;
+      alert.style.display = 'flex';
+    }
+  };
+});
+
+/* 键盘 ↑↓ 切换 */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  e.preventDefault();
+  const rows = visibleTopics();
+  if (!rows.length) return;
+  const idx = rows.findIndex(t => t.topic === selected);
+  const next = e.key === 'ArrowDown' ? Math.min(rows.length - 1, idx + 1) : Math.max(0, idx - 1);
+  selectTopic(rows[next].topic);
+});
+
+/* 设计标注开关 */
+document.getElementById('annot-toggle').onclick = function () {
+  document.body.classList.toggle('show-annot');
+  this.textContent = document.body.classList.contains('show-annot') ? '隐藏设计标注' : '显示设计标注';
+};
+
+/* 初始: 选中第 1 个主题 */
+selectTopic(TOPICS[0].topic);
+</script>
+</body>
+</html>

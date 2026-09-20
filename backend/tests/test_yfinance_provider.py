@@ -7,8 +7,6 @@ yfinance 沙箱装不上 (同 akshare), 测:
 """
 from __future__ import annotations
 
-import polars as pl
-
 from app.data_providers.yfinance_provider import (
     US_DEMO_NAMES,
     US_DEMO_SYMBOLS,

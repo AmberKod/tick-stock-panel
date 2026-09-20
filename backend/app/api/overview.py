@@ -1,6 +1,7 @@
 """市场总览聚合 API。"""
 from __future__ import annotations
 
+import logging
 import math
 import re
 import threading
@@ -9,13 +10,15 @@ from datetime import date
 from typing import Any
 
 import polars as pl
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.markets.cn import CN_PROFILE
 from app.services.ext_data import ExtConfig, ExtConfigStore
-from app.services.screener import ScreenerService
+from app.services.market_posture import ALLOWED_MARKETS, MARKET_LABELS, compute_market_posture
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
+
+logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 5.0
 _cache: dict[str, Any] | None = None
@@ -24,6 +27,13 @@ _cache_ts: float = 0.0
 # 缓存跨线程读写锁: market_overview 在 FastAPI 线程池读, invalidate 在数据刷新线程清,
 # 无锁会读到撕裂/过期状态。用模块级 Lock 守护 check-then-set 与 clear。
 _cache_lock = threading.Lock()
+
+# posture 是日级判断, 60s 缓存 (复用上面的 Lock 模式, 独立键位避免与总览互相顶掉)。
+_POSTURE_CACHE_TTL = 60.0
+_posture_cache: dict[str, Any] | None = None
+_posture_cache_key: str | None = None
+_posture_cache_ts: float = 0.0
+_posture_cache_lock = threading.Lock()
 
 
 def invalidate_overview_cache() -> None:
@@ -36,6 +46,31 @@ def invalidate_overview_cache() -> None:
         _cache = None
         _cache_key = None
         _cache_ts = 0.0
+
+
+def invalidate_posture_cache() -> None:
+    """清空市场态势缓存(数据刷新/regime 重算后调用)。"""
+    global _posture_cache, _posture_cache_key, _posture_cache_ts
+    with _posture_cache_lock:
+        _posture_cache = None
+        _posture_cache_key = None
+        _posture_cache_ts = 0.0
+
+
+def _parse_markets(raw: str) -> list[str]:
+    """解析 markets=cn,hk,us;去重保序,非法值 400。"""
+    wanted: list[str] = []
+    for part in (raw or "").split(","):
+        market = part.strip().lower()
+        if not market:
+            continue
+        if market not in ALLOWED_MARKETS:
+            raise HTTPException(400, f"markets 只能包含 {list(ALLOWED_MARKETS)} 中的值: {market}")
+        if market not in wanted:
+            wanted.append(market)
+    if not wanted:
+        raise HTTPException(400, "markets 不能为空")
+    return wanted
 
 
 # 核心指数 (M0: 单一事实源在 app/markets/cn.py)
@@ -73,9 +108,9 @@ def _read_ext_rows(data_dir, config: ExtConfig, dimension_field: str) -> list[di
     except TypeError:
         try:
             df = pl.read_parquet(files)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return []
-    except Exception:  # noqa: BLE001
+    except Exception:
         return []
     if df.is_empty() or dimension_field not in df.columns:
         return []
@@ -266,7 +301,7 @@ def _index_quotes(request: Request, as_of: date | None = None) -> list[dict]:
                     """,
                     [*CORE_INDEX_SYMBOLS, as_of, as_of],
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 db_rows = []
             for symbol, dt, last_price, prev_close in db_rows:
                 change_amount = None
@@ -334,11 +369,7 @@ def _pct_band_rows(values: list[float]) -> list[dict]:
     for label, low, high in bands:
         count = 0
         for v in values:
-            if low is None and v < high:
-                count += 1
-            elif high is None and v >= low:
-                count += 1
-            elif low is not None and high is not None and low <= v < high:
+            if (low is None and v < high) or (high is None and v >= low) or (low is not None and high is not None and low <= v < high):
                 count += 1
         out.append({"label": label, "count": count, "pct": count / total * 100})
     return out
@@ -376,3 +407,75 @@ def market_overview(request: Request, as_of: date | None = None):
         _cache_key = cache_key
         _cache_ts = now
     return data
+
+
+@router.get("/posture")
+def market_posture(request: Request, markets: str = "cn,hk,us", as_of: date | None = None):
+    """三市场态势总览 (面板 1)。
+
+    每个市场按 regime / breadth / hotspots / industry 四个维度投票:
+    一票否决 (regime 偏弱弱 或 上涨占比 < 35%) → 直接判防守;
+    否则 ≥3 票进攻 → 进攻, ≥3 票防守 → 防守, 否则均衡;
+    **不可用的维度不计入分母** (既不当 0 也不当中性), 全不可用 → unknown。
+
+    只读落盘数据, 不触发任何同步; 结果 60s 缓存。
+    """
+    global _posture_cache, _posture_cache_key, _posture_cache_ts
+    wanted = _parse_markets(markets)
+    cache_key = f"{','.join(wanted)}|{as_of.isoformat() if as_of else 'latest'}"
+    now = time.time()
+    with _posture_cache_lock:
+        if (
+            _posture_cache is not None
+            and _posture_cache_key == cache_key
+            and (now - _posture_cache_ts) < _POSTURE_CACHE_TTL
+        ):
+            return _posture_cache
+
+    repo = getattr(request.app.state, "repo", None)
+    store = getattr(repo, "store", None)
+    data_dir = getattr(store, "data_dir", None)
+    quote_service = getattr(request.app.state, "quote_service", None)
+    depth_service = getattr(request.app.state, "depth_service", None)
+
+    items = []
+    for market in wanted:
+        try:
+            items.append(
+                compute_market_posture(
+                    market,
+                    repo=repo,
+                    data_dir=data_dir,
+                    quote_service=quote_service,
+                    depth_service=depth_service,
+                    as_of=as_of,
+                )
+            )
+        except Exception as e:
+            # 单市场异常不能带崩整屏: 显式降级为 unknown + 原因, 让前端显示"不可用"
+            # 而不是渲染一个"风平浪静"的空态。
+            logger.warning("posture: %s 判定失败: %s", market, e)
+            items.append({
+                "market": market,
+                "market_label": MARKET_LABELS.get(market, market),
+                "posture": "unknown",
+                "posture_label": "未知",
+                "votes": [],
+                "unavailable_dims": ["regime", "breadth", "hotspots", "industry"],
+                "evidence": [{"dim": "_error", "text": f"态势计算失败: {e}"}],
+                "veto": None,
+                "tally": {"attack": 0, "neutral": 0, "defend": 0, "counted": 0},
+                "as_of": None,
+                "freshness": {"regime_as_of": None, "hotspot_age_hours": None},
+                "source_errors": [f"posture: {e}"],
+            })
+
+    payload = _json_safe({
+        "as_of": next((m.get("as_of") for m in items if m.get("as_of")), None),
+        "markets": items,
+    })
+    with _posture_cache_lock:
+        _posture_cache = payload
+        _posture_cache_key = cache_key
+        _posture_cache_ts = time.time()
+    return payload

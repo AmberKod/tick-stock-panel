@@ -405,3 +405,80 @@ def test_build_regime_mask_first_formal_day_requires_warmup_predecessor(tmp_path
     )
     assert mask is not None
     assert mask.tolist() == [True, False, True]
+
+
+# ───────────────────── 增量补差的回溯窗口与市场透传 ─────────────────────
+def _repo_stub(tmp_path):
+    class _FakeRepo:
+        class store:
+            data_dir = tmp_path
+
+        def get_enriched_range(self, *a, **k):
+            return None
+
+    return _FakeRepo()
+
+
+def test_compute_incremental_backfill_window(monkeypatch, tmp_path):
+    """缺口远超窗口时只补最近 N 天 — 防止盘后管道一次批算上千天历史。"""
+    from datetime import timedelta
+
+    regime_builder.upsert_regime_history(
+        tmp_path,
+        pl.DataFrame({"date": [date(2026, 1, 1)], "state": ["range"], "score": [50]}),
+    )
+    # enriched 有 1/1 起 41 天 → 缺口 40 天
+    enriched_dir = tmp_path / "kline_daily_enriched"
+    for i in range(41):
+        d = enriched_dir / f"date={(date(2026, 1, 1) + timedelta(days=i)).isoformat()}"
+        d.mkdir(parents=True)
+        (d / "part.parquet").write_bytes(b"x")
+
+    captured: dict = {}
+
+    def _fake_batch(repo, start, end, market="cn"):
+        captured.update(start=start, end=end, market=market)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(regime_builder, "run_regime_batch", _fake_batch)
+
+    regime_builder.compute_regime_incremental(
+        _repo_stub(tmp_path), tmp_path, today=date(2026, 3, 1), max_backfill_days=5,
+    )
+    assert captured, "run_regime_batch 未被调用"
+    assert captured["end"] == date(2026, 2, 10)  # 缺口最后一天
+    assert (captured["end"] - captured["start"]).days == 4  # 只补 5 天
+
+
+def test_compute_incremental_passes_market(monkeypatch, tmp_path):
+    """港美增量必须透传 market — 否则会用 A 股基准算完写进 hk/us 文件。"""
+    hk_dir = tmp_path / "kline_hk_us_enriched" / "symbol=00001.HK"
+    hk_dir.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["00001.HK"], "date": [date(2026, 2, 10)]}).write_parquet(
+        hk_dir / "part.parquet"
+    )
+
+    captured: dict = {}
+
+    def _fake_batch(repo, start, end, market="cn"):
+        captured.update(start=start, end=end, market=market)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(regime_builder, "run_regime_batch", _fake_batch)
+
+    regime_builder.compute_regime_incremental(
+        _repo_stub(tmp_path), tmp_path, today=date(2026, 3, 1), market="hk",
+    )
+    assert captured.get("market") == "hk"
+
+
+# ───────────────────── 增量补差的回溯窗口与市场透传 ─────────────────────
+def _repo_stub(tmp_path):
+    class _FakeRepo:
+        class store:
+            data_dir = tmp_path
+
+        def get_enriched_range(self, *a, **k):
+            return None
+
+    return _FakeRepo()

@@ -12,10 +12,10 @@ import uuid
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -25,6 +25,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
+import pyarrow.parquet as pq
 
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
@@ -51,7 +52,7 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
+_DIRECT_MATRIX_LOADER_VERSION = 5
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -79,6 +80,10 @@ _ACTIVE_MATRIX_CACHE: ContextVar[MatrixComputeCache | None] = ContextVar(
 )
 _ACTIVE_VALID_BAR_INDEX: ContextVar[Any] = ContextVar(
     "active_valid_bar_index",
+    default=None,
+)
+_ACTIVE_SCORING_SCOPE: ContextVar[tuple[np.ndarray | None, dict | None] | None] = ContextVar(
+    "active_matrix_scoring_scope",
     default=None,
 )
 
@@ -444,6 +449,7 @@ class MarketDataMatrix:
     cache_lease: Any | None = field(default=None, compare=False, repr=False)
     vector_fields: frozenset[str] = field(default_factory=frozenset)
     cache_timing_ms: Mapping[str, float] = field(default_factory=dict)
+    source_generation: str | None = None
     _valid_bars: ValidBarIndex | None = field(
         default=None,
         compare=False,
@@ -588,10 +594,13 @@ def build_market_data_matrix(
     high = float_matrix("high")
     low = float_matrix("low")
     close = float_matrix("close")
-    volume = float_matrix("volume", 0.0 if "volume" in panel.columns else 1.0, 0.0)
+    volume = float_matrix("volume")
     limit_up_locked = _bool_matrix(panel, "signal_limit_up", shape, time_id, asset_id)
     limit_down_locked = _bool_matrix(panel, "signal_limit_down", shape, time_id, asset_id)
-    tradable = _tradable_matrix(open_, high, low, close, volume)
+    # Preserve the legacy OHLC-only execution contract, while keeping missing
+    # volume unavailable to strategies and scoring instead of fabricating it.
+    execution_volume = volume if "volume" in panel.columns else np.ones(shape, dtype=np.float32)
+    tradable = _tradable_matrix(open_, high, low, close, execution_volume)
 
     core_columns = {
         timestamp_col,
@@ -607,6 +616,24 @@ def build_market_data_matrix(
     }
     wanted_fields = set(field_columns or ()) - core_columns
     fields: dict[str, np.ndarray] = {}
+    if any(str(symbol).endswith(".HK") for symbol in symbol_values):
+        from app.backtest.fundamentals import HK_CURRENCY_CODES
+
+        # These are historical row attributes. Keep them as numeric arrays so
+        # financial PIT calculations retain the same evidence as the panel.
+        if "currency" in panel.columns:
+            panel = panel.with_columns(
+                pl.col("currency").cast(pl.String).str.to_uppercase().replace_strict(
+                    HK_CURRENCY_CODES, default=None, return_dtype=pl.Float32,
+                ).alias("__hk_currency_code")
+            )
+            fields["__hk_currency_code"] = float_matrix("__hk_currency_code")
+        if "volume_unit" in panel.columns:
+            panel = panel.with_columns((pl.col("volume_unit") == "share").cast(pl.Float32).alias("__hk_volume_is_shares"))
+            fields["__hk_volume_is_shares"] = float_matrix("__hk_volume_is_shares")
+        for metadata_column in ("raw_close", "raw_price_verified"):
+            if metadata_column in panel.columns:
+                fields[metadata_column] = float_matrix(metadata_column)
     for column in sorted(wanted_fields):
         if column == "price_limit_pct":
             continue
@@ -699,7 +726,8 @@ def load_market_data_matrix_from_parquet(
     root = Path(parquet_root)
     if not root.exists():
         raise ValueError(f"matrix parquet root does not exist: {root}")
-    available_start, available_end = _partition_date_bounds(root)
+    normalized_symbols = _normalize_symbol_request(symbols)
+    available_start, available_end = _partition_date_bounds(root, normalized_symbols)
     if available_start is None or available_end is None:
         raise ValueError("本地指标数据为空，请先在数据页面同步日K并完成指标计算")
     effective_start = max(start, available_start)
@@ -717,12 +745,13 @@ def load_market_data_matrix_from_parquet(
         requested_fields
         | _normalize_matrix_cache_fields(cache_field_columns or field_columns)
     )
-    normalized_symbols = _normalize_symbol_request(symbols)
     instrument_fingerprint = _instrument_fingerprint(instruments).hex()
 
-    partitioning = pads.partitioning(
-        pa.schema([("date", pa.date32())]),
-        flavor="hive",
+    symbol_partitioned = bool(_symbol_partitions(root, normalized_symbols))
+    partitioning = (
+        None if symbol_partitioned else pads.partitioning(
+            pa.schema([("date", pa.date32())]), flavor="hive",
+        )
     )
     dataset = pads.dataset(
         str(root),
@@ -730,6 +759,14 @@ def load_market_data_matrix_from_parquet(
         partitioning=partitioning,
     )
     _validate_matrix_dataset_schema(dataset)
+    date_field = dataset.schema.field("date")
+    if symbol_partitioned and (pa.types.is_timestamp(date_field.type) or pa.types.is_date64(date_field.type)):
+        # Older symbol files store trading dates as midnight timestamps. Cast at the
+        # scan boundary so axes, range predicates and cache metadata all use Date.
+        schema = dataset.schema.set(
+            dataset.schema.get_field_index("date"), pa.field("date", pa.date32()),
+        )
+        dataset = pads.dataset(str(root), format="parquet", schema=schema)
 
     if cache_root is None:
         return _build_market_data_matrix_from_dataset(
@@ -742,6 +779,7 @@ def load_market_data_matrix_from_parquet(
             instruments,
             batch_size=batch_size,
             cache_status="disabled",
+            source_generation=source_generation,
             cancel_event=cancel_event,
         )
 
@@ -755,6 +793,7 @@ def load_market_data_matrix_from_parquet(
             effective_start,
             effective_end,
             include_predecessor=True,
+            symbols=normalized_symbols,
         )
     )
     covering = _find_covering_matrix_cache(
@@ -782,7 +821,7 @@ def load_market_data_matrix_from_parquet(
             logger.warning("invalid matrix disk cache %s: %s", path, exc)
             shutil.rmtree(path, ignore_errors=True)
 
-    build_partitions = _partition_fingerprints(root, build_start, build_end)
+    build_partitions = _partition_fingerprints(root, build_start, build_end, symbols=normalized_symbols)
     if not build_partitions:
         raise ValueError("matrix parquet range contains no market data")
     cache_path = _matrix_disk_cache_path(
@@ -932,6 +971,7 @@ def _build_market_data_matrix_from_dataset(
     *,
     batch_size: int,
     cache_status: str,
+    source_generation: str | None = None,
     cancel_event: threading.Event | None = None,
 ) -> MarketDataMatrix:
     _raise_if_matrix_cancelled(cancel_event)
@@ -955,7 +995,7 @@ def _build_market_data_matrix_from_dataset(
         "high": np.full(shape, np.nan, dtype=np.float32),
         "low": np.full(shape, np.nan, dtype=np.float32),
         "close": np.full(shape, np.nan, dtype=np.float32),
-        "volume": np.zeros(shape, dtype=np.float32),
+        "volume": np.full(shape, np.nan, dtype=np.float32),
     }
     fields = {
         name: np.full(shape, np.nan, dtype=np.float32)
@@ -1011,7 +1051,7 @@ def _build_market_data_matrix_from_dataset(
         actual_symbols,
         names,
         latest_limits,
-        apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
+        apply_latest_limits=actual_dates[-1] == _latest_partition_date(root, symbols),
     )
     timestamps, session_ids = _matrix_time_axes(actual_dates)
     _make_read_only(
@@ -1039,6 +1079,7 @@ def _build_market_data_matrix_from_dataset(
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
         cache_status=cache_status,
+        source_generation=source_generation,
     )
 
 
@@ -1172,7 +1213,7 @@ def _build_market_data_matrix_cache_from_dataset(
             latest_limits,
             out_up=arrays["limit_up_locked"],
             out_down=arrays["limit_down_locked"],
-            apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
+            apply_latest_limits=actual_dates[-1] == _latest_partition_date(root, symbols),
         )
         timing_ms["derived"] = round((time.perf_counter() - stage_started) * 1000, 1)
         _raise_if_matrix_cancelled(cancel_event)
@@ -1296,6 +1337,7 @@ def _mask_unseen_staging_core(
         arrays["high"],
         arrays["low"],
         arrays["close"],
+        arrays["volume"],
         *(fields[name] for name in parquet_fields),
     ]
     for start in range(0, seen.shape[0], rows_per_chunk):
@@ -1320,16 +1362,12 @@ def _mask_unseen_staging_fields(
 
 def _close_matrix_memmaps(mapped: list[np.memmap]) -> None:
     for values in reversed(mapped):
-        try:
+        with suppress(OSError, ValueError):
             values.flush()
-        except (OSError, ValueError):
-            pass
         mmap_obj = getattr(values, "_mmap", None)
         if mmap_obj is not None:
-            try:
+            with suppress(OSError, ValueError):
                 mmap_obj.close()
-            except (OSError, ValueError):
-                pass
 
 
 def _scan_matrix_values(
@@ -1384,7 +1422,7 @@ def _scan_matrix_values(
         for name, target in scan_targets.items():
             values = _arrow_float_values(
                 _batch_column(batch, name),
-                null_fill=0.0 if name == "volume" else np.nan,
+                null_fill=np.nan,
             )
             target[time_ids, asset_ids] = values
 
@@ -1527,6 +1565,7 @@ def _partition_fingerprints(
     end: date,
     *,
     include_predecessor: bool = False,
+    symbols: tuple[str, ...] | None = None,
 ) -> dict[str, str]:
     selected: list[tuple[date, Path]] = []
     predecessor: tuple[date, Path] | None = None
@@ -1555,10 +1594,32 @@ def _partition_fingerprints(
             digest.update(int(stat.st_size).to_bytes(8, "little", signed=False))
             digest.update(int(stat.st_mtime_ns).to_bytes(8, "little", signed=False))
         result[partition_date.isoformat()] = digest.hexdigest()
+    for partition in _symbol_partitions(root, symbols):
+        digest = hashlib.blake2b(digest_size=20)
+        files = sorted(partition.rglob("*.parquet"))
+        if not files:
+            continue
+        for path in files:
+            stat = path.stat()
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(int(stat.st_size).to_bytes(8, "little", signed=False))
+            digest.update(int(stat.st_mtime_ns).to_bytes(8, "little", signed=False))
+        result[partition.name] = digest.hexdigest()
     return result
 
 
-def _partition_date_bounds(root: Path) -> tuple[date | None, date | None]:
+def _symbol_partitions(root: Path, symbols: tuple[str, ...] | None) -> list[Path]:
+    requested = set(symbols) if symbols is not None else None
+    return sorted(
+        partition for partition in root.glob("symbol=*")
+        if partition.is_dir()
+        and (requested is None or partition.name.removeprefix("symbol=") in requested)
+    )
+
+
+def _partition_date_bounds(
+    root: Path, symbols: tuple[str, ...] | None = None,
+) -> tuple[date | None, date | None]:
     earliest: date | None = None
     latest: date | None = None
     for partition in root.glob("date=*"):
@@ -1570,11 +1631,38 @@ def _partition_date_bounds(root: Path) -> tuple[date | None, date | None]:
             earliest = value
         if latest is None or value > latest:
             latest = value
+    # HK/US store full history by symbol. Read footer statistics rather than OHLCV
+    # to find the covered dates; older files without statistics need only the date column.
+    for partition in _symbol_partitions(root, symbols):
+        for path in partition.rglob("*.parquet"):
+            with pq.ParquetFile(path) as parquet:
+                date_index = parquet.schema_arrow.get_field_index("date")
+                if date_index < 0:
+                    raise ValueError("matrix parquet missing columns: ['date']")
+                for index in range(parquet.metadata.num_row_groups):
+                    stats = parquet.metadata.row_group(index).column(date_index).statistics
+                    fallback = stats is None or not stats.has_min_max
+                    if fallback:
+                        dates = pc.cast(parquet.read(columns=["date"]).column("date"), pa.date32())
+                        bounds = pc.min_max(dates).as_py()
+                        lower, upper = bounds["min"], bounds["max"]
+                    else:
+                        lower, upper = stats.min, stats.max
+                    if isinstance(lower, datetime):
+                        lower = lower.date()
+                    if isinstance(upper, datetime):
+                        upper = upper.date()
+                    if lower is not None and (earliest is None or lower < earliest):
+                        earliest = lower
+                    if upper is not None and (latest is None or upper > latest):
+                        latest = upper
+                    if fallback:
+                        break
     return earliest, latest
 
 
-def _latest_partition_date(root: Path) -> date | None:
-    return _partition_date_bounds(root)[1]
+def _latest_partition_date(root: Path, symbols: tuple[str, ...] | None = None) -> date | None:
+    return _partition_date_bounds(root, symbols)[1]
 
 
 def _instrument_fingerprint(instruments: pl.DataFrame | None) -> bytes:
@@ -1630,10 +1718,13 @@ def _find_covering_matrix_cache(
                 continue
             cached_partitions = manifest.get("source_partitions", {})
             if source_generation is None:
+                symbol_partitioned = any(key.startswith("symbol=") for key in source_partitions)
+                if symbol_partitioned and cached_partitions != dict(source_partitions):
+                    continue
                 relevant_partitions = {
                     key: value
                     for key, value in source_partitions.items()
-                    if date.fromisoformat(key) >= cached_start
+                    if key.startswith("symbol=") or date.fromisoformat(key) >= cached_start
                 }
                 if any(
                     cached_partitions.get(key) != value
@@ -1759,6 +1850,7 @@ def _load_market_data_matrix_cache(
         fields=MappingProxyType(fields),
         cache_status=cache_status,
         cache_path=str(path),
+        source_generation=manifest.get("source_generation"),
         cache_lease=_MatrixDiskCacheLease(path),
         vector_fields=vector_field_names,
         cache_timing_ms=MappingProxyType({
@@ -1820,6 +1912,7 @@ def _slice_and_project_market_data_matrix(
         cache_lease=sliced.cache_lease,
         vector_fields=frozenset(),
         cache_timing_ms=sliced.cache_timing_ms,
+        source_generation=sliced.source_generation,
     )
 
 
@@ -1948,6 +2041,13 @@ def _load_or_build_matrix_axes(
                 )
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             previous = None
+
+    # A changed symbol file may rewrite any date or remove an asset. The date-partition
+    # incremental append path cannot preserve axes safely for this layout.
+    if previous is not None and any(
+        key.startswith("symbol=") for key in source_partitions
+    ):
+        previous = None
 
     if previous is not None:
         previous_partitions = previous.get("source_partitions", {})
@@ -2462,6 +2562,7 @@ def slice_market_data_matrix(market: MarketDataMatrix, start: int, stop: int) ->
         cache_lease=market.cache_lease,
         vector_fields=market.vector_fields,
         cache_timing_ms=market.cache_timing_ms,
+        source_generation=market.source_generation,
     )
     _make_read_only(
         result.timestamps,
@@ -3468,6 +3569,8 @@ class MatrixPipelineConfig:
     scoring_directions: dict[str, str] = field(default_factory=dict)
     asset_mask: np.ndarray | None = None
     protect_strategy_cache: bool = False
+    diagnostics: dict | None = None
+    entry_time_mask: np.ndarray | None = None
 
 
 class MatrixStrategyPipeline:
@@ -3481,14 +3584,20 @@ class MatrixStrategyPipeline:
         config: MatrixPipelineConfig,
         timing_ms: dict[str, float] | None = None,
     ) -> SignalMatrix:
-        with _activate_valid_bar_index(market.valid_bars):
-            return self._run_with_valid_bars(
-                strategy,
-                market,
-                params,
-                config,
-                timing_ms,
-            )
+        # Strategy-owned scoring uses the same formal dates as framework
+        # scoring, while still calculating history needed by exit signals.
+        scope_token = _ACTIVE_SCORING_SCOPE.set((config.entry_time_mask, config.diagnostics))
+        try:
+            with _activate_valid_bar_index(market.valid_bars):
+                return self._run_with_valid_bars(
+                    strategy,
+                    market,
+                    params,
+                    config,
+                    timing_ms,
+                )
+        finally:
+            _ACTIVE_SCORING_SCOPE.reset(scope_token)
 
     def _run_with_valid_bars(
         self,
@@ -3523,7 +3632,13 @@ class MatrixStrategyPipeline:
         )
         with cache_scope:
             basic_mask = build_pipeline_filter_mask(market, config)
+            _validate_pipeline_filter_inputs(market, config)
             entry = (signals.entry.astype(bool) & basic_mask).astype(np.uint8)
+            if config.entry_time_mask is not None:
+                time_mask = np.asarray(config.entry_time_mask, dtype=bool)
+                if time_mask.shape != (market.shape[0],):
+                    raise ValueError("matrix strategy entry time mask length does not match market")
+                entry &= time_mask[:, None]
             score = build_matrix_score(
                 market,
                 entry.astype(bool),
@@ -3532,7 +3647,13 @@ class MatrixStrategyPipeline:
                 config.descending,
                 fallback=signals.score,
                 directions=config.scoring_directions,
+                diagnostics=config.diagnostics,
             )
+            unscored = (entry != 0) & ~np.isfinite(score)
+            if config.diagnostics is not None:
+                config.diagnostics["unscored_by_date"] = np.count_nonzero(unscored, axis=1)
+            entry = np.where(unscored, 0, entry).astype(np.uint8)
+            score = np.where(np.isfinite(score), score, 0.0).astype(np.float32)
             entry_codes = np.where(entry != 0, signals.entry_signal_code, -1).astype(np.int16)
             exit_codes = np.where(signals.exit != 0, signals.exit_signal_code, -1).astype(np.int16)
         if timing_ms is not None:
@@ -3595,6 +3716,30 @@ def build_pipeline_filter_mask(
     )
 
 
+def _validate_pipeline_filter_inputs(market: MarketDataMatrix, config: MatrixPipelineConfig) -> None:
+    """Validate actual bars on entry dates and retain partial input diagnostics."""
+    from app.strategy.engine import basic_filter_dependencies
+
+    names = sorted(basic_filter_dependencies(config.basic_filter) - {"name", "symbol"})
+    if not names:
+        return
+    present = _present_matrix(market.open, market.high, market.low, market.close, market.volume)
+    if config.entry_time_mask is not None:
+        time_mask = np.asarray(config.entry_time_mask, dtype=bool)
+        if time_mask.shape != (market.shape[0],):
+            raise ValueError("matrix strategy entry time mask length does not match market")
+        present &= time_mask[:, None]
+    counts = np.count_nonzero(present, axis=1)
+    for name in names:
+        valid_counts = np.count_nonzero(present & np.isfinite(market.field(name)), axis=1)
+        unavailable = np.flatnonzero((counts > 0) & (valid_counts == 0))
+        if unavailable.size:
+            label = market.timestamp_labels[int(unavailable[0])]
+            raise ValueError(f"{label} 基础筛选不可计算,字段没有有效数据: {name}")
+        if config.diagnostics is not None:
+            config.diagnostics.setdefault("filter_missing_by_date", {})[name] = counts - valid_counts
+
+
 def build_basic_filter_mask(market: MarketDataMatrix, config: dict) -> np.ndarray:
     cache = active_matrix_compute_cache()
     if cache is None:
@@ -3612,17 +3757,22 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
     if not config or not config.get("enabled", True):
         return np.ones(market.shape, dtype=bool)
 
-    mask = np.ones(market.shape, dtype=bool)
-    close = market.close
-    if config.get("price_min") is not None:
-        mask &= close >= float(config["price_min"])
-    if config.get("price_max") is not None:
-        mask &= close <= float(config["price_max"])
+    from app.strategy.engine import BASIC_FILTER_NUMERIC_FIELDS
 
-    _apply_bound(mask, close * _optional_field(market, "total_shares"), config, "market_cap")
-    _apply_bound(mask, close * _optional_field(market, "float_shares"), config, "float_cap")
-    _apply_bound(mask, _required_field_for_bound(market, config, "amount"), config, "amount")
-    _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
+    mask = np.ones(market.shape, dtype=bool)
+    for prefix, names in BASIC_FILTER_NUMERIC_FIELDS.items():
+        if config.get(f"{prefix}_min") is None and config.get(f"{prefix}_max") is None:
+            continue
+        value = None
+        for name in names:
+            try:
+                field_values = market.field(name)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"基础筛选不可计算,缺少字段: {name}") from exc
+            if not np.isfinite(field_values).any():
+                raise ValueError(f"基础筛选不可计算,字段没有有效数据: {name}")
+            value = field_values if value is None else value * field_values
+        _apply_bound(mask, value, config, prefix)
 
     if config.get("exclude_st"):
         asset_mask = np.array(
@@ -3652,7 +3802,46 @@ def build_matrix_score(
     *,
     fallback: np.ndarray,
     directions: Mapping[str, str] | None = None,
+    diagnostics: dict | None = None,
 ) -> np.ndarray:
+    candidate_counts = np.count_nonzero(universe, axis=1)
+    active_dates = candidate_counts > 0
+    if not active_dates.any():
+        return np.zeros(market.shape, dtype=np.float32)
+    scope = _ACTIVE_SCORING_SCOPE.get()
+    time_mask = scope[0] if scope is not None else None
+    if diagnostics is None and scope is not None:
+        diagnostics = scope[1]
+    if time_mask is not None:
+        time_mask = np.asarray(time_mask, dtype=bool)
+        if time_mask.shape != (market.shape[0],):
+            raise ValueError("matrix scoring time mask length does not match market")
+
+    def feature(name: str) -> np.ndarray:
+        try:
+            return matrix_feature(market, name)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"策略评分不可计算,缺少字段或依赖: {name}") from exc
+
+    def validate_dates(valid_counts: np.ndarray, names: list[str]) -> None:
+        # A standalone full-history computation has no formal range. It may
+        # contain normal indicator warmup, but cannot have no usable score at all.
+        if time_mask is None:
+            if not valid_counts.any():
+                raise ValueError("策略评分不可计算,候选缺少完整有效数据: " + ", ".join(names))
+            return
+        unavailable = np.flatnonzero(active_dates & time_mask & (valid_counts == 0))
+        if unavailable.size:
+            label = market.timestamp_labels[int(unavailable[0])]
+            raise ValueError(f"{label} 策略评分不可计算,候选缺少完整有效数据: " + ", ".join(names))
+
+    def record_missing(name: str, valid_counts: np.ndarray) -> None:
+        if diagnostics is not None:
+            missing = candidate_counts - valid_counts
+            if time_mask is not None:
+                missing = np.where(time_mask, missing, 0)
+            diagnostics.setdefault("score_missing_by_date", {})[name] = missing
+
     weights = {name: float(weight) for name, weight in scoring.items() if float(weight) != 0.0}
     total_weight = sum(weights.values())
     if weights and total_weight > 0:
@@ -3664,7 +3853,8 @@ def build_matrix_score(
         work_mask = np.empty((row_count, chunk_size), dtype=bool)
         value_scratch = np.empty((row_count, chunk_size), dtype=np.float32)
         for name, weight in weights.items():
-            values = matrix_feature(market, name)
+            values = feature(name)
+            valid_counts = np.zeros(row_count, dtype=np.int64)
             row_min = np.full(row_count, np.inf, dtype=np.float32)
             row_max = np.full(row_count, -np.inf, dtype=np.float32)
             for start in range(0, asset_count, chunk_size):
@@ -3675,6 +3865,7 @@ def build_matrix_score(
                 np.isfinite(values_chunk, out=finite)
                 all_finite[:, start:stop] &= finite
                 finite &= universe[:, start:stop]
+                valid_counts += np.count_nonzero(finite, axis=1)
                 np.minimum(
                     row_min,
                     np.min(values_chunk, axis=1, where=finite, initial=np.inf),
@@ -3685,6 +3876,8 @@ def build_matrix_score(
                     np.max(values_chunk, axis=1, where=finite, initial=-np.inf),
                     out=row_max,
                 )
+            validate_dates(valid_counts, [name])
+            record_missing(name, valid_counts)
             row_range = row_max - row_min
             varying_rows = np.isfinite(row_range) & (row_range > 0)
             normalized_weight = np.float32(weight / total_weight)
@@ -3707,24 +3900,31 @@ def build_matrix_score(
                     scratch[finite] = np.float32(1.0) - scratch[finite]
                 scratch *= normalized_weight
                 score[:, start:stop] += scratch
+        validate_dates(np.count_nonzero(all_finite, axis=1), list(weights))
         score *= np.float32(100.0)
-        score[~universe | ~all_finite] = 0.0
+        score[~universe] = 0.0
+        score[universe & ~all_finite] = np.nan
         return score
 
     if order_by and order_by != "score":
-        values = matrix_feature(market, order_by)
-        result = np.zeros(market.shape, dtype=np.float32)
+        values = feature(order_by)
+        result = np.full(market.shape, np.nan, dtype=np.float32)
+        result[~universe] = 0.0
+        valid_counts = np.zeros(market.shape[0], dtype=np.int64)
         direction = np.float32(1.0 if descending else -1.0)
         for start in range(0, market.shape[1], _SCORE_ASSET_CHUNK_SIZE):
             stop = min(start + _SCORE_ASSET_CHUNK_SIZE, market.shape[1])
             values_chunk = values[:, start:stop]
             valid = universe[:, start:stop] & np.isfinite(values_chunk)
+            valid_counts += np.count_nonzero(valid, axis=1)
             np.multiply(
                 values_chunk,
                 direction,
                 out=result[:, start:stop],
                 where=valid,
             )
+        validate_dates(valid_counts, [order_by])
+        record_missing(order_by, valid_counts)
         return result
     result = np.zeros(market.shape, dtype=np.float32)
     np.copyto(result, fallback, where=universe)
@@ -4127,9 +4327,11 @@ def _required_field_for_bound(
 def _apply_bound(mask: np.ndarray, values: np.ndarray, config: dict, prefix: str) -> None:
     minimum = config.get(f"{prefix}_min")
     maximum = config.get(f"{prefix}_max")
-    if minimum is not None and np.isfinite(values).any():
+    if minimum is not None or maximum is not None:
+        mask &= np.isfinite(values)
+    if minimum is not None:
         mask &= values >= float(minimum)
-    if maximum is not None and np.isfinite(values).any():
+    if maximum is not None:
         mask &= values <= float(maximum)
 
 

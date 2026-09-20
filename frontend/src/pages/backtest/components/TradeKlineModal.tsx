@@ -2,14 +2,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Clock, X } from 'lucide-react'
 import { StockPanel } from '@/components/StockPanel'
+import { StockDailyKChart } from '@/components/StockDailyKChart'
+import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
+import { isInternationalAsset, symbolMatchesAsset } from '@/lib/backtestMarket'
 import type { ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
-import type { StrategyBacktestTrade } from '@/lib/api'
+import type { StrategyBacktestAsset, StrategyBacktestTrade } from '@/lib/api'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
 interface Props {
   trade: StrategyBacktestTrade | null
   onClose: () => void
+  assetType?: StrategyBacktestAsset
+  currency?: string
 }
 
 function addDays(date: string, days: number): string {
@@ -33,7 +38,8 @@ function fmtSignedMoney(v: number | null | undefined): string {
   return `${prefix}${fmtMoney(v)}`
 }
 
-export function TradeKlineModal({ trade, onClose }: Props) {
+export function TradeKlineModal({ trade, onClose, assetType = 'stock', currency = 'CNY' }: Props) {
+  const international = isInternationalAsset(assetType)
   const [showIntraday, setShowIntraday] = useState(false)
   const backdrop = useDialogBackdrop(onClose)
 
@@ -109,7 +115,7 @@ export function TradeKlineModal({ trade, onClose }: Props) {
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
             className="relative flex max-h-[94vh] w-[92vw] max-w-[1120px] flex-col overflow-hidden rounded-card border border-border bg-base shadow-2xl"
           >
-            <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border px-5 py-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-sm font-semibold text-foreground">{trade.symbol}</span>
@@ -120,18 +126,20 @@ export function TradeKlineModal({ trade, onClose }: Props) {
                   {String(trade.entry_date).slice(0, 10)} 买入 → {String(trade.exit_date).slice(0, 10)} 卖出 · 持仓 {trade.duration ?? '—'} 天
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-3 text-xs">
                 <div className="text-right">
-                  <div className="text-muted">买 / 卖</div>
+                  <div className="text-muted">买 / 卖（{currency}）</div>
                   <div className="num text-foreground">{fmtPrice(trade.entry_price)} / {fmtPrice(trade.exit_price)}</div>
                 </div>
                 <div className="text-right">
-                  <div className="text-muted">盈亏</div>
+                  <div className="text-muted">盈亏（{currency}）</div>
                   <div className={`num font-semibold ${priceColorClass(trade.pnl_amount ?? trade.pnl_pct)}`}>
                     {fmtSignedMoney(trade.pnl_amount)} / {fmtPct(trade.pnl_pct)}
                   </div>
                 </div>
                 <button
+                  disabled={international}
+                  title={international ? '港美回测当前仅支持日线回放' : '查看分时'}
                   onClick={() => setShowIntraday((v) => !v)}
                   className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors ${
                     showIntraday
@@ -142,7 +150,9 @@ export function TradeKlineModal({ trade, onClose }: Props) {
                   <Clock className="h-3 w-3" />
                   分时
                 </button>
+                <MarketWatchlistButton symbol={trade.symbol} market={international ? assetType : undefined} size="sm" />
                 <button
+                  aria-label="关闭交易回放"
                   onClick={onClose}
                   className="rounded-btn p-1 text-secondary transition-colors hover:bg-elevated hover:text-foreground"
                 >
@@ -152,7 +162,13 @@ export function TradeKlineModal({ trade, onClose }: Props) {
             </div>
 
             <div className="flex-1 overflow-auto p-4">
-              <StockPanel
+              {!symbolMatchesAsset(trade.symbol, assetType) ? <p className="text-xs text-danger">交易证券与当前市场不一致，无法回放。</p> : international ? (
+                <div>
+                  <p className="mb-3 text-[11px] text-muted">本地日线交易回放 · {currency} · 图中买卖价包含本次模拟的滑点假设。</p>
+                  <StockDailyKChart key={assetType + ':' + trade.symbol} symbol={trade.symbol} height={520} dateRange={dateRange} ranges={ranges} priceLines={priceLines} showLimitMarkers={false} showMarkerToggle={false} showInfoBar={false} />
+                </div>
+              ) : <StockPanel
+                key={assetType + ':' + trade.symbol}
                 symbol={trade.symbol}
                 height={520}
                 dateRange={dateRange}
@@ -162,7 +178,7 @@ export function TradeKlineModal({ trade, onClose }: Props) {
                 showMarkerToggle={false}
                 showIntraday={showIntraday}
                 onSelectDate={() => { if (!showIntraday) setShowIntraday(true) }}
-              />
+              />}
             </div>
           </motion.div>
         </div>

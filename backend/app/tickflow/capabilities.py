@@ -48,9 +48,9 @@ class CapabilitySet:
         return self._caps.get(cap)
 
     def require(self, cap: Cap) -> CapabilityLimits:
-        """断言可用,否则抛 CapabilityDenied。"""
+        """断言可用,否则抛 CapabilityDeniedError。"""
         if cap not in self._caps:
-            raise CapabilityDenied(cap)
+            raise CapabilityDeniedError(cap)
         return self._caps[cap]
 
     def all(self) -> dict[Cap, CapabilityLimits]:
@@ -73,7 +73,7 @@ class CapabilitySet:
         }
 
 
-class CapabilityDenied(Exception):
+class CapabilityDeniedError(Exception):
     """请求的 capability 当前不可用。"""
 
     def __init__(self, cap: Cap, suggestion: str | None = None) -> None:

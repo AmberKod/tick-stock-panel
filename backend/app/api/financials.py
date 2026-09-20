@@ -8,9 +8,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
-from app.services.financial_analyzer import analyze_financials_stream
 from app.services import ai_reports
+from app.services.financial_analyzer import analyze_financials_stream
+from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,8 @@ def _financial_allowed(capset) -> bool:
 def _require_financial(capset) -> None:
     """_require_financial(capset) 的 custom 感知版本。"""
     if not _financial_allowed(capset):
-        from app.tickflow.capabilities import CapabilityDenied
-        raise CapabilityDenied(Cap.FINANCIAL)
+        from app.tickflow.capabilities import CapabilityDeniedError
+        raise CapabilityDeniedError(Cap.FINANCIAL)
 
 
 @router.get("/status")

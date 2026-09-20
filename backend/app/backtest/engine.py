@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import threading
@@ -27,10 +28,70 @@ from app.backtest.matrix import (
 )
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
+from app.markets.registry import get_profile
 from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+
+def validate_backtest_market(
+    asset_type: str,
+    symbols: list[str] | tuple[str, ...] | None = None,
+    *,
+    minute_fill: bool = False,
+    exit_fill: str | None = None,
+) -> None:
+    """Reject mixed-market pools and unsupported foreign-market minute execution."""
+    if asset_type not in {"stock", "etf", "index", "hk", "us"}:
+        raise ValueError(f"不支持的回测市场: {asset_type}")
+    if asset_type in {"hk", "us"} and (minute_fill or exit_fill == "signal_next_minute"):
+        raise ValueError("港美股本批仅支持日线回测,暂不支持分钟成交")
+    profile = get_profile(asset_type if asset_type in {"hk", "us"} else "CN")
+    invalid: list[str] = []
+    for symbol in symbols or ():
+        value = str(symbol).strip().upper()
+        if asset_type in {"hk", "us"}:
+            suffix = profile.symbol_suffixes[0]
+            valid = value.endswith(suffix) and len(value) > len(suffix)
+            valid = valid and not any(char.isspace() for char in value)
+        else:
+            valid = not value.endswith((".HK", ".US"))
+        if not valid:
+            invalid.append(str(symbol))
+    if invalid:
+        raise ValueError(f"回测只支持单一市场,以下标的不属于 {profile.market}: {', '.join(invalid[:10])}")
+
+
+_EXECUTION_REASONS = {
+    "buy_lot_size_missing": "缺少可信的每手股数,无法成交",
+    "buy_lot_size_unverified": "每手资料存在冲突或尚未生效,无法成交",
+    "buy_currency_unsupported": "港股回测仅支持港币柜台,无法成交",
+    "buy_currency_unknown": "柜台币种未知,无法成交",
+    "buy_lot_size": "可用买入预算不足一个最小交易单位",
+    "buy_cash": "可用资金不足",
+    "buy_invalid_price": "买入价格缺失或无效",
+    "sell_invalid_price": "卖出价格缺失或无效",
+    "buy_suspended": "买入日缺少可交易行情",
+    "sell_suspended": "卖出日缺少可交易行情",
+    "buy_limit_up": "一字涨停无法买入",
+    "sell_limit_down": "一字跌停无法卖出",
+    "buy_no_next_bar": "买入信号后没有下一根可用日线",
+    "sell_no_future": "买入后没有可用退出日线",
+    "sell_same_day": "市场规则不允许买入当日卖出",
+    "buy_no_slot": "持仓数量已达上限",
+    "buy_exposure": "可用仓位预算不足",
+    "buy_score_filter": "评分不满足买入条件",
+    "buy_same_day_reentry": "本日已卖出,不重复买入",
+    "pending_exit": "卖出未成交,保留待退出持仓",
+}
+
+
+def _execution_diagnostics(counts: dict[tuple[str | None, str], int]) -> list[dict]:
+    return [
+        {"symbol": symbol, "reason": reason, "message": _EXECUTION_REASONS.get(reason, reason), "count": count}
+        for (symbol, reason), count in counts.items() if count > 0
+    ]
 
 
 def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> float:
@@ -72,6 +133,10 @@ class MatcherConfig:
     # 分钟K精确成交: 开启后, 信号触发日的成交价用当日分钟K优化
     # (有参考线→穿越价, 无参考线→VWAP)。数据缺失时降级为日K口径。
     minute_fill: bool = False
+    asset_type: str = "stock"
+    # None 表示尚未读取;空映射表示已读取但没有可信每手数据。
+    lot_sizes: dict[str, int] | None = None
+    buy_stamp_tax_pct: float = 0.0
 
     def __post_init__(self) -> None:
         # 解析最终口径: 优先 entry_fill/exit_fill, 否则回退到 matching (向后兼容)。
@@ -79,19 +144,59 @@ class MatcherConfig:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        validate_backtest_market(self.asset_type, minute_fill=self.minute_fill, exit_fill=self.exit_fill)
+
+    @property
+    def same_day_sell_allowed(self) -> bool:
+        profile = get_profile(self.asset_type if self.asset_type in {"hk", "us"} else "CN")
+        return profile.same_day_sell_allowed
 
     def _commission_pct(self) -> float:
         # commission_pct 显式给出时优先, 否则回退 fees_pct (向后兼容双边佣金)。
         return self.commission_pct if self.commission_pct is not None else self.fees_pct
 
     def buy_cost_pct(self) -> float:
-        # 买入腿: 佣金 + 滑点。
-        return self._commission_pct() + self.slippage_bps / 10000.0
+        # 可编辑成本假设,不宣称覆盖市场全部法定税费。
+        return self._commission_pct() + self.buy_stamp_tax_pct + self.slippage_bps / 10000.0
 
     def sell_cost_pct(self) -> float:
         # 卖出腿: 佣金 + 印花税 + 滑点。印花税未设时为 0 (向后兼容)。
         stamp = self.stamp_tax_pct if self.stamp_tax_pct is not None else 0.0
         return self._commission_pct() + stamp + self.slippage_bps / 10000.0
+
+
+def _entry_day_exit(
+    config: MatcherConfig,
+    entry_price: float,
+    high: float,
+    low: float,
+    close: float,
+    exit_signal: bool,
+) -> tuple[str | None, float | None]:
+    """Check an already active protective order after a foreign-market open fill.
+
+    The daily bar does not identify the intraday high/low order. Use the entry
+    price as the initial trailing anchor and prefer the loss barrier if both
+    barriers are touched. A close entry has no earlier intraday exposure.
+    """
+    if not config.same_day_sell_allowed or config.entry_fill != "open_t+1":
+        return None, None
+    stops: list[tuple[float, str]] = []
+    if config.stop_loss_pct is not None:
+        stops.append((entry_price * (1 - abs(config.stop_loss_pct)), "stop_loss"))
+    if config.trailing_stop_pct is not None:
+        stops.append((entry_price * (1 - abs(config.trailing_stop_pct)), "trailing_stop"))
+    if stops and np.isfinite(low):
+        price, reason = max(stops, key=lambda item: item[0])
+        if price > 0 and low <= price:
+            return reason, price
+    if config.take_profit_pct is not None and np.isfinite(high):
+        price = entry_price * (1 + abs(config.take_profit_pct))
+        if high >= price:
+            return "take_profit", price
+    if exit_signal and config.exit_fill == "close_t" and np.isfinite(close) and close > 0:
+        return "signal", close
+    return None, None
 
 
 @dataclass
@@ -177,7 +282,7 @@ class _CacheEntry:
 class _InFlight:
     """同 key 正在计算的占位: leader 算完通过 done 唤醒所有跟随者复用结果。"""
 
-    __slots__ = ("done", "df", "error")
+    __slots__ = ("df", "done", "error")
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -313,6 +418,103 @@ class BacktestEngine:
 
     # ── 数据加载 ──────────────────────────────────────
 
+    def resolve_lot_sizes(self, config: MatcherConfig, symbols: list[str] | tuple[str, ...]) -> dict[str, int]:
+        """Resolve each market's trading unit once per simulation, without a HK fallback."""
+        return self._resolve_instrument_execution_metadata(config, symbols)[0]
+
+    def _resolve_instrument_execution_metadata(
+        self, config: MatcherConfig, symbols: list[str] | tuple[str, ...],
+    ) -> tuple[dict[str, int], dict[str, str], list[str], dict[str, tuple[str | None, str | None, str | None]]]:
+        """Read one instrument snapshot for every matcher, including explicit lot overrides."""
+        validate_backtest_market(config.asset_type, symbols)
+        profile = get_profile(config.asset_type if config.asset_type in {"hk", "us"} else "CN")
+        if profile.lot_size is not None:
+            return dict.fromkeys(symbols, profile.lot_size), {}, [], {}
+        loader = getattr(self.repo, "get_instruments_asset", None)
+        instruments = loader(config.asset_type) if callable(loader) else pl.DataFrame()
+        metadata: dict[str, dict] = {}
+        conflicting: set[str] = set()
+        for row in instruments.iter_rows(named=True):
+            symbol = str(row.get("symbol", ""))
+            previous = metadata.get(symbol)
+            if previous is not None and any(previous.get(key) != row.get(key) for key in (
+                "currency", "lot_size", "lot_size_status", "lot_size_as_of",
+                "lot_size_effective_from", "lot_size_effective_to", "instrument_status", "instrument_status_as_of",
+            )):
+                conflicting.add(symbol)
+            metadata[symbol] = row
+        resolved: dict[str, int] = {}
+        blocked: dict[str, str] = {}
+        snapshot_dates: set[str] = set()
+        validity: dict[str, tuple[str | None, str | None, str | None]] = {}
+        for symbol in symbols:
+            row = metadata.get(symbol, {})
+            bounds = []
+            invalid_bounds = False
+            for key in ("lot_size_effective_from", "lot_size_effective_to", "instrument_status_as_of"):
+                try:
+                    bounds.append(date.fromisoformat(str(row[key])[:10]).isoformat() if row.get(key) is not None else None)
+                except ValueError:
+                    invalid_bounds = True
+                    bounds.append(None)
+            inactive = row.get("instrument_status") in {"delisted", "temporary_counter_closed", "rights_trading_ended"}
+            if inactive and (bounds[2] is None or not row.get("instrument_status_source")):
+                invalid_bounds = True
+            validity[symbol] = (bounds[0], bounds[1], bounds[2] if inactive else None)
+            if invalid_bounds:
+                blocked[symbol] = "buy_lot_size_unverified"
+                continue
+            currency = str(row.get("currency") or "").strip().upper()
+            if not currency or currency in {"UNKNOWN", "NONE", "NAN"}:
+                blocked[symbol] = "buy_currency_unknown"
+                continue
+            if currency != "HKD":
+                blocked[symbol] = "buy_currency_unsupported"
+                continue
+            as_of = None
+            if row.get("lot_size_as_of") is not None:
+                try:
+                    as_of = date.fromisoformat(str(row["lot_size_as_of"])[:10])
+                except ValueError:
+                    blocked[symbol] = "buy_lot_size_unverified"
+                    continue
+            status = row.get("lot_size_status")
+            if symbol in conflicting or status not in {None, "", "verified_snapshot", "missing"} or (as_of is not None and as_of > date.today()):
+                blocked[symbol] = "buy_lot_size_unverified"
+                continue
+            if status == "missing":
+                blocked[symbol] = "buy_lot_size_missing"
+                continue
+            value = (config.lot_sizes or {}).get(symbol, row.get("lot_size"))
+            if value is None or isinstance(value, (bool, np.bool_)):
+                blocked[symbol] = "buy_lot_size_missing"
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                blocked[symbol] = "buy_lot_size_missing"
+                continue
+            if np.isfinite(number) and number > 0 and number.is_integer():
+                resolved[symbol] = int(number)
+                if as_of is not None:
+                    snapshot_dates.add(as_of.isoformat())
+            else:
+                blocked[symbol] = "buy_lot_size_missing"
+        return resolved, blocked, sorted(snapshot_dates), validity
+
+    @staticmethod
+    def _instrument_buy_block(
+        symbol: str, execution_date: str, lot_sizes: dict[str, int], blocked: dict[str, str],
+        validity: dict[str, tuple[str | None, str | None, str | None]],
+    ) -> str:
+        """Apply dated restrictions on the execution bar, including delayed entries."""
+        effective_from, effective_to, inactive_from = validity.get(symbol, (None, None, None))
+        if inactive_from is not None and execution_date >= inactive_from:
+            return "buy_instrument_inactive"
+        if (effective_from is not None and execution_date < effective_from) or (effective_to is not None and execution_date > effective_to):
+            return "buy_lot_size_unverified"
+        return blocked.get(symbol, "buy_lot_size_missing") if symbol not in lot_sizes else ""
+
     def data_generation(self, asset_type: str = "stock") -> str | None:
         loader = getattr(self.repo, "get_matrix_data_generation", None)
         return loader(asset_type) if callable(loader) else None
@@ -377,17 +579,23 @@ class BacktestEngine:
         asset_type: str = "stock",
     ) -> pl.DataFrame:
         """按解析后的依赖加载窄基础列并计算回测所需特征。"""
+        from app.backtest.fundamentals import HK_DENOMINATOR_NAMES
         from app.indicators.pipeline import (
             compute_indicators,
             compute_limit_signals,
             compute_signals,
         )
 
+        fundamental_names = sorted(getattr(feature_plan, "fundamental_columns", frozenset()) or frozenset())
+        load_columns = set(feature_plan.base_columns)
+        if asset_type == "hk" and set(fundamental_names) & HK_DENOMINATOR_NAMES:
+            load_columns.update({"raw_close", "currency", "raw_price_verified", "volume", "volume_unit"})
+        financial_generation = self.data_generation(asset_type) if asset_type == "hk" else None
         df = self.load_panel(
             symbols,
             start,
             end,
-            columns=sorted(feature_plan.base_columns),
+            columns=sorted(load_columns),
             asset_type=asset_type,
         )
         if df.is_empty():
@@ -398,19 +606,21 @@ class BacktestEngine:
             load_fundamental_snapshot,
         )
 
-        fundamental_names = sorted(
-            getattr(feature_plan, "fundamental_columns", frozenset())
-            or frozenset()
-        )
         if fundamental_names:
             # 财务因子列不落 enriched 存储, 在加载口按公告日门控并入。
             df = attach_fundamental_factors(
                 df,
                 load_fundamental_snapshot(
-                    self.repo.store.data_dir if self.repo is not None else None
+                    self.repo.store.data_dir if self.repo is not None else None,
+                    market="HK" if asset_type == "hk" else None,
+                    names=fundamental_names,
                 ),
                 fundamental_names,
             )
+            if asset_type == "hk":
+                from app.backtest.fundamentals import require_hk_financial_coverage
+
+                require_hk_financial_coverage(df, fundamental_names, context=f"{start} 至 {end}")
 
         instruments = (
             self.repo.get_instruments_asset(asset_type)
@@ -463,6 +673,7 @@ class BacktestEngine:
                 .alias(c)
                 for c in float_cols
             ])
+        self.assert_data_generation(asset_type, financial_generation)
         return df
 
     def load_market_data_matrix_for_backtest(
@@ -485,7 +696,6 @@ class BacktestEngine:
         from app.tickflow.repository import enriched_dirname
 
         parquet_root = self.repo.store.data_dir / enriched_dirname(asset_type)
-        instruments = self.repo.get_instruments_asset(asset_type)
         field_columns = (
             set(feature_plan.base_columns)
             | set(feature_plan.instrument_columns)
@@ -519,12 +729,17 @@ class BacktestEngine:
         attempts = 1 if expected_generation is not None else 2
         for attempt in range(attempts):
             try:
+                instruments = self.repo.get_instruments_asset(asset_type)
+                scoped_symbols = (
+                    self.repo.get_market_enriched_symbols(asset_type, symbols)
+                    if asset_type in ("hk", "us") else symbols
+                )
                 market = load_market_data_matrix_from_parquet(
                     parquet_root,
                     start,
                     end,
                     field_columns=field_columns,
-                    symbols=symbols,
+                    symbols=scoped_symbols,
                     instruments=instruments,
                     cache_root=cache_root,
                     coverage_start=coverage_start,
@@ -538,19 +753,40 @@ class BacktestEngine:
                     cancel_event=cancel_event,
                 )
                 self.assert_data_generation(asset_type, source_generation)
-                from app.backtest.fundamentals import attach_matrix_fundamental_fields
+                if asset_type == "hk" and market.source_generation != source_generation:
+                    raise EnrichedGenerationUnavailableError(
+                        "港股矩阵来源版本与请求不一致,请重新加载"
+                    )
+                from app.backtest.fundamentals import (
+                    HK_DENOMINATOR_NAMES,
+                    attach_matrix_fundamental_fields,
+                    require_hk_financial_coverage,
+                )
 
                 fundamental_names = sorted(
                     getattr(feature_plan, "fundamental_columns", frozenset())
                     or frozenset()
                 )
                 if fundamental_names:
+                    price_metadata = None
+                    if asset_type == "hk" and set(fundamental_names) & HK_DENOMINATOR_NAMES:
+                        price_metadata = self.repo.read_market_enriched(
+                            "hk", start=start, end=end, symbols=list(market.symbols),
+                            columns=["raw_close", "raw_price_verified", "currency", "volume", "volume_unit"],
+                        )
                     # 财务因子不落 enriched 存储: 矩阵加载后按公告日门控附加字段。
                     market = attach_matrix_fundamental_fields(
                         market,
                         self.repo.store.data_dir if self.repo is not None else None,
                         fundamental_names,
+                        price_metadata=price_metadata,
                     )
+                    if asset_type == "hk":
+                        require_hk_financial_coverage(
+                            pl.DataFrame({name: market.fields[name].reshape(-1) for name in fundamental_names}),
+                            fundamental_names, context=f"{start} 至 {end}",
+                        )
+                self.assert_data_generation(asset_type, source_generation)
                 return market
             except EnrichedGenerationUnavailableError:
                 if attempt + 1 >= attempts:
@@ -587,10 +823,14 @@ class BacktestEngine:
                     elapsed = (time.perf_counter() - t0) * 1000
                     logger.info("load_panel(cache): %.0fms, %d rows, %d columns", elapsed, len(cached), len(cached.columns))
                     return cached
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("backtest load panel cache miss: %s", e)
 
         from app.tickflow.repository import enriched_dirname
+        if asset_type in ("hk", "us"):
+            return self.repo.read_market_enriched(
+                asset_type, start=start, end=end, symbols=symbols, columns=columns,
+            )
         enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
 
         try:
@@ -788,8 +1028,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -818,11 +1058,12 @@ class BacktestEngine:
         matrix: MarketMatrix,
         raw_candidates: int,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None",
-        cancel_event: "threading.Event | None",
+        progress_cb: Callable[[dict], None] | None,
+        cancel_event: threading.Event | None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         options = options or SimulationOptions()
+        lot_sizes, instrument_blocks, lot_snapshot_dates, instrument_validity = self._resolve_instrument_execution_metadata(config, matrix.symbols)
         entry_prices = matrix.open if config.entry_fill == "open_t+1" else matrix.close
         exit_prices = matrix.open if config.exit_fill == "open_t+1" else matrix.close
         buy_cost_pct = config.buy_cost_pct()
@@ -850,8 +1091,12 @@ class BacktestEngine:
                 loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, "stock")
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
-        def _count(key: str) -> None:
+        diagnostic_counts: dict[tuple[str | None, str], int] = {}
+
+        def _count(key: str, symbol: str | None = None) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
+            diagnostic_key = (symbol, key)
+            diagnostic_counts[diagnostic_key] = diagnostic_counts.get(diagnostic_key, 0) + 1
 
         def _valid_price(value) -> bool:
             return bool(np.isfinite(value) and value > 0)
@@ -893,6 +1138,8 @@ class BacktestEngine:
             )
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
+            if config.asset_type in {"hk", "us"}:
+                return False
             if not matrix.tradable[time_id, asset_id]:
                 return False
             prices = [
@@ -906,6 +1153,9 @@ class BacktestEngine:
             return bool(flags[time_id, asset_id]) and same
 
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
+            reason = self._instrument_buy_block(matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10], lot_sizes, instrument_blocks, instrument_validity)
+            if reason:
+                return False, reason
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[time_id, asset_id]):
@@ -1001,7 +1251,7 @@ class BacktestEngine:
             exit_price = float(override) if override is not None else _refill(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
-            shares = 100.0
+            shares = float(lot_sizes[matrix.symbols[asset_id]])
             entry_value = shares * pos["entry_price"] * (1 + buy_cost_pct)
             exit_value = shares * exit_price * (1 - sell_cost_pct)
             pnl_amount = exit_value - entry_value
@@ -1037,18 +1287,16 @@ class BacktestEngine:
             if cancel_event is not None and cancel_event.is_set():
                 break
             if progress_cb is not None and (seq == 1 or seq % 500 == 0):
-                try:
+                with contextlib.suppress(Exception):
                     progress_cb({
                         "day": seq,
                         "total": len(order),
                         "date": matrix.timestamp_labels[time_id][:10],
                         "equity": 0,
                     })
-                except Exception:
-                    pass
             ok, blocked = _can_buy(time_id, asset_id)
             if not ok:
-                _count(blocked)
+                _count(blocked, matrix.symbols[asset_id])
                 continue
             score = _matrix_entry_score(matrix, time_id, asset_id)
             if config.score_min is not None and score < config.score_min:
@@ -1078,13 +1326,21 @@ class BacktestEngine:
                 "entry_price": entry_price,
                 "entry_score": score,
                 "hold_days": 0,
-                "max_high": max(entry_price, float(matrix.high[time_id, asset_id])),
+                "max_high": (max(entry_price, float(matrix.high[time_id, asset_id]))
+                             if config.entry_fill == "open_t+1" else entry_price),
                 "pending_exit_reason": None,
                 "pending_exit_signal_date": None,
                 "pending_exit_signal_id": None,
                 "pending_exit_next_open": False,
                 "blocked_exit_days": 0,
             }
+            reason, price = _entry_day_exit(
+                config, entry_price, float(matrix.high[time_id, asset_id]),
+                float(matrix.low[time_id, asset_id]), float(matrix.close[time_id, asset_id]),
+                bool(matrix.exit[time_id, asset_id]),
+            )
+            if reason and _try_close(pos, time_id, asset_id, reason, entry_date, price):
+                continue
             closed = False
             for future in future_times:
                 pos["hold_days"] += 1
@@ -1123,6 +1379,9 @@ class BacktestEngine:
             execution_stats,
             options=options,
         )
+        result.stats["execution_diagnostics"] = _execution_diagnostics(diagnostic_counts)
+        result.stats["lot_sizes"] = lot_sizes if config.asset_type == "hk" else {}
+        result.stats["lot_size_snapshot_dates"] = lot_snapshot_dates
         result.stats["market_matrix_shape"] = list(matrix.shape)
         result.stats["market_matrix_bytes"] = matrix.nbytes
         return result
@@ -1132,8 +1391,8 @@ class BacktestEngine:
         matrix: MarketMatrix,
         raw_candidates: int,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         """Run independent-candidate simulation on a prebuilt MarketMatrix."""
@@ -1147,8 +1406,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -1159,6 +1418,7 @@ class BacktestEngine:
         n = len(panel)
         panel_dates = panel["date"].to_numpy()
         panel_symbols = panel["symbol"].to_numpy()
+        lot_sizes, instrument_blocks, lot_snapshot_dates, instrument_validity = self._resolve_instrument_execution_metadata(config, tuple(dict.fromkeys(panel_symbols)))
 
         ent_raw = np.zeros(n, dtype=bool)
         ext_raw = np.zeros(n, dtype=bool)
@@ -1285,8 +1545,12 @@ class BacktestEngine:
             "pending_exit": 0,
         }
 
-        def _count(key: str) -> None:
+        diagnostic_counts: dict[tuple[str | None, str], int] = {}
+
+        def _count(key: str, symbol: str | None = None) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
+            diagnostic_key = (symbol, key)
+            diagnostic_counts[diagnostic_key] = diagnostic_counts.get(diagnostic_key, 0) + 1
 
         def _valid_price(value) -> bool:
             try:
@@ -1298,32 +1562,37 @@ class BacktestEngine:
         def _is_suspended(idx: int) -> bool:
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            lo = float(low_prices[idx])
             c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
+            valid_bar = any(_valid_price(x) for x in (o, h, lo, c))
             if not valid_bar:
                 return True
             if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
+                same_price = max(o, h, lo, c) - min(o, h, lo, c) <= max(abs(c) * 1e-4, 0.01)
                 if same_price:
                     return True
             return False
 
         def _is_one_price_limit(idx: int, direction: str) -> bool:
+            if config.asset_type in {"hk", "us"}:
+                return False
             if _is_suspended(idx):
                 return False
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            lo = float(low_prices[idx])
             c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
+            if not all(_valid_price(x) for x in (o, h, lo, c)):
                 return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
+            same_price = max(o, h, lo, c) - min(o, h, lo, c) <= max(abs(c) * 1e-4, 0.01)
             if direction == "up":
                 return bool(limit_up_flags[idx]) and same_price
             return bool(limit_down_flags[idx]) and same_price
 
         def _can_buy(idx: int) -> tuple[bool, str]:
+            reason = self._instrument_buy_block(str(panel_symbols[idx]), self._date_str(panel_dates[idx]), lot_sizes, instrument_blocks, instrument_validity)
+            if reason:
+                return False, reason
             if _is_suspended(idx):
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[idx]):
@@ -1403,7 +1672,7 @@ class BacktestEngine:
                 exit_price = float(exit_price_override)
             else:
                 exit_price = _refill_price(idx, "sell", float(exit_prices[idx]))
-            shares = 100.0
+            shares = float(lot_sizes[str(pos["symbol"])])
             entry_value = shares * float(pos["entry_price"]) * (1 + buy_cost_pct)
             exit_value = shares * exit_price * (1 - sell_cost_pct)
             pnl_amount = exit_value - entry_value
@@ -1439,19 +1708,17 @@ class BacktestEngine:
                 logger.info("全量模拟被用户取消 (第 %d/%d 个候选)", seq, len(candidate_indices))
                 break
             if progress_cb is not None and (seq == 1 or seq % 500 == 0):
-                try:
+                with contextlib.suppress(Exception):
                     progress_cb({
                         "day": seq,
                         "total": len(candidate_indices),
                         "date": self._date_str(panel_dates[entry_idx]),
                         "equity": 0,
                     })
-                except Exception:
-                    pass
 
             ok, block_reason = _can_buy(entry_idx)
             if not ok:
-                _count(block_reason)
+                _count(block_reason, str(panel_symbols[entry_idx]))
                 continue
             score = float(trade_scores[entry_idx] or 0.0)
             if score_min is not None and score < score_min:
@@ -1485,9 +1752,15 @@ class BacktestEngine:
                 "blocked_exit_days": 0,
             }
             hi = float(high_prices[entry_idx])
-            if _valid_price(hi):
+            if config.entry_fill == "open_t+1" and _valid_price(hi):
                 pos["max_high"] = max(float(pos["max_high"]), hi)
 
+            reason, price = _entry_day_exit(
+                config, entry_price, float(high_prices[entry_idx]), float(low_prices[entry_idx]),
+                float(close_prices[entry_idx]), bool(ext[entry_idx]),
+            )
+            if reason and _try_close(pos, entry_idx, reason, pos["entry_date"], price):
+                continue
             closed = False
             last_idx = entry_idx
             for idx in rows[start_pos + 1:]:
@@ -1495,6 +1768,8 @@ class BacktestEngine:
                 pos["hold_days"] = int(pos["hold_days"]) + 1
                 d_str = self._date_str(panel_dates[idx])
 
+                # B023 豁免: 闭包在同一次循环迭代内立即调用 (_scheduled_reason() 在本就执行),
+                # 不逃逸到后续迭代, 循环变量绑定无风险。
                 def _scheduled_reason() -> tuple[str | None, str]:
                     if pos.get("pending_exit_reason"):
                         return str(pos["pending_exit_reason"]), str(pos.get("pending_exit_signal_date") or d_str)
@@ -1528,7 +1803,11 @@ class BacktestEngine:
                 elif not pos.get("pending_exit_reason"):
                     _try_close(pos, last_idx, "end", self._date_str(panel_dates[last_idx]))
 
-        return self._calc_independent_candidate_result(trades, n_candidates, execution_stats)
+        result = self._calc_independent_candidate_result(trades, n_candidates, execution_stats)
+        result.stats["execution_diagnostics"] = _execution_diagnostics(diagnostic_counts)
+        result.stats["lot_sizes"] = lot_sizes if config.asset_type == "hk" else {}
+        result.stats["lot_size_snapshot_dates"] = lot_snapshot_dates
+        return result
 
     # ── 分钟K精确成交 ──────────────────────────────────
 
@@ -1650,7 +1929,7 @@ class BacktestEngine:
             batch = date_objs[i:i + BATCH]
             try:
                 df = repo.get_minute_by_dates(symbols, batch, asset_type=asset_type)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("minute fill data load failed (batch %d-%d): %s", i, i + len(batch), e)
                 continue
             if df.is_empty():
@@ -1676,8 +1955,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -1703,8 +1982,8 @@ class BacktestEngine:
         self,
         matrix: MarketMatrix,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         """Run the production Python matcher on a prebuilt MarketMatrix."""
@@ -1716,12 +1995,13 @@ class BacktestEngine:
         self,
         matrix: MarketMatrix,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None",
-        cancel_event: "threading.Event | None",
+        progress_cb: Callable[[dict], None] | None,
+        cancel_event: threading.Event | None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         options = options or SimulationOptions()
         time_count, asset_count = matrix.shape
+        lot_sizes, instrument_blocks, lot_snapshot_dates, instrument_validity = self._resolve_instrument_execution_metadata(config, matrix.symbols)
         entry_prices = matrix.open if config.entry_fill == "open_t+1" else matrix.close
         exit_prices = matrix.open if config.exit_fill == "open_t+1" else matrix.close
         buy_cost_pct = config.buy_cost_pct()
@@ -1768,8 +2048,12 @@ class BacktestEngine:
                 )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
-        def _count(key: str) -> None:
+        diagnostic_counts: dict[tuple[str | None, str], int] = {}
+
+        def _count(key: str, symbol: str | None = None) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
+            diagnostic_key = (symbol, key)
+            diagnostic_counts[diagnostic_key] = diagnostic_counts.get(diagnostic_key, 0) + 1
 
         def _valid_price(value) -> bool:
             return bool(np.isfinite(value) and value > 0)
@@ -1818,6 +2102,8 @@ class BacktestEngine:
             )
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
+            if config.asset_type in {"hk", "us"}:
+                return False
             if not matrix.tradable[time_id, asset_id]:
                 return False
             prices = (
@@ -1833,6 +2119,9 @@ class BacktestEngine:
             return bool(flag[time_id, asset_id]) and same_price
 
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
+            reason = self._instrument_buy_block(matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10], lot_sizes, instrument_blocks, instrument_validity)
+            if reason:
+                return False, reason
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[time_id, asset_id]):
@@ -1957,15 +2246,13 @@ class BacktestEngine:
                     logger.info("回测被用户取消 (第 %d/%d 天)", time_id, time_count)
                     break
                 if progress_cb is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         progress_cb({
                             "day": time_id + 1,
                             "total": time_count,
                             "date": date_text,
                             "equity": round(cash + _market_value(), 2),
                         })
-                    except Exception:
-                        pass
 
             sold_today: set[int] = set()
             for pos in positions.values():
@@ -2040,7 +2327,7 @@ class BacktestEngine:
                         continue
                     ok, blocked = _can_buy(time_id, asset)
                     if not ok:
-                        _count(blocked)
+                        _count(blocked, matrix.symbols[asset])
                         continue
                     score = _matrix_entry_score(matrix, time_id, asset)
                     if config.score_min is not None and score < config.score_min:
@@ -2069,7 +2356,7 @@ class BacktestEngine:
                             if raw_weights.sum() > 0:
                                 weights = raw_weights / raw_weights.sum()
                         total_budget = min(cash, exposure_capacity, target_value * len(selected))
-                        for (asset_id, entry_score), weight in zip(selected, weights):
+                        for (asset_id, entry_score), weight in zip(selected, weights, strict=False):
                             if len(positions) >= max_positions:
                                 _count("buy_no_slot")
                                 break
@@ -2083,7 +2370,8 @@ class BacktestEngine:
                             entry_price = _refill_price(
                                 time_id, asset_id, "buy", float(entry_prices[time_id, asset_id])
                             )
-                            shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / 100) * 100
+                            lot_size = lot_sizes[matrix.symbols[asset_id]]
+                            shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / lot_size) * lot_size
                             entry_value = shares * entry_price * (1 + buy_cost_pct)
                             if shares <= 0:
                                 _count("buy_lot_size")
@@ -2106,7 +2394,7 @@ class BacktestEngine:
                                 "entry_price": entry_price,
                                 "entry_value": entry_value,
                                 "shares": shares,
-                                "lots": shares / 100,
+                                "lots": shares / lot_size,
                                 "position_pct": entry_value / equity_before if equity_before > 0 else 0.0,
                                 "entry_score": entry_score,
                                 "max_high": entry_price,
@@ -2118,7 +2406,21 @@ class BacktestEngine:
                                 "blocked_exit_days": 0,
                             }
 
+            if config.same_day_sell_allowed and config.entry_fill == "open_t+1":
+                for asset_id, pos in list(positions.items()):
+                    if pos["entry_date"] != date_text:
+                        continue
+                    reason, price = _entry_day_exit(
+                        config, float(pos["entry_price"]), float(matrix.high[time_id, asset_id]),
+                        float(matrix.low[time_id, asset_id]), float(matrix.close[time_id, asset_id]),
+                        bool(matrix.exit[time_id, asset_id]),
+                    )
+                    if reason:
+                        _try_sell(time_id, asset_id, reason, date_text, sold_today, price)
+
             for asset_id, pos in positions.items():
+                if config.entry_fill == "close_t" and pos["entry_date"] == date_text:
+                    continue
                 high_price = float(matrix.high[time_id, asset_id])
                 if _valid_price(high_price):
                     pos["max_high"] = max(float(pos["max_high"]), high_price)
@@ -2160,6 +2462,9 @@ class BacktestEngine:
             1,
         )
         stats["execution"] = execution_stats
+        stats["execution_diagnostics"] = _execution_diagnostics(diagnostic_counts)
+        stats["lot_sizes"] = lot_sizes if config.asset_type == "hk" else {}
+        stats["lot_size_snapshot_dates"] = lot_snapshot_dates
         stats["pending_exit_positions"] = sum(1 for pos in positions.values() if pos.get("pending_exit_reason"))
         stats["market_matrix_shape"] = [time_count, asset_count]
         stats["market_matrix_bytes"] = matrix.nbytes
@@ -2181,8 +2486,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -2193,6 +2498,7 @@ class BacktestEngine:
         n = len(panel)
         panel_dates = panel["date"].to_numpy()
         panel_symbols = panel["symbol"].to_numpy()
+        lot_sizes, instrument_blocks, lot_snapshot_dates, instrument_validity = self._resolve_instrument_execution_metadata(config, tuple(dict.fromkeys(panel_symbols)))
 
         ent_raw = np.zeros(n, dtype=bool)
         ext_raw = np.zeros(n, dtype=bool)
@@ -2342,8 +2648,12 @@ class BacktestEngine:
             "pending_exit": 0,
         }
 
-        def _count(key: str) -> None:
+        diagnostic_counts: dict[tuple[str | None, str], int] = {}
+
+        def _count(key: str, symbol: str | None = None) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
+            diagnostic_key = (symbol, key)
+            diagnostic_counts[diagnostic_key] = diagnostic_counts.get(diagnostic_key, 0) + 1
 
         def _valid_price(value) -> bool:
             try:
@@ -2362,32 +2672,37 @@ class BacktestEngine:
         def _is_suspended(idx: int) -> bool:
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            lo = float(low_prices[idx])
             c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
+            valid_bar = any(_valid_price(x) for x in (o, h, lo, c))
             if not valid_bar:
                 return True
             if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
+                same_price = max(o, h, lo, c) - min(o, h, lo, c) <= max(abs(c) * 1e-4, 0.01)
                 if same_price:
                     return True
             return False
 
         def _is_one_price_limit(idx: int, direction: str) -> bool:
+            if config.asset_type in {"hk", "us"}:
+                return False
             if _is_suspended(idx):
                 return False
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            lo = float(low_prices[idx])
             c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
+            if not all(_valid_price(x) for x in (o, h, lo, c)):
                 return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
+            same_price = max(o, h, lo, c) - min(o, h, lo, c) <= max(abs(c) * 1e-4, 0.01)
             if direction == "up":
                 return bool(limit_up_flags[idx]) and same_price
             return bool(limit_down_flags[idx]) and same_price
 
         def _can_buy(idx: int) -> tuple[bool, str]:
+            reason = self._instrument_buy_block(str(panel_symbols[idx]), self._date_str(panel_dates[idx]), lot_sizes, instrument_blocks, instrument_validity)
+            if reason:
+                return False, reason
             if _is_suspended(idx):
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[idx]):
@@ -2580,7 +2895,7 @@ class BacktestEngine:
                     continue
                 ok, block_reason = _can_buy(idx)
                 if not ok:
-                    _count(block_reason)
+                    _count(block_reason, sym)
                     continue
                 score = float(trade_scores[idx] or 0.0)
                 if score_min is not None and score < score_min:
@@ -2619,7 +2934,7 @@ class BacktestEngine:
                     weights = raw / raw.sum()
             total_budget = min(cash, exposure_capacity, target_position_value * len(selected))
 
-            for (idx, sym, _score), weight in zip(selected, weights):
+            for (idx, sym, _score), weight in zip(selected, weights, strict=False):
                 if len(positions) >= max_positions:
                     _count("buy_no_slot")
                     break
@@ -2631,7 +2946,8 @@ class BacktestEngine:
                     _count("buy_exposure")
                     continue
                 entry_price = _refill_price(idx, "buy", float(entry_prices[idx]))
-                shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / 100) * 100
+                lot_size = lot_sizes[sym]
+                shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / lot_size) * lot_size
                 entry_value = shares * entry_price * (1 + buy_cost_pct)
                 if shares <= 0:
                     _count("buy_lot_size")
@@ -2652,7 +2968,7 @@ class BacktestEngine:
                     "entry_price": entry_price,
                     "entry_value": entry_value,
                     "shares": shares,
-                    "lots": shares / 100,
+                    "lots": shares / lot_size,
                     "position_pct": entry_value / account_equity_before_buy if account_equity_before_buy > 0 else 0.0,
                     "entry_score": _score,
                     "max_high": entry_price,
@@ -2668,15 +2984,13 @@ class BacktestEngine:
                     logger.info("回测被用户取消 (第 %d/%d 天)", d_idx, len(all_dates))
                     break
                 if progress_cb is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         progress_cb({
                             "day": d_idx + 1,
                             "total": len(all_dates),
                             "date": str(d_str)[:10],
                             "equity": round(cash + _market_value(), 2),
                         })
-                    except Exception:
-                        pass
 
             idxs = date_to_indices[d_str]
             row_by_symbol = {str(panel_symbols[i]): i for i in idxs}
@@ -2693,7 +3007,21 @@ class BacktestEngine:
             if d_idx < len(all_dates) - 1:
                 _process_entries(d_str, idxs, sold_today)
 
+            if config.same_day_sell_allowed and config.entry_fill == "open_t+1":
+                for sym, pos in list(positions.items()):
+                    idx = row_by_symbol.get(sym)
+                    if pos["entry_date"] != d_str or idx is None:
+                        continue
+                    reason, price = _entry_day_exit(
+                        config, float(pos["entry_price"]), float(high_prices[idx]), float(low_prices[idx]),
+                        float(close_prices[idx]), bool(ext[idx]),
+                    )
+                    if reason:
+                        _try_sell(sym, idx, reason, d_str, sold_today, price)
+
             for sym, pos in positions.items():
+                if config.entry_fill == "close_t" and pos["entry_date"] == d_str:
+                    continue
                 idx = row_by_symbol.get(sym)
                 if idx is not None:
                     hi = float(high_prices[idx])
@@ -2721,6 +3049,9 @@ class BacktestEngine:
 
         stats = self._calc_portfolio_stats(equity_curve, trades, config.initial_capital)
         stats["execution"] = execution_stats
+        stats["execution_diagnostics"] = _execution_diagnostics(diagnostic_counts)
+        stats["lot_sizes"] = lot_sizes if config.asset_type == "hk" else {}
+        stats["lot_size_snapshot_dates"] = lot_snapshot_dates
         stats["pending_exit_positions"] = sum(1 for p in positions.values() if p.get("pending_exit_reason"))
         per_symbol = self._calc_per_symbol(trades)
         return SimResult(
@@ -3026,8 +3357,8 @@ class BacktestEngine:
             "mode": "full",
             "full_kind": "candidate_execution",
             "n_candidates": int(n_candidates),
-            "n_trades": int(len(trades)),
-            "n_days": int(len(daily_returns)),
+            "n_trades": len(trades),
+            "n_days": len(daily_returns),
             "avg_daily_candidates": round(float(len(trades) / max(len(daily_returns), 1)), 1),
             "avg_return": round(float(np.mean(pnls)), 4),
             "median_return": round(float(np.median(pnls)), 4),

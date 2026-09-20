@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import { useECharts } from './useECharts'
 import type { StrategyBacktestResult } from '@/lib/api'
+import { resultBenchmarkName, resultMarket } from '@/lib/backtestMarket'
 import { useChartTheme } from '@/lib/theme'
 
 interface Props {
@@ -10,6 +11,8 @@ interface Props {
 
 export function StrategyNavChart({ result }: Props) {
   const ct = useChartTheme()
+  const benchmarkName = resultBenchmarkName(result)
+  const currency = result.config.currency ?? resultMarket(result).currency
   // 可点击隐藏的图例(series name 为 key)。策略净值/回撤保持常显。
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   // 保存上一次 dataZoom 的 start/end, 切换图例重绘(notMerge:true)时回填, 避免缩放窗口复位。
@@ -85,7 +88,7 @@ export function StrategyNavChart({ result }: Props) {
         {
           type: 'value', gridIndex: 0,
           scale: true,
-          name: hasBenchmark ? '上证点位' : '策略资金',
+          name: hasBenchmark ? '基准点位' : '策略资金 (' + currency + ')',
           nameTextStyle: { color: hasBenchmark ? ct.text : ct.text, fontSize: 10, padding: [0, 0, 4, 0] },
           axisLabel: {
             color: hasBenchmark ? ct.text : ct.text,
@@ -99,7 +102,7 @@ export function StrategyNavChart({ result }: Props) {
           type: 'value', gridIndex: 0,
           position: 'right',
           scale: true,
-          name: hasBenchmark ? '策略资金' : '',
+          name: hasBenchmark ? '策略资金 (' + currency + ')' : '',
           nameTextStyle: { color: ct.text, fontSize: 10, padding: [0, 0, 4, 0] },
           axisLabel: {
             show: hasBenchmark,
@@ -169,7 +172,7 @@ export function StrategyNavChart({ result }: Props) {
           for (const p of params) {
             if (p.value == null) continue
             const isDrawdown = p.seriesName === '回撤'
-            const isBenchmark = p.seriesName === '同期上证指数'
+            const isBenchmark = p.seriesName === benchmarkName
             const isPosition = p.seriesName === '仓位'
             html += `<div style="display:flex;justify-content:space-between;gap:16px">
               <span style="color:${p.color}">${p.seriesName}</span>
@@ -178,7 +181,7 @@ export function StrategyNavChart({ result }: Props) {
                   ? `${(p.value as number).toFixed(2)}%`
                   : isBenchmark
                     ? `${valueFmt.format(p.value as number)} 点`
-                    : moneyFmt.format(p.value as number)
+                    : moneyFmt.format(p.value as number) + ' ' + currency
               }</span>
             </div>`
           }
@@ -205,8 +208,8 @@ export function StrategyNavChart({ result }: Props) {
             } as any,
           },
         },
-        ...(hasBenchmark && !hidden.has('同期上证指数') ? [{
-          name: '同期上证指数',
+        ...(hasBenchmark && !hidden.has(benchmarkName) ? [{
+          name: benchmarkName,
           type: 'line',
           xAxisIndex: 0,
           yAxisIndex: 0,
@@ -242,7 +245,7 @@ export function StrategyNavChart({ result }: Props) {
         }] : []),
       ],
     } as any
-  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct, hidden])
+  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct, hidden, benchmarkName, currency])
 
   const chartRef = useECharts(option, [result.run_id, ct], containerRef)
 
@@ -273,14 +276,14 @@ export function StrategyNavChart({ result }: Props) {
         {(result.benchmark_curve?.length ?? 0) > 0 && (
           <button
             type="button"
-            onClick={() => toggleLegend('同期上证指数')}
+            onClick={() => toggleLegend(benchmarkName)}
             title="点击显示/隐藏"
             className={`flex items-center gap-1.5 text-[10px] text-secondary cursor-pointer transition-opacity ${
-              hidden.has('同期上证指数') ? 'opacity-40' : 'opacity-100'
+              hidden.has(benchmarkName) ? 'opacity-40' : 'opacity-100'
             }`}
           >
             <span className="w-3 h-0.5 rounded border-t border-dashed border-[#64748b]" />
-            同期上证指数
+            {benchmarkName}
           </button>
         )}
         <span className="ml-auto text-[10px] text-muted">滚轮缩放 · 拖动平移</span>

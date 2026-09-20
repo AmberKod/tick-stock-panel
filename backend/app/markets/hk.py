@@ -2,7 +2,7 @@
 
 常量与算法迁移参考: ai_stock_tools/src/backend/app/services/trading_hours.py
 港股档期: 早市 9:30-12:00 (150 min) + 午市 13:00-16:00 (180 min) = 330 min
-无涨跌停 / 无 ST 标记 / T+0 交收 / 每手股数按标的 (1手=100/500/1000/2000 不等)
+无涨跌停 / 无 ST 标记 / 可当日卖出、T+2 交收 / 每手股数按标的
 
 M1 关键设计:
 - has_price_limit() = False → 涨跌停计算/打板信号对港股整体门控隐藏
@@ -12,7 +12,8 @@ M1 关键设计:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 from app.markets.profile import IndexRef, TradingSession
@@ -35,7 +36,8 @@ class HKProfile:
     sessions = (_MORNING, _AFTERNOON)
     trading_minutes_total = float(_MORNING.minutes + _AFTERNOON.minutes)  # 330.0
     currency = "HKD"
-    settlement = "T+0"
+    settlement = "T+2"
+    same_day_sell_allowed = True
     lot_size = None  # 港股按标的, 不在 profile 层级定
     symbol_suffixes = (".HK",)
 
@@ -101,9 +103,9 @@ class HKProfile:
     def limit_pct(
         self,
         symbol: str,
-        trade_date: date,  # noqa: ARG002
+        trade_date: date,
         *,
-        is_risk_warning: bool = False,  # noqa: ARG002
+        is_risk_warning: bool = False,
     ) -> float | None:
         """港股无涨跌停, 始终返回 None。
 

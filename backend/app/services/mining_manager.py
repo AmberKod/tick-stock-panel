@@ -112,14 +112,15 @@ class MiningJobManager:
 
             cancel_event = self._cancel_events.get(run_id)
             if cancel_event is None:
-                cancelled = self._store.transition_status(run_id, "cancelled")
+                # 先落事件再转状态 (消除终态 status/event 竞态)。
                 self._store.append_event(run_id, "cancelled", {"status": "cancelled"})
-                return cancelled
+                return self._store.transition_status(run_id, "cancelled")
 
             cancel_event.set()
             if manifest["status"] != "cancelling":
-                manifest = self._store.transition_status(run_id, "cancelling")
+                # 先落事件再转状态 (与终态同理, 保持事件先于状态的一致性)。
                 self._store.append_event(run_id, "cancelling", {"status": "cancelling"})
+                manifest = self._store.transition_status(run_id, "cancelling")
             return manifest
 
     def shutdown(self) -> None:
@@ -235,8 +236,10 @@ class MiningJobManager:
                 self._finish_cancelled_locked(run_id)
                 return
             self._store.write_summary(run_id, result)
-            self._store.transition_status(run_id, status)
+            # 先落事件再转状态: 保证读者一旦观察到终态 status, 对应终态事件
+            # 必然已持久化 (消除 status/event 时序竞态导致的 flaky 测试)。
             self._store.append_event(run_id, status, {"status": status})
+            self._store.transition_status(run_id, status)
 
     def _finish_cancelled(self, run_id: str) -> None:
         with self._lock:
@@ -246,8 +249,9 @@ class MiningJobManager:
         manifest = self._store.get(run_id)
         if manifest is None or manifest["status"] in TERMINAL_RUN_STATUSES:
             return
-        self._store.transition_status(run_id, "cancelled")
+        # 先落事件再转状态 (与 _finish_success 同理, 消除终态 status/event 竞态)。
         self._store.append_event(run_id, "cancelled", {"status": "cancelled"})
+        self._store.transition_status(run_id, "cancelled")
 
     def _finish_failed(self, run_id: str, exc: Exception) -> None:
         message = str(exc)[:2000]
@@ -255,9 +259,10 @@ class MiningJobManager:
             manifest = self._store.get(run_id)
             if manifest is None or manifest["status"] in TERMINAL_RUN_STATUSES:
                 return
-            self._store.transition_status(run_id, "failed", error=message)
+            # 先落事件再转状态 (消除终态 status/event 竞态)。
             self._store.append_event(
                 run_id,
                 "error",
                 {"status": "failed", "message": message},
             )
+            self._store.transition_status(run_id, "failed", error=message)

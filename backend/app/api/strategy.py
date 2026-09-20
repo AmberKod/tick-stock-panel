@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
-from app.strategy.engine import StrategyDef, StrategyEngine
+from app.strategy.engine import StrategyDef, StrategyEngine, market_basic_filter
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
 from app.strategy.scoring import (
@@ -164,19 +164,31 @@ def _strategy_detail(
     s: StrategyDef,
     overrides: dict | None = None,
     engine: StrategyEngine | None = None,
+    asset_type: str | None = None,
 ) -> dict:
     """策略详情（含用户覆盖）"""
-    bf = {**s.basic_filter}
+    saved_basic_filter = (overrides or {}).get("basic_filter")
+    bf = (
+        market_basic_filter(
+            s.basic_filter,
+            asset_type,
+            overrides=saved_basic_filter,
+            explicit_keys=s.basic_filter_explicit_keys,
+        )
+        if asset_type is not None
+        else {**s.basic_filter, **(saved_basic_filter or {})}
+    )
+    portfolio = dict(s.meta.get("portfolio") or {})
     scoring = effective_scoring(s.meta.get("scoring"), overrides)
     scoring_directions = effective_scoring_directions(overrides)
     params_defaults = {p["id"]: p["default"] for p in s.meta.get("params", [])}
 
     if overrides:
-        if overrides.get("basic_filter"):
-            bf.update(overrides["basic_filter"])
         # 用户保存的参数覆盖默认值: 合并进 params_defaults, 前端据此回显
         if overrides.get("params"):
             params_defaults.update(overrides["params"])
+        if isinstance(overrides.get("portfolio"), dict):
+            portfolio.update(overrides["portfolio"])
 
     # 名称/描述可被用户覆盖
     name = overrides.get("name", s.meta.get("name", "")) if overrides else s.meta.get("name", "")
@@ -193,6 +205,7 @@ def _strategy_detail(
         "timeframes": s.meta.get("timeframes", ["1d"]),
         "version": s.meta.get("version", "1.0.0"),
         "basic_filter": bf,
+        "portfolio": portfolio or None,
         "params": s.meta.get("params", []),
         "params_defaults": params_defaults,
         "scoring": scoring,
@@ -323,16 +336,24 @@ def list_strategies(
         sid = meta["id"]
         s = engine.get(sid)
         overrides = all_overrides.get(sid)
-        result.append(_strategy_detail(s, overrides, engine))
+        try:
+            result.append(_strategy_detail(s, overrides, engine, asset_type))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{sid}: {exc}") from exc
     return {"strategies": result, "load_errors": engine.load_errors()}
 
 
 @router.get("/{strategy_id}")
-def get_strategy(strategy_id: str, request: Request):
+def get_strategy(strategy_id: str, request: Request, asset_type: str | None = None):
     engine = _get_engine(request)
     s = _get_public_strategy(engine, strategy_id)
+    if asset_type is not None and asset_type not in s.meta.get("asset_types", ["stock"]):
+        raise HTTPException(status_code=400, detail=f"策略 {strategy_id} 不支持市场 {asset_type}")
     overrides = strategy_config.load_override(_data_dir(request), strategy_id)
-    return _strategy_detail(s, overrides or None, engine)
+    try:
+        return _strategy_detail(s, overrides or None, engine, asset_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ── 执行选股 ─────────────────────────────────────────────────────────
@@ -446,6 +467,7 @@ def save_config(req: SaveConfigRequest, request: Request):
     overrides = _strip_defaults(req.strategy_id, req.overrides, engine)
 
     strategy_config.save_override(_data_dir(request), req.strategy_id, overrides)
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -462,6 +484,7 @@ def patch_config(req: SaveConfigRequest, request: Request):
         req.strategy_id,
         _strip_defaults(req.strategy_id, overrides, engine),
     )
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -484,6 +507,23 @@ def _validate_scoring_config(overrides: dict) -> None:
             raise HTTPException(status_code=400, detail=f"评分因子 {invalid[0]} 的方向无效")
     if "scoring_replace" in overrides and not isinstance(overrides["scoring_replace"], bool):
         raise HTTPException(status_code=400, detail="scoring_replace 必须是布尔值")
+
+    portfolio = overrides.get("portfolio")
+    if portfolio is not None:
+        if not isinstance(portfolio, dict):
+            raise HTTPException(status_code=400, detail="组合约束必须是对象")
+        if "enabled" in portfolio and not isinstance(portfolio["enabled"], bool):
+            raise HTTPException(status_code=400, detail="组合约束 enabled 必须是布尔值")
+        if "max_same_industry" in portfolio:
+            value = portfolio["max_same_industry"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise HTTPException(status_code=400, detail="同行业最大数必须是大于等于 1 的整数")
+        if "concentration_penalty" in portfolio:
+            value = portfolio["concentration_penalty"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise HTTPException(status_code=400, detail="集中度惩罚必须在 0 到 1 之间")
+        if "industry_level" in portfolio and portfolio["industry_level"] not in (1, 2, 3):
+            raise HTTPException(status_code=400, detail="行业分级必须是 1、2 或 3")
 
 
 def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
@@ -511,6 +551,18 @@ def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
         else:
             del result["basic_filter"]
 
+    portfolio = result.get("portfolio")
+    if portfolio and isinstance(portfolio, dict):
+        default_portfolio = s.meta.get("portfolio") or {}
+        stripped_portfolio = {
+            k: v for k, v in portfolio.items()
+            if k not in default_portfolio or v != default_portfolio[k]
+        }
+        if stripped_portfolio:
+            result["portfolio"] = stripped_portfolio
+        else:
+            del result["portfolio"]
+
     return result
 
 
@@ -518,6 +570,7 @@ def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
 def reset_config(strategy_id: str, request: Request):
     _get_public_strategy(_get_engine(request), strategy_id)
     strategy_config.delete_override(_data_dir(request), strategy_id)
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -688,9 +741,8 @@ def _restore_strategy_file(path: Path, previous_code: str | None) -> None:
 
 def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legacy_ai_path: bool = False) -> dict:
     sid = _validate_strategy_id(req.strategy_id)
-    if legacy_ai_path:
-        if not (sid.startswith("ai_") or sid.startswith("custom_")):
-            raise ValueError("策略 ID 必须以 ai_ 或 custom_ 开头")
+    if legacy_ai_path and not (sid.startswith("ai_") or sid.startswith("custom_")):
+        raise ValueError("策略 ID 必须以 ai_ 或 custom_ 开头")
 
     engine = _get_engine(request)
     data_dir = _data_dir(request)

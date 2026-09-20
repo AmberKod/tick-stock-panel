@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class ExtField:
     """扩展字段定义。"""
-    __slots__ = ("name", "dtype", "label")
+    __slots__ = ("dtype", "label", "name")
 
     def __init__(self, name: str, dtype: str = "string", label: str = "") -> None:
         self.name = name
@@ -40,10 +40,21 @@ class ExtField:
 class PullConfig:
     """定时拉取配置。"""
     __slots__ = (
-        "url", "method", "headers", "body", "response_path",
-        "field_map", "schedule_minutes", "enabled",
-        "last_run", "last_status", "last_message", "last_rows",
-        "next_run", "time_window_start", "time_window_end",
+        "body",
+        "enabled",
+        "field_map",
+        "headers",
+        "last_message",
+        "last_rows",
+        "last_run",
+        "last_status",
+        "method",
+        "next_run",
+        "response_path",
+        "schedule_minutes",
+        "time_window_end",
+        "time_window_start",
+        "url",
     )
 
     def __init__(
@@ -125,9 +136,16 @@ class PullConfig:
 class ExtConfig:
     """一个扩展数据源的完整配置。"""
     __slots__ = (
-        "id", "label", "mode", "fields", "description",
-        "symbol_map", "code_map",
-        "created_at", "updated_at", "pull",
+        "code_map",
+        "created_at",
+        "description",
+        "fields",
+        "id",
+        "label",
+        "mode",
+        "pull",
+        "symbol_map",
+        "updated_at",
     )
 
     def __init__(
@@ -207,7 +225,7 @@ def _ext_config_dir_signature(base: Path) -> tuple | None:
                 st = cp.stat()
                 sig.append((d.name, st.st_mtime_ns, st.st_size))
         return tuple(sig)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -375,7 +393,7 @@ def build_code_lookup(data_dir: Path) -> dict[str, str]:
         return {}
     try:
         df = pl.read_parquet(path, columns=["code", "symbol"])
-        return dict(zip(df["code"].to_list(), df["symbol"].to_list()))
+        return dict(zip(df["code"].to_list(), df["symbol"].to_list(), strict=False))
     except Exception:
         return {}
 

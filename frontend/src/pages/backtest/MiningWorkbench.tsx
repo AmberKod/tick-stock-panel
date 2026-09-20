@@ -303,7 +303,12 @@ export function MiningWorkbench() {
     enabled: validDateRange,
     staleTime: 30_000,
   })
-  const regimeLatestQuery = useQuery({ queryKey: QK.regimeLatest, queryFn: api.regimeLatest, staleTime: 60_000 })
+  // 挖矿工作台是 A 股场景, 固定 cn (regimeLatest 现在必须传 market)
+  const regimeLatestQuery = useQuery({
+    queryKey: QK.regimeLatest('cn'),
+    queryFn: () => api.regimeLatest('cn'),
+    staleTime: 60_000,
+  })
   const configQuery = useQuery({ queryKey: QK.miningConfig, queryFn: api.miningConfig })
 
   useEffect(() => {

@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
 from typing import Protocol
 
 MarketId = str  # "CN" | "HK" | "US" (M0 仅实现 CN; HK/US 见 M1/M2)
@@ -46,7 +47,8 @@ class MarketProfile(Protocol):
     sessions: tuple[TradingSession, ...]
     trading_minutes_total: float         # 一日累计交易分钟 (A 股 240)
     currency: str                        # "CNY" / "HKD" / "USD"
-    settlement: str                      # "T+1" / "T+0"
+    settlement: str                      # 资金/证券结算周期;不代表当日是否允许卖出
+    same_day_sell_allowed: bool          # 买入当日可否卖出,与结算独立
     lot_size: int | None                 # 每手股数; None=按标的 (港股)
     symbol_suffixes: tuple[str, ...]     # 本市场合法后缀
 

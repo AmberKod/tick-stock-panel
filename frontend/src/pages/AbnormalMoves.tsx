@@ -2,13 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FlaskConical, HelpCircle, History, Power, RefreshCw, Search, Settings2 } from 'lucide-react'
-import { api, type AbnormalOverview, type AbnormalRow, type AbnormalStatus } from '@/lib/api'
+import { api, type AbnormalOverview, type AbnormalRow, type AbnormalStatus, type NewsBatchStockItem, type NewsBatchStockResult } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { Panel } from '@/components/panel'
+import { tierQueryOptions } from '@/lib/refreshTiers'
 
 /**
  * 异动监控 — 按交易所异动规则口径 (3日±20%/±30%/±40%, 10日+100%, 30日+200%)
@@ -39,6 +41,101 @@ const BOARDS = ['主板', '创业板', '科创板', '北交所'] as const
 
 const REFRESH_MS = 60_000
 
+// ============================================================================
+// 面板 2 · 异动归因 (有解释 / 待确认 / 无解释 / 反向背离)
+// ----------------------------------------------------------------------------
+// 判定口径纪律: 后端 news_search.py:197 `source=_extract_domain(url)` 是**纯域名**,
+// 未做出版方家族归一。因此判定只能用「不同域名数 ≥ 2」, UI 上绝不能写成
+// 「独立信源」/「≥2 家媒体」。后端响应的 `domain_note` 就是给 UI 用的口径提示,
+// 下面原样渲染进 Panel footer。
+//
+// 四态不是加权打分, 是可解释规则 (PRD §3.2 面板 2)。
+// ============================================================================
+
+/** 归因新闻窗口(天)。PRD §3.2 面板 2 建议 24h。 */
+const ATTRIB_DAYS = 1
+/**
+ * 默认自动归因条数。
+ * 后端 POST /api/news/batch-stock 是串行限速 0.6s/个 + 25s 时间预算 + 单批 200 上限,
+ * 实测 25s 预算 ≈ 一次请求 40 个 symbol。取 20 留一倍余量, 绝不把全表塞进去。
+ * 其余条目走「单条点击再查」: 同一端点, 后端按 symbol 缓存, 不重复消耗配额。
+ */
+const ATTRIB_TOP_N = 20
+/** 单条归因请求的新闻条数上限 */
+const ATTRIB_MAX_RESULTS = 8
+
+/** 归因四态 + 「未归因」(尚未查询) 这一非判定态。 */
+type AttributionState = 'explained' | 'unconfirmed' | 'silent' | 'divergent' | 'unknown'
+
+interface AttributionMeta {
+  label: string
+  cls: string
+  hint: string
+  /** 该档位能否由现有数据判定。false = 本页不可用, 只在图例里出现, 不参与判定。 */
+  decidable: boolean
+}
+
+const ATTRIBUTION_META: Record<AttributionState, AttributionMeta> = {
+  explained: {
+    label: '有解释',
+    cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    hint: `${ATTRIB_DAYS * 24}h 窗口内 ≥2 个不同域名命中`,
+    decidable: true,
+  },
+  unconfirmed: {
+    label: '待确认',
+    cls: 'border-warning/30 bg-warning/10 text-warning',
+    hint: `${ATTRIB_DAYS * 24}h 窗口内恰好 1 个域名命中`,
+    decidable: true,
+  },
+  silent: {
+    label: '无解释',
+    cls: 'border-danger/40 bg-danger/10 text-danger',
+    hint: '窗口内 0 个域名命中 —— 没人解释的异动, 默认置顶',
+    decidable: true,
+  },
+  divergent: {
+    label: '反向背离',
+    cls: 'border-border bg-elevated text-muted',
+    hint: '本页不可用: 异动接口不返回题材/行业方向, 不硬算',
+    decidable: false,
+  },
+  unknown: {
+    label: '未归因',
+    cls: 'border-border/60 bg-elevated/60 text-muted',
+    hint: '尚未查询 (不在自动归因的前 N 条内), 点击徽标单条查询',
+    decidable: true,
+  },
+}
+
+/** 列表排序权重: 无解释置顶, 未归因沉底(点击徽标可补查)。 */
+const ATTRIB_ORDER: Record<AttributionState, number> = {
+  silent: 0,
+  unconfirmed: 1,
+  explained: 2,
+  unknown: 3,
+  divergent: 4,
+}
+
+/** 由批量端点返回的单项结果判定归因状态。拿不到结果一律 'unknown', 绝不猜。 */
+function resolveAttribution(item: NewsBatchStockItem | undefined): AttributionState {
+  if (!item || !item.success) return 'unknown'
+  const domains = item.hit_domains?.length ?? item.hit_domain_count ?? 0
+  if (domains >= 2) return 'explained'
+  if (domains === 1) return 'unconfirmed'
+  return 'silent'
+}
+
+/**
+ * ⚠️ fail-closed 纪律 (勿删):
+ * 后端 POST /api/news/batch-stock 的顶层 `ok` **恒为 true**, 即使 provider 全挂
+ * (未配置 Key / 配额耗尽 / 代理 502 / 余额不足) 也返回 ok —— **不可用于任何判定**。
+ * 数据源健康只能看: `GET /api/news/status` 的 `configured_any` (配置态) +
+ * 批量结果里的 `results[].success` / `error_count` / `processed` (运行态)。
+ * `processed > 0 && error_count === processed` = 全部失败 → 整块 unavailable,
+ * 绝不能渲染成一片「未归因」灰 —— 那会把"我们没查到"伪装成"市场没消息"。
+ */
+
 export function AbnormalMoves() {
   // 主开关: 默认关闭, 开启后才轮询计算 (仅控制本页计算, 后台告警由监控规则驱动)
   const [enabled, setEnabled] = useState(() => storage.abnormalEnabled.get(false))
@@ -57,6 +154,12 @@ export function AbnormalMoves() {
   // 默认过滤 ST/*ST 风险警示股票 (口径与后端 is_st_name 一致: 名称含 ST)
   const [excludeSt, setExcludeSt] = useState(true)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
+  // ── 面板 2 · 异动归因 ──
+  const [silentOnly, setSilentOnly] = useState(false)
+  /** 单条点击再查的 symbol 追加集合 (与自动前 N 条合并进同一批请求, 命中后端缓存) */
+  const [extraSymbols, setExtraSymbols] = useState<string[]>([])
+  /** 展开判据(命中的新闻)的 symbol */
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null)
 
   const overview = useQuery({
     queryKey: QK.abnormalOverview(minCloseness, 300),
@@ -119,6 +222,132 @@ export function AbnormalMoves() {
     }
     return list
   }, [view, windowFilter, direction, boardFilter, watchlistOnly, excludeSt, watchSymbols, query, minCloseness])
+
+  // ── 归因查询 (面板 2) ──────────────────────────────
+  // 新闻源配置状态: 未配置 Anspire Key 时整块归因不可用 (不能渲染成"0 个命中")
+  const newsStatus = useQuery({
+    queryKey: QK.newsStatus,
+    queryFn: api.newsStatus,
+    staleTime: 60_000,
+  })
+  /** null = 还没查到配置状态 */
+  const newsConfigured: boolean | null = newsStatus.data?.configured_any ?? null
+
+  /** 按异动幅度排序: 主序=最高档接近度, 同分比今日涨跌绝对值 */
+  const rankedRows = useMemo(
+    () => [...rows].sort(
+      (a, b) => closenessOf(b) - closenessOf(a) || Math.abs(b.rt_pct ?? 0) - Math.abs(a.rt_pct ?? 0),
+    ),
+    [rows],
+  )
+  const autoSymbols = useMemo(
+    () => rankedRows.slice(0, ATTRIB_TOP_N).map(r => r.symbol),
+    [rankedRows],
+  )
+  /** 本次批量请求的 symbol 集合: 自动前 N 条 + 用户单条点击补查 */
+  const batchSymbols = useMemo(
+    () => Array.from(new Set([...autoSymbols, ...extraSymbols])),
+    [autoSymbols, extraSymbols],
+  )
+  const batchNames = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const r of rows) {
+      if (r.name) map[r.symbol] = r.name
+    }
+    return map
+  }, [rows])
+
+  const attribution = useQuery({
+    queryKey: QK.newsBatchStock(batchSymbols, ATTRIB_DAYS),
+    // 走批量端点: 后端串行限速 + 结果缓存。前端禁止并发逐条打 /api/news/stock。
+    // ⚠️ 主开关关闭 (stale 模式) 时不再发归因请求 —— 关了监控还偷偷花新闻配额不合理。
+    queryFn: () => api.newsBatchStock(batchSymbols, batchNames, ATTRIB_DAYS, ATTRIB_MAX_RESULTS),
+    enabled: enabled && newsConfigured === true && batchSymbols.length > 0,
+    // T3 日级: 结论类数据, 一天内基本不变, 不进 SSE 失效列表
+    ...tierQueryOptions('T3'),
+    // 刷新期间容器不卸载、不闪烁
+    placeholderData: (prev: NewsBatchStockResult | undefined) => prev,
+  })
+
+  /**
+   * fail-closed 判定: 数据源挂没挂。
+   * ⚠️ 后端 `ok` 字段**恒为 true** (即使 provider 全挂), 不可用于任何判定 ——
+   * 只能看 `results[].success` / `error_count` / `processed`。
+   * 三档 + 一态:
+   *   'config'   Key 没配 (configured_any=false) → 不可用
+   *   'all-fail' 配了但全部失败 (配额耗尽/代理 502/余额不足) → 不可用, 带 error 文案
+   *   'paused'   主开关关闭且无缓存结果 → 不发请求, 徽标禁用 "—" (提示开启后归因)
+   *   'ok'       全部成功或部分成功 (部分失败维持现状: 成功出徽标、失败灰「未归因」+ hint 计数)
+   */
+  const attributionHealth = useMemo<'config' | 'all-fail' | 'paused' | 'ok'>(() => {
+    if (newsConfigured === false) return 'config'
+    const d = attribution.data
+    if (d && d.processed > 0 && d.error_count === d.processed) return 'all-fail'
+    // 主开关关闭: 不发新请求, 只展示缓存里的历史结果; 无缓存时不伪装成「未归因」
+    if (!enabled && d == null) return 'paused'
+    return 'ok'
+  }, [newsConfigured, attribution.data, enabled])
+
+  /** 全部失败时取第一条 error 给用户看真实原因 (余额不足/代理 502 等) */
+  const attributionErrorSample = useMemo(() => {
+    if (attributionHealth !== 'all-fail') return null
+    const results = attribution.data?.results ?? {}
+    for (const symbol of batchSymbols) {
+      const err = results[symbol]?.error
+      if (err) return { symbol, err }
+    }
+    return null
+  }, [attributionHealth, attribution.data, batchSymbols])
+
+  const attributionBySymbol = useMemo(() => {
+    const map = new Map<string, { state: AttributionState; item?: NewsBatchStockItem }>()
+    const results = attribution.data?.results ?? {}
+    for (const symbol of batchSymbols) {
+      const item = results[symbol]
+      map.set(symbol, { state: resolveAttribution(item), item })
+    }
+    return map
+  }, [batchSymbols, attribution.data])
+
+  /** 展示顺序: 无解释置顶; 开启「只看无解释」时只留该档 */
+  const displayRows = useMemo(() => {
+    if (silentOnly) {
+      return rankedRows.filter(r => attributionBySymbol.get(r.symbol)?.state === 'silent')
+    }
+    return [...rankedRows].sort((a, b) => {
+      const sa = attributionBySymbol.get(a.symbol)?.state ?? 'unknown'
+      const sb = attributionBySymbol.get(b.symbol)?.state ?? 'unknown'
+      return ATTRIB_ORDER[sa] - ATTRIB_ORDER[sb]
+    })
+  }, [rankedRows, silentOnly, attributionBySymbol])
+
+  const attribStats = useMemo(() => {
+    const counts: Record<AttributionState, number> = {
+      explained: 0, unconfirmed: 0, silent: 0, divergent: 0, unknown: 0,
+    }
+    for (const entry of attributionBySymbol.values()) counts[entry.state] += 1
+    return counts
+  }, [attributionBySymbol])
+
+  /** 已提交但后端明确失败的条数 (区分「还在等」和「失败」, 不能把等待渲染成失败) */
+  const attribFailed = useMemo(() => {
+    let n = 0
+    for (const entry of attributionBySymbol.values()) {
+      if (entry.item && !entry.item.success) n += 1
+    }
+    return n
+  }, [attributionBySymbol])
+
+  /** 面板内「无人解释」清单: 本面板的核心产出 */
+  const silentPreviewRows = useMemo(
+    () => displayRows.filter(r => attributionBySymbol.get(r.symbol)?.state === 'silent').slice(0, 10),
+    [displayRows, attributionBySymbol],
+  )
+
+  /** 单条点击再查: 追加进同一批 (后端按 symbol 缓存, 已有的不消耗配额) */
+  const requestAttribution = (symbol: string) => {
+    setExtraSymbols(prev => (prev.includes(symbol) ? prev : [...prev, symbol]))
+  }
 
   const counts = view?.counts
   const updating = overview.isFetching
@@ -310,6 +539,19 @@ export function AbnormalMoves() {
               />
               过滤ST
             </label>
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-secondary"
+              title="只看窗口内 0 个域名命中的异动 —— 没人解释的才最值得看 (新闻源未配置/全部失败/监控暂停时不可用)"
+            >
+              <input
+                type="checkbox"
+                checked={silentOnly}
+                disabled={attributionHealth !== 'ok'}
+                onChange={e => setSilentOnly(e.target.checked)}
+                className="h-3 w-3 accent-accent disabled:opacity-40"
+              />
+              只看无解释
+            </label>
             <label className="flex items-center gap-1.5 text-[11px] text-secondary" title="接近度下限 (|偏离|/阈值)">
               接近度 ≥ {(minCloseness * 100).toFixed(0)}%
               <input
@@ -331,6 +573,109 @@ export function AbnormalMoves() {
                 className="h-7 w-40 rounded border border-border bg-base pl-7 pr-2 text-[11px] text-foreground"
               />
             </div>
+          </div>
+
+          {/* 面板 2 · 异动归因: 五态(ok/loading/error/unavailable/empty) 由 Panel 统一承载,
+              拿不到数据时显示「不可用」, 绝不渲染成一片"0 个命中"的风平浪静。
+              fail-closed 两种都走 unavailable: ① Key 没配 (configured_any=false);
+              ② 配了但全部失败 (配额耗尽/代理 502/余额不足) —— 后端 ok 恒 true 不可信。 */}
+          <div className="shrink-0">
+            <Panel
+              title="异动归因"
+              icon={Search}
+              hint={`自动 ${Math.min(ATTRIB_TOP_N, autoSymbols.length)} / ${rows.length} 条 · 窗口 ${ATTRIB_DAYS * 24}h${
+                attribution.data ? ` · ${attribution.data.elapsed_s.toFixed(1)}s` : ''
+              }${attribFailed > 0 && attributionHealth === 'ok' ? ` · ${attribFailed} 条查询失败` : ''}${
+                !enabled ? ' · 监控已暂停, 不发归因请求' : ''
+              }`}
+              loading={newsStatus.isLoading || (enabled && newsConfigured === true && batchSymbols.length > 0 && attribution.isLoading)}
+              error={newsStatus.error ?? (newsConfigured === true && attributionHealth === 'ok' ? attribution.error : null)}
+              unavailable={
+                attributionHealth === 'config'
+                  ? '未配置新闻搜索源 (Anspire Key), 归因不可得。请在「设置 · 密钥」中配置后重试。'
+                  : attributionHealth === 'all-fail'
+                    ? `新闻检索全部失败 (${attribution.data?.processed ?? 0} 条无一成功): ${attributionErrorSample?.err ?? '未知错误'}。请检查 Key 配额/代理后重试。`
+                    : attributionHealth === 'paused'
+                      ? '监控已暂停, 归因未查询。开启实时计算后自动归因前 20 条。'
+                      : false
+              }
+              empty={rows.length === 0 ? '当前口径下没有异动条目可归因。' : false}
+              stale={attribution.isError && attribution.data != null ? '本次归因刷新失败, 当前展示上一次成功结果。' : false}
+              onRetry={() => {
+                void newsStatus.refetch()
+                void attribution.refetch()
+              }}
+              evidence={{
+                label: '判定规则',
+                items: [
+                  `有解释: ${ATTRIB_DAYS * 24}h 窗口内 ≥2 个不同域名命中 (域名 ≠ 独立信源, 见面板底部口径)`,
+                  '待确认: 窗口内恰好 1 个域名命中',
+                  '无解释: 窗口内 0 个域名命中 —— 默认置顶, 没人解释的异动才最值得看',
+                  '反向背离 (个股涨 vs 题材跌): 本页不可用 —— 异动接口不返回题材/行业方向, 不硬算',
+                  `自动归因范围: 按异动幅度(最高档接近度)取前 ${ATTRIB_TOP_N} 条, 受批量端点 25s 预算约束; 其余条目点击行内徽标单条补查`,
+                ],
+              }}
+              footer={
+                <p className="text-[10px] leading-relaxed text-muted">
+                  {/* 后端给的口径提示, 原样渲染 —— 不能把"不同域名"包装成"独立信源" */}
+                  {attribution.data?.domain_note ??
+                    '口径: 命中数按「不同域名」计, 后端未做出版方家族归一, 同一媒体多站点可能重复计数。'}
+                </p>
+              }
+            >
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(['silent', 'unconfirmed', 'explained', 'divergent'] as const).map(state => (
+                    <span
+                      key={state}
+                      title={ATTRIBUTION_META[state].hint}
+                      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${ATTRIBUTION_META[state].cls}`}
+                    >
+                      {ATTRIBUTION_META[state].label}
+                      <span className="font-mono">
+                        {ATTRIBUTION_META[state].decidable ? attribStats[state] : '不可用'}
+                      </span>
+                    </span>
+                  ))}
+                  <span className="ml-auto text-[10px] text-muted">
+                    已归因 {attribStats.explained + attribStats.unconfirmed + attribStats.silent} 条
+                    {attribFailed > 0 && ` · 失败 ${attribFailed} 条`}
+                    {rows.length > autoSymbols.length && ` · 其余 ${rows.length - autoSymbols.length} 条点击徽标补查`}
+                  </span>
+                </div>
+                {silentPreviewRows.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] text-danger">无人解释的异动:</span>
+                    {silentPreviewRows.map(r => (
+                      <button
+                        key={r.symbol}
+                        type="button"
+                        onClick={() => setPreview({ symbol: r.symbol, name: r.name ?? r.symbol })}
+                        title="窗口内 0 个域名命中 —— 点击查看详情"
+                        className="inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/5 px-1.5 py-0.5 text-[10px] transition-colors hover:border-danger/60 cursor-pointer"
+                      >
+                        <span className="font-mono text-foreground">{r.symbol}</span>
+                        <span className="max-w-24 truncate text-secondary">{r.name ?? '—'}</span>
+                        <span className={`font-mono ${priceColorClass(r.rt_pct)}`}>{fmtPct(r.rt_pct)}</span>
+                      </button>
+                    ))}
+                    {silentPreviewRows.length < displayRows.filter(r => attributionBySymbol.get(r.symbol)?.state === 'silent').length && (
+                      <button
+                        type="button"
+                        onClick={() => setSilentOnly(true)}
+                        className="text-[10px] text-accent hover:underline cursor-pointer"
+                      >
+                        查看全部
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-muted">
+                    {attribution.data ? '已归因的条目里没有「无解释」异动。' : '—'}
+                  </p>
+                )}
+              </div>
+            </Panel>
           </div>
 
           {/* 主表: 剩余空间内滚动 (页面本身不滚动) */}
@@ -356,30 +701,62 @@ export function AbnormalMoves() {
                     <span className="ml-1 normal-case text-muted/80">(最高档)</span>
                   </th>
                   <th className="px-2 py-2 text-center">状态</th>
+                  <th
+                    className="px-2 py-2 text-center"
+                    title="归因四态(可解释规则, 非打分): 有解释=≥2 个不同域名命中; 待确认=1 个; 无解释=0 个(默认置顶); 反向背离=本页不可用"
+                  >
+                    归因
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {overview.isLoading ? (
                   <tr>
-                    <td colSpan={9} className="px-3 py-10 text-center text-muted">
+                    <td colSpan={TABLE_COL_COUNT} className="px-3 py-10 text-center text-muted">
                       正在计算全市场偏离值…
                     </td>
                   </tr>
-                ) : rows.length === 0 ? (
+                ) : displayRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-3 py-10 text-center text-muted">
-                      {view ? '当前没有满足条件的标的' : '暂无数据'}
+                    <td colSpan={TABLE_COL_COUNT} className="px-3 py-10 text-center text-muted">
+                      {view ? (silentOnly ? '当前没有「无解释」的异动' : '当前没有满足条件的标的') : '暂无数据'}
                     </td>
                   </tr>
                 ) : (
-                  rows.map((r, i) => (
-                    <AbnormalRowView
-                      key={r.symbol}
-                      row={r}
-                      rank={i + 1}
-                      onPreview={() => setPreview({ symbol: r.symbol, name: r.name ?? r.symbol })}
-                    />
-                  ))
+                  displayRows.map((r, i) => {
+                    const entry = attributionBySymbol.get(r.symbol)
+                    return (
+                      <AbnormalRowView
+                        key={r.symbol}
+                        row={r}
+                        rank={i + 1}
+                        attribution={entry}
+                        // 数据源挂掉 (未配置/全部失败) 时徽标一律禁用 "—", 不能渲染成「未归因」灰
+                        attributionDisabled={attributionHealth !== 'ok'}
+                        attributionDisabledReason={
+                          attributionHealth === 'config'
+                            ? '未配置新闻搜索源 (Anspire Key), 归因不可用'
+                            : attributionHealth === 'all-fail'
+                              ? `新闻检索全部失败: ${attributionErrorSample?.err ?? '未知错误'}`
+                              : attributionHealth === 'paused'
+                                ? '监控已暂停, 归因未查询'
+                                : null
+                        }
+                        pending={attribution.isFetching && attributionHealth === 'ok' && entry == null && batchSymbols.includes(r.symbol)}
+                        expanded={expandedSymbol === r.symbol}
+                        onBadgeClick={() => {
+                          // 未归因 → 单条补查; 已归因 → 展开/收起判据
+                          if (entry == null) {
+                            requestAttribution(r.symbol)
+                            setExpandedSymbol(r.symbol)
+                          } else {
+                            setExpandedSymbol(prev => (prev === r.symbol ? null : r.symbol))
+                          }
+                        }}
+                        onPreview={() => setPreview({ symbol: r.symbol, name: r.name ?? r.symbol })}
+                      />
+                    )
+                  })
                 )}
               </tbody>
             </table>
@@ -441,15 +818,44 @@ function dominantWindow(r: AbnormalRow): { key: WindowKey; value: number; thresh
   return best
 }
 
-function AbnormalRowView({ row, rank, onPreview }: {
+/** 异动幅度口径 = 三档中最高的接近度 (|偏离值| ÷ 该档阈值), 用于归因优先级排序 */
+function closenessOf(r: AbnormalRow): number {
+  return dominantWindow(r)?.closeness ?? 0
+}
+
+function AbnormalRowView({ row, rank, onPreview, attribution, attributionDisabled, attributionDisabledReason, pending, expanded, onBadgeClick }: {
   row: AbnormalRow
   rank: number
   onPreview: () => void
+  /** undefined = 尚未查询 (不在自动归因的前 N 条内) */
+  attribution?: { state: AttributionState; item?: NewsBatchStockItem }
+  /** 新闻源不可用 (未配置 / 全部失败): 徽标不可点、显示 "—", 不假装是「无解释」 */
+  attributionDisabled?: boolean
+  /** 数据源不可用的原因 (悬停提示用) */
+  attributionDisabledReason?: string | null
+  /** 该 symbol 正在查询中 */
+  pending?: boolean
+  /** 判据(命中新闻)是否已展开 */
+  expanded?: boolean
+  onBadgeClick: () => void
 }) {
   const board = boardTag(row.symbol)
   const dominant = dominantWindow(row)
   const meta = STATUS_META[row.status]
+  const state: AttributionState = attribution?.state ?? 'unknown'
+  const attrMeta = ATTRIBUTION_META[attributionDisabled ? 'unknown' : state]
+  const domainCount = attribution?.item?.hit_domain_count ?? 0
+  const badgeTitle = attributionDisabled
+    ? attributionDisabledReason ?? '新闻检索不可用, 归因不可用'
+    : attribution == null
+      ? `${ATTRIBUTION_META.unknown.hint} (不在自动归因的前 ${ATTRIB_TOP_N} 条内)`
+      : attribution.item == null
+        ? '已提交查询, 等待结果'
+        : !attribution.item.success
+          ? `归因失败: ${attribution.item.error ?? '未知错误'}`
+          : `${attrMeta.hint} · 不同域名 ${domainCount} 个${attribution.item.hit_domains.length > 0 ? `: ${attribution.item.hit_domains.join('、')}` : ''}`
   return (
+    <>
     <tr className="group border-b border-border/40 transition-colors last:border-0 hover:bg-elevated/50">
       <td className="px-2 py-1.5 text-right font-mono text-[10px] text-muted/70">{rank}</td>
       <td className="px-2 py-1.5">
@@ -518,6 +924,83 @@ function AbnormalRowView({ row, rank, onPreview }: {
       </td>
       <td className="px-2 py-1.5 text-center">
         <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${meta.cls}`}>{meta.label}</span>
+      </td>
+      {/* 归因徽标 (面板 2): 点击 = 未归因时单条补查 / 已归因时展开判据 */}
+      <td className="px-2 py-1.5 text-center">
+        <button
+          type="button"
+          onClick={onBadgeClick}
+          disabled={attributionDisabled}
+          title={badgeTitle}
+          className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-opacity ${attrMeta.cls} ${
+            attributionDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:brightness-110'
+          }`}
+        >
+          {pending && <RefreshCw className="h-2.5 w-2.5 animate-spin" />}
+          {pending ? '查询中' : attributionDisabled ? '—' : attrMeta.label}
+          {!attributionDisabled && domainCount > 0 && (
+            <span className="font-mono opacity-70">{domainCount}</span>
+          )}
+        </button>
+      </td>
+    </tr>
+    {expanded && (
+      <AttributionDetailRow
+        item={attribution?.item}
+        requested={attribution != null}
+        colSpan={TABLE_COL_COUNT}
+      />
+    )}
+    </>
+  )
+}
+
+/** 表格列数 (归因判据展开行用它做 colSpan) */
+const TABLE_COL_COUNT = 10
+
+/** 展开行: 该条异动到底被哪些域名解释了 —— 判据必须可点开 (PRD §3.2 面板 2) */
+function AttributionDetailRow({ item, requested, colSpan }: {
+  item?: NewsBatchStockItem
+  requested: boolean
+  colSpan: number
+}) {
+  return (
+    <tr className="border-b border-border/40 bg-elevated/30">
+      <td colSpan={colSpan} className="px-3 py-2">
+        {!requested ? (
+          <span className="text-[10px] text-muted">尚未查询, 点击上方徽标单条归因。</span>
+        ) : !item ? (
+          <span className="text-[10px] text-muted">已提交查询, 等待结果…</span>
+        ) : !item.success ? (
+          <span className="text-[10px] text-warning">该条归因失败: {item.error ?? '未知错误'}</span>
+        ) : item.hits.length === 0 ? (
+          <span className="text-[10px] text-muted">
+            窗口内无新闻命中 ({item.result_count} 条) —— 没有任何域名解释这次异动。
+          </span>
+        ) : (
+          <div className="space-y-1">
+            <div className="text-[10px] text-muted">
+              命中 {item.result_count} 条 · 不同域名 {item.hit_domain_count} 个: {item.hit_domains.join('、')}
+              {item.cached && <span className="ml-1 text-muted/70">· 命中后端缓存</span>}
+            </div>
+            <ul className="space-y-0.5">
+              {item.hits.slice(0, 8).map((hit, i) => (
+                <li key={`${hit.url}-${i}`} className="truncate text-[10px]">
+                  <a
+                    href={hit.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={hit.snippet || hit.title}
+                    className="text-secondary hover:text-accent hover:underline"
+                  >
+                    <span className="mr-1 rounded bg-elevated px-1 text-[9px] text-muted">{hit.source}</span>
+                    {hit.title}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </td>
     </tr>
   )

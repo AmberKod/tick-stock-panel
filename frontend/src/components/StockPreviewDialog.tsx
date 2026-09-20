@@ -100,9 +100,22 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     enabled: !!symbol,
   })
   // 异动边缘: 与异动页同 queryKey 共享缓存; 该股处于观察/边缘/触发状态时在图表上方显示信息条
+  // 港美 symbol (.HK/.US 后缀) 走动量口径接口, 与 A股分缓存; 两种返回在 queryFn 内归一化为 {asof, rows}
+  const abnormalMarket: '' | 'HK' | 'US' = symbol?.endsWith('.HK')
+    ? 'HK'
+    : symbol?.endsWith('.US') ? 'US' : ''
   const abnormal = useQuery({
-    queryKey: QK.abnormalOverview(0.5, 300),
-    queryFn: () => api.abnormalOverview(0.5, 300),
+    queryKey: abnormalMarket
+      ? QK.abnormalHkUsOverview(abnormalMarket, 0.5, 300)
+      : QK.abnormalOverview(0.5, 300),
+    queryFn: async () => {
+      if (abnormalMarket) {
+        const d = await api.abnormalHkUsOverview(abnormalMarket, 0.5, 300)
+        return { asof: d.asof, rows: d.rows }
+      }
+      const d = await api.abnormalOverview(0.5, 300)
+      return { asof: d.asof, rows: d.rows }
+    },
     enabled: !!symbol,
   })
   const abRow = symbol
@@ -445,7 +458,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                       return (
                         <span
                           key={w}
-                          title={`近${parseInt(w, 10)}日累计偏离(含实时) / 交易所规则阈值 · 接近度=|偏离|/阈值`}
+                          title={abnormalMarket
+                            ? `近${parseInt(w, 10)}日累计动量 / 自定阈值 (港美无交易所异动披露制度) · 接近度=|动量|/阈值`
+                            : `近${parseInt(w, 10)}日累计偏离(含实时) / 交易所规则阈值 · 接近度=|偏离|/阈值`}
                           className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] ${
                             dominant
                               ? 'border-border bg-elevated font-semibold text-foreground'

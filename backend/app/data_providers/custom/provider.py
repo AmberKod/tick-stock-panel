@@ -103,7 +103,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("daily")
@@ -125,7 +125,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("adj_factor")
@@ -361,6 +361,6 @@ def _token_from_env(name: str | None) -> str | None:
             key, value = text.split("=", 1)
             if key.strip() == name:
                 return value.strip().strip('"').strip("'")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     return None

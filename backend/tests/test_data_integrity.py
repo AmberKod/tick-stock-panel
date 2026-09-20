@@ -5,7 +5,7 @@ null); 历史交易日的 quote_ts 时刻 < 15:00 即盘中快照 → 坏。
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -198,9 +198,9 @@ def test_branch4_start_without_stale_day_uses_latest():
 
 def test_timezone_conversion_is_cn():
     # quote_ts 是毫秒 Unix 时间戳, 必须按 UTC+8 折算 — 15:00 边界用例
-    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 15:00
+    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=UTC).timestamp() * 1000)  # 北京 15:00
     assert _is_snapshot(FRIDAY, ts) is False
-    ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 11:58
+    ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=UTC).timestamp() * 1000)  # 北京 11:58
     assert _is_snapshot(FRIDAY, ts_morning) is True
 
 
@@ -270,6 +270,8 @@ def test_realtime_gate_blocks_on_snapshot_and_launches_repair(tmp_path, monkeypa
     from app.api import settings as settings_api
     from app.services import data_integrity
 
+    monkeypatch.setattr(data_integrity, "_today", lambda: TODAY)
+
     _write_daily_partition(tmp_path, "kline_daily", FRIDAY, _ts_ms(FRIDAY, time(11, 58)))
     _write_daily_partition(tmp_path, "kline_daily", TODAY, _ts_ms(TODAY, time(10, 0)))
 
@@ -300,6 +302,9 @@ def test_realtime_gate_blocks_on_snapshot_and_launches_repair(tmp_path, monkeypa
 
 def test_realtime_gate_allows_clean_data(tmp_path, monkeypatch):
     from app.api import settings as settings_api
+    from app.services import data_integrity
+
+    monkeypatch.setattr(data_integrity, "_today", lambda: TODAY)
 
     _write_daily_partition(tmp_path, "kline_daily", FRIDAY, None)
     _write_daily_partition(tmp_path, "kline_daily", TODAY, _ts_ms(TODAY, time(10, 0)))
@@ -320,6 +325,9 @@ def test_realtime_gate_allows_clean_data(tmp_path, monkeypatch):
 
 def test_realtime_gate_ignores_old_issues_beyond_window(tmp_path, monkeypatch):
     from app.api import settings as settings_api
+    from app.services import data_integrity
+
+    monkeypatch.setattr(data_integrity, "_today", lambda: TODAY)
 
     old_day = TODAY - timedelta(days=AUTO_REPAIR_MAX_LAG_DAYS + 1)
     while old_day.weekday() >= 5:
@@ -382,6 +390,22 @@ def _write_full_partition(root, table: str, day: date, quote_ts: int | None) -> 
     }).write_parquet(part / "part.parquet")
 
 
+def _write_instruments(root) -> None:
+    """最小 A 股维表。enriched 需要它才能产出换手率/连板数 (否则写入被拒绝)。"""
+    inst = root / "instruments"
+    inst.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600001.SH", "600002.SH"],
+        "market": ["cn", "cn"],
+        "name": ["测试一", "测试二"],
+        "float_shares": [1.0e9, 2.0e9],
+        "total_shares": [1.5e9, 3.0e9],
+        "limit_up": [11.0, 22.0],
+        "limit_down": [9.0, 18.0],
+        "as_of": [date.today(), date.today()],
+    }).write_parquet(inst / "instruments.parquet")
+
+
 def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch):
     """用户 bug 场景复刻: 昨天盘中快照 + 今天实时分区 → 管道应放弃"只刷今天",
     降级为从坏日起的范围拉取, 并把坏 enriched 分区删后重算。"""
@@ -399,6 +423,7 @@ def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch):
     _write_full_partition(tmp_path, "kline_daily", today, _ts_ms(today, time(10, 0)))
     _write_full_partition(tmp_path, "kline_daily_enriched", yesterday, _ts_ms(yesterday, time(11, 58)))
     _write_full_partition(tmp_path, "kline_daily_enriched", today, _ts_ms(today, time(10, 0)))
+    _write_instruments(tmp_path)
 
     # 网络函数离线化: 维表同步 + 日K batch 拉取(记录参数)
     monkeypatch.setattr(instrument_sync, "sync_instruments", lambda data_dir: 0)

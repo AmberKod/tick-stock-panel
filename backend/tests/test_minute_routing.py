@@ -22,7 +22,6 @@ from app.plugins.stocksdk import provider as sp
 from app.plugins.stocksdk.provider import StockSDKProvider
 from app.services import kline_sync
 
-
 # ---------- 辅助 ----------
 
 def _mock_minute_df(symbol: str = "600519.SH") -> pl.DataFrame:

@@ -20,12 +20,14 @@ from app.api import (
     data,
     ext_data,
     financials,
+    hotspots,
     indices,
     intraday,
     kline,
     market_recap,
     mining,
     monitor_rules,
+    news,
     overview,
     pipeline,
     regime,
@@ -37,7 +39,10 @@ from app.api import (
     watchlist,
 )
 from app.api import auth as auth_api
+from app.api import hk as hk_api
 from app.api import settings as settings_api
+from app.api import strength_ladder as strength_ladder_api
+from app.api import us as us_api
 from app.api.routes import router as core_router
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
@@ -53,8 +58,6 @@ from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
-from app.api import hk as hk_api
-from app.api import us as us_api
 
 logging.basicConfig(
     level=settings.log_level,
@@ -81,7 +84,7 @@ if not getattr(sys, "frozen", False):
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
         logging.getLogger().addHandler(_file_handler)
-    except Exception as _e:  # noqa: BLE001
+    except Exception as _e:
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
@@ -97,7 +100,7 @@ async def _application_lifespan(app: FastAPI):
     try:
         from app.services import auth as auth_service
         auth_service.bootstrap_from_env()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("auth bootstrap failed: %s", e)
 
     # 数据层
@@ -120,7 +123,7 @@ async def _application_lifespan(app: FastAPI):
             logger.warning("enriched generation requires a full rebuild: %s", exc)
     # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
     app.state.indicators_ready = False
-    repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
+    repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)
 
     # Polars 缓存预热 — enriched 的重计算 (107万行 compute_indicators) 推后台,
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
@@ -136,7 +139,7 @@ async def _application_lifespan(app: FastAPI):
         from app.data_providers import custom as custom_sources
         custom_sources.load_all()
         logger.info("custom data sources loaded: %d", len(custom_sources.list_sources()))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("custom data sources init failed: %s", e)
 
     # 全局行情服务
@@ -164,7 +167,7 @@ async def _application_lifespan(app: FastAPI):
         daily_pipeline.set_app_state(app.state)  # 供 depth_finalize job 访问 depth_service
         scheduler = daily_pipeline.start_scheduler(repo, capset)
         app.state.scheduler = scheduler
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
 
@@ -172,7 +175,7 @@ async def _application_lifespan(app: FastAPI):
     try:
         depth_service.boot_check()
         depth_service.start_polling()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("depth_service init failed: %s", e)
 
     # 停机缺口自检: 延迟后台扫描, 发现最近交易日的盘中快照/缺口时自动创建
@@ -185,8 +188,43 @@ async def _application_lifespan(app: FastAPI):
         timer = threading.Timer(30.0, boot_integrity_check, args=(app.state,))
         timer.daemon = True  # 不阻塞进程退出
         timer.start()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("integrity boot check scheduling failed: %s", e)
+
+    # 港美日 K catch-up: 调度窗口(18:00/08:00)与服务在线时段错配导致停更时,
+    # 启动后兜底补跑 (窗口已过 + H6 抽样落后才触发, 复用 job_store 占坑防并发)
+    try:
+        import threading
+
+        def _market_daily_catchup() -> None:
+            try:
+                daily_pipeline.run_market_daily_catchup(repo, capset)
+            except Exception as e:
+                logger.warning("market_daily catchup failed: %s", e)
+
+        catchup_timer = threading.Timer(60.0, _market_daily_catchup)
+        catchup_timer.daemon = True
+        catchup_timer.start()
+    except Exception as e:
+        logger.warning("market_daily catchup scheduling failed: %s", e)
+
+    # A 股盘后管道 catch-up: 服务在 15:30 之后才启动(或整天没开)时, 当日
+    # 日 K+enriched 会缺到次日调度; 启动时检测"窗口已过 + 日 K 落后"补跑一次
+    # (与港美 catch-up 错开 30 秒, 避免同一时刻抢 JobStore 单飞槽)
+    try:
+        import threading
+
+        def _daily_pipeline_catchup() -> None:
+            try:
+                daily_pipeline.run_daily_pipeline_catchup(repo, capset)
+            except Exception as e:
+                logger.warning("daily_pipeline catchup failed: %s", e)
+
+        cn_timer = threading.Timer(90.0, _daily_pipeline_catchup)
+        cn_timer.daemon = True
+        cn_timer.start()
+    except Exception as e:
+        logger.warning("daily_pipeline catchup scheduling failed: %s", e)
 
     # 企业微信智能机器人长连接(可选通道, 失败不阻断启动)
     try:
@@ -195,7 +233,7 @@ async def _application_lifespan(app: FastAPI):
         wecom_bot_service.set_app_state(app.state)
         app.state.wecom_bot_service = wecom_bot_service
         wecom_bot_service.boot_check()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("wecom_bot_service init failed: %s", e)
 
     # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
@@ -204,7 +242,7 @@ async def _application_lifespan(app: FastAPI):
     try:
         from app.services.ext_presets import ensure_builtin_presets
         await ensure_builtin_presets(store.data_dir)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
 
     # 扩展数据定时拉取: 在预设配置就绪后启动, 自动调度 enabled 的预设。
@@ -220,10 +258,10 @@ async def _application_lifespan(app: FastAPI):
     app.state.financial_scheduler = financial_scheduler
 
     # 策略引擎
-    from app.strategy.engine import StrategyEngine
-    from app.strategy import config as strategy_config
-    from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
+    from app.strategy import config as strategy_config
+    from app.strategy.engine import StrategyEngine
+    from app.strategy.monitor import StrategyMonitorService
 
     _screener_svc = ScreenerService(repo)
     _etf_screener_svc = ScreenerService(repo, asset_type="etf")
@@ -236,6 +274,7 @@ async def _application_lifespan(app: FastAPI):
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
         override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
+        data_dir=store.data_dir,
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
@@ -279,21 +318,21 @@ async def _application_lifespan(app: FastAPI):
                 logger.info("matrix cache prewarm done: %s", result)
             except (HeavyJobCancelledError, MatrixPrewarmCancelledError):
                 logger.info("matrix cache prewarm cancelled")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("matrix cache prewarm failed")
 
         if not matrix_prewarm_owner.schedule(_prewarm):
             logger.info("matrix cache prewarm already running or shutting down, skip")
 
-    repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
+    repo._on_refresh_done = _schedule_matrix_cache_prewarm
     if repo.enriched_ready:
         _schedule_matrix_cache_prewarm()
 
     # 通用监控规则引擎: 启动时 reload 规则到内存态 (修复重启后告警失效)
-    from app.strategy.monitor import MonitorRuleEngine
-    from app.strategy import monitor_rules as mr_store
     from app.services import preferences
     from app.services.sector_monitor import SectorMonitorService
+    from app.strategy import monitor_rules as mr_store
+    from app.strategy.monitor import MonitorRuleEngine
     monitor_engine = MonitorRuleEngine()
     sector_monitor_service = SectorMonitorService(repo)
     monitor_engine.set_strategy_engine(strategy_engine)
@@ -313,14 +352,14 @@ async def _application_lifespan(app: FastAPI):
                 names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
                 mr_store.migrate_strategy_monitors(store.data_dir, ids, names)
                 logger.info("strategy monitor migrated: %d strategies", len(ids))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("strategy monitor migration failed: %s", e)
 
     try:
         rules = mr_store.load_all(store.data_dir)
         monitor_engine.set_rules(rules)
         logger.info("monitor engine loaded: %d rules", monitor_engine.rule_count)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("monitor engine load failed: %s", e)
     app.state.monitor_engine = monitor_engine
     app.state.sector_monitor_service = sector_monitor_service
@@ -335,7 +374,7 @@ async def _application_lifespan(app: FastAPI):
     try:
         yield
     finally:
-        repo._on_refresh_done = None  # noqa: SLF001
+        repo._on_refresh_done = None
         if not matrix_prewarm_owner.shutdown(timeout=5.0):
             logger.warning("matrix cache prewarm did not stop within 5 seconds")
         mmanager = getattr(app.state, "mining_manager", None)
@@ -449,6 +488,7 @@ app.include_router(indices.router)
 app.include_router(overview.router)
 app.include_router(abnormal.router)
 app.include_router(regime.router)
+app.include_router(strength_ladder_api.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(data.router)
@@ -456,6 +496,8 @@ app.include_router(hk_api.router)
 app.include_router(us_api.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
+app.include_router(hotspots.router)
+app.include_router(news.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
@@ -472,15 +514,13 @@ app.state.extension_load_errors = extension_load_errors
 
 
 # 能力门控异常 → 403(而非默认 500)
-# 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
+# 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDeniedError;
 # 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from app.tickflow.capabilities import CapabilityDenied
+from app.tickflow.capabilities import CapabilityDeniedError
 
 
-@app.exception_handler(CapabilityDenied)
-async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> JSONResponse:
+@app.exception_handler(CapabilityDeniedError)
+async def capability_denied_handler(request: Request, exc: CapabilityDeniedError) -> JSONResponse:
     return JSONResponse(
         status_code=403,
         content={"detail": str(exc), "suggestion": exc.suggestion},
@@ -493,7 +533,7 @@ if _static.exists():
         app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    def spa_fallback(full_path: str):  # noqa: ARG001
+    def spa_fallback(full_path: str):
         """所有未匹配路径回退到 index.html — React Router 接管。
 
         index.html 禁止缓存 (Cache-Control: no-store), 确保浏览器每次拿到

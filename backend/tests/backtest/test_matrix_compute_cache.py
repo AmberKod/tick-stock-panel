@@ -232,3 +232,34 @@ def test_pipeline_protects_strategy_working_set_when_scoring_would_overflow_cach
     assert operations["rolling_mean"]["hits"] == 1
     assert "matrix_feature" not in operations
     assert "basic_filter_mask" not in operations
+
+
+def test_strategy_owned_scoring_uses_formal_dates_and_restores_scope():
+    from app.strategy.builtin.factor_rank_research import FactorRankResearchMatrixStrategy
+
+    market = _market()
+    strategy = FactorRankResearchMatrixStrategy({"momentum_5d": 1.0})
+    formal_dates = np.zeros(market.shape[0], dtype=bool)
+    formal_dates[10:15] = True
+    diagnostics: dict = {}
+    config = MatrixPipelineConfig(
+        basic_filter={"enabled": False}, scoring={}, order_by="score", descending=True,
+        entry_time_mask=formal_dates, diagnostics=diagnostics,
+    )
+    signals = MatrixStrategyPipeline().run(strategy, market, {"entry_score": 50}, config)
+    assert signals.entry[10:15].any()
+    assert not signals.entry[:10].any()
+    assert not diagnostics["score_missing_by_date"]["momentum_5d"].any()
+
+    invalid_dates = formal_dates.copy()
+    invalid_dates[0] = True
+    invalid_config = MatrixPipelineConfig(
+        basic_filter={}, scoring={}, order_by="score", descending=True,
+        entry_time_mask=invalid_dates,
+    )
+    with pytest.raises(ValueError, match=r"2024-01-01.*momentum_5d"):
+        MatrixStrategyPipeline().run(strategy, market, {}, invalid_config)
+    # An exception must not leak the formal date mask into a later cache build.
+    standalone = strategy.compute_signals(market, {})
+    assert standalone.shape == market.shape
+    assert not standalone.entry[:5].any()

@@ -16,11 +16,11 @@ import polars as pl
 
 from app.markets.cn import (
     BEIJING_BOARD_LIMIT,
+    CN_PROFILE,
     GROWTH_BOARD_LIMIT,
     LEGACY_MAIN_BOARD_ST_LIMIT,
     MAIN_BOARD_LIMIT,
     MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
-    CN_PROFILE,
 )
 
 
@@ -178,9 +178,14 @@ def numpy_limit_price(
 ) -> np.ndarray:
     """NumPy counterpart of :func:`polars_limit_price`."""
     sign = 1 if up else -1
-    numerator = np.rint((1.0 + sign * limit_pct) * 100.0).astype(np.int64)
+    finite_pct = np.isfinite(limit_pct)
+    numerator = np.full(limit_pct.shape, 0, dtype=np.int64)
+    if finite_pct.any():
+        numerator[finite_pct] = np.rint(
+            (1.0 + sign * limit_pct[finite_pct]) * 100.0
+        ).astype(np.int64)
     result = np.full(previous.shape, np.nan, dtype=np.float64)
-    finite = np.isfinite(previous)
+    finite = np.isfinite(previous) & finite_pct
     cents = np.floor(previous[finite] * 100.0 + 0.5).astype(np.int64)
     result[finite] = (
         ((cents * numerator[finite] + 50) // 100).astype(np.float64) / 100.0

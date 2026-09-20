@@ -94,6 +94,12 @@ backend/_verify*.py
 backend/_desktop_run.log
 reports/tickflow_pro_probe/
 .cursor/debug-*.log
+smoke-data/
+frontend/vite.config.ts.timestamp-*.mjs
+# pytest 沙箱化临时目录 (pytest-asyncio 的 garbage 目录会触发 safe-delete bulk guard,
+# 用 CODEBUDDY_SAFE_DELETE_ENABLED=0 + --basetemp 绕开, 产物不入库)
+backend/.pytest_tmp*/
+backend/.run_pytest.py
 
 # ===== 打包产物 (本地构建的安装包,不入库) =====
 backend/TickFlowStockPanel-win-x64.zip
@@ -109,3 +115,5 @@ TickFlowStockPanel.app/
 TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
 reports/cursor_tickflow_pro_rate_limit_p0.bundle
+.workbuddy/
+docs/

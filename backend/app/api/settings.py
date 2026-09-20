@@ -42,12 +42,18 @@ def _sync_financial_scheduler_caps(app_state, capset) -> None:
         return
     try:
         fs.update_capabilities(capset)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logging.getLogger(__name__).warning("update financial_scheduler capabilities failed: %s", e)
 
 
 class TickflowKeyIn(BaseModel):
     api_key: str
+
+
+class SearchKeyIn(BaseModel):
+    """搜索源 API Key(支持逗号分隔多 Key, 轮询负载均衡)。"""
+    provider: str = Field(default="anspire", max_length=32)
+    api_key: str = Field(max_length=2000)
 
 
 @router.get("")
@@ -57,14 +63,14 @@ def get_settings() -> dict:
     from app.services import preferences
     from app.services.ai_provider import (
         ai_configured,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         current_ai_model,
         current_codex_command,
         current_codex_model,
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
-        current_ai_context_window,
-        current_ai_max_output_tokens,
     )
 
     key = secrets_store.get_tickflow_key()
@@ -119,7 +125,7 @@ def switch_endpoint(req: SwitchEndpointIn, request: Request) -> dict:
 
     # 持久化到 secrets.json
     secrets_store.save({"tickflow_base_url": url})
-    # 重置客户端，下次调用自动用新端点
+    # 重置客户端,下次调用自动用新端点
     tf_client.reset_clients()
 
     return {
@@ -143,7 +149,8 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
     故自动切到默认付费端点(api.tickflow.org);free 档则清除自定义端点。
     """
     from app.tickflow.policy import (
-        base_tier_name, is_invalid_key,
+        base_tier_name,
+        is_invalid_key,
     )
 
     key = req.api_key.strip()
@@ -234,6 +241,74 @@ def clear_tickflow_key(request: Request) -> dict:
     }
 
 
+@router.get("/search-key")
+def get_search_key(provider: str = "anspire") -> dict:
+    """搜索源 Key 状态(只回显掩码, 不返回明文)。"""
+    from app.services import news_search
+
+    cls = news_search.PROVIDER_CLASSES.get(provider)
+    if cls is None:
+        raise HTTPException(400, f"不支持的搜索源: {provider}")
+    keys = news_search._split_keys(
+        secrets_store.get_env_backed_secret(cls.secret_name, cls.secret_name.upper())
+    )
+    return {
+        "provider": provider,
+        "configured": bool(keys),
+        "key_count": len(keys),
+        "masked": secrets_store.mask(keys[0]) if keys else "",
+        "source": "secrets" if keys else "unset",
+    }
+
+
+@router.post("/search-key")
+def save_search_key(req: SearchKeyIn) -> dict:
+    """保存搜索源 Key。
+
+    先探后存(与 tickflow-key 同策): 乱填的 Key 不会被持久化, 避免"配了但
+    一直失败"却查不出原因。探测 = 用该 Key 真发一次搜索请求。
+    """
+    from app.services import news_search
+
+    provider = (req.provider or "anspire").strip().lower()
+    cls = news_search.PROVIDER_CLASSES.get(provider)
+    if cls is None:
+        raise HTTPException(400, f"不支持的搜索源: {provider}")
+
+    keys = news_search._split_keys(req.api_key)
+    if not keys:
+        return {"ok": False, "error": "key empty", "provider": provider}
+
+    probe = cls(keys).search("A股 市场", max_results=1, days=3)
+    if not probe.success:
+        # 探测失败: 清掉旧值(避免残留失效 Key 一直挡着), 但明确告知原因
+        secrets_store.clear(cls.secret_name)
+        news_search.invalidate_cache()
+        return {"ok": False, "provider": provider, "error": probe.error_message}
+
+    secrets_store.save({cls.secret_name: ",".join(keys)})
+    news_search.invalidate_cache()
+    return {
+        "ok": True,
+        "provider": provider,
+        "key_count": len(keys),
+        "masked": secrets_store.mask(keys[0]),
+        "elapsed_s": round(probe.elapsed_s, 3),
+    }
+
+
+@router.delete("/search-key")
+def clear_search_key(provider: str = "anspire") -> dict:
+    from app.services import news_search
+
+    cls = news_search.PROVIDER_CLASSES.get(provider)
+    if cls is None:
+        raise HTTPException(400, f"不支持的搜索源: {provider}")
+    secrets_store.clear(cls.secret_name)
+    news_search.invalidate_cache()
+    return {"ok": True, "provider": provider, "configured": False}
+
+
 @router.post("/onboarding/complete")
 def complete_onboarding() -> dict:
     """标记首次使用向导完成。
@@ -261,11 +336,13 @@ class AiSettingsIn(BaseModel):
 
 @router.post("/ai")
 def save_ai_settings(req: AiSettingsIn) -> dict:
-    """保存 AI 配置（全部持久化到 secrets.json）"""
+    """保存 AI 配置(全部持久化到 secrets.json)"""
     from app.config import settings
     from app.services.ai_provider import (
         OPENAI_PROVIDER,
         ai_configured,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         current_ai_model,
         current_ai_provider,
         current_codex_command,
@@ -273,8 +350,6 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
-        current_ai_context_window,
-        current_ai_max_output_tokens,
         normalize_codex_command,
         normalize_codex_model,
         normalize_codex_reasoning_effort,
@@ -699,7 +774,7 @@ def delete_data_source(name: str, request: Request) -> dict:
 
 @router.post("/data-sources/test")
 def test_data_source(req: CustomSourceTestIn) -> dict:
-    """试拉自定义数据源，不写盘。"""
+    """试拉自定义数据源,不写盘。"""
     from app.data_providers import custom as custom_sources
 
     temporary = req.config is not None
@@ -715,7 +790,7 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
         else:
             provider = custom_sources.get_provider(req.provider)
         return provider.test_dataset(req.dataset, req.symbols)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
     finally:
         if temporary and provider is not None:
@@ -778,7 +853,7 @@ class NavHiddenIn(BaseModel):
 
 @router.put("/preferences/nav-order")
 def update_nav_order(req: NavOrderIn) -> dict:
-    """保存左侧菜单排序（内置页面 path + 扩展分析菜单 id 的有序列表）。"""
+    """保存左侧菜单排序(内置页面 path + 扩展分析菜单 id 的有序列表)。"""
     from app.services import preferences
     saved = preferences.set_nav_order(req.nav_order)
     return {"nav_order": saved}
@@ -857,7 +932,7 @@ class RealtimeQuoteScopePrefs(BaseModel):
 def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     """保存全局实时行情开关。
 
-    none 档无实时行情权限；free 档开启自选股实时；starter+ 开启全市场实时。
+    none 档无实时行情权限;free 档开启自选股实时;starter+ 开启全市场实时。
     前端据此把开关置灰 / 回弹。
     """
     from app.services import preferences
@@ -897,7 +972,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if repo is not None:
             try:
                 issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 issues = []
             earliest = data_integrity.earliest_issue_day(issues)
             if issues and data_integrity.within_auto_repair_window(earliest):
@@ -930,7 +1005,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
 
 @router.put("/preferences/realtime-quote-scope")
 def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
-    """保存盘中实时行情范围；独立于盘后管道范围。"""
+    """保存盘中实时行情范围;独立于盘后管道范围。"""
     from app.services import preferences
     cfg = req.model_dump(exclude_none=True)
     return preferences.set_realtime_quote_scope(cfg)
@@ -942,7 +1017,7 @@ class RealtimeWatchlistPrefs(BaseModel):
 
 @router.put("/preferences/realtime-watchlist")
 def update_realtime_watchlist(req: RealtimeWatchlistPrefs) -> dict:
-    """兼容旧入口；Free 实时标的由自选页前 5 个决定。"""
+    """兼容旧入口;Free 实时标的由自选页前 5 个决定。"""
     from app.services import preferences
     symbols = preferences.set_realtime_watchlist_symbols(req.symbols)
     return {"realtime_watchlist_symbols": symbols}
@@ -955,7 +1030,7 @@ class IndicesNavPinnedPrefs(BaseModel):
 @router.put("/preferences/indices-nav-pinned")
 def update_indices_nav_pinned(req: IndicesNavPinnedPrefs) -> dict:
     """保存侧栏指数报价卡片固定显示开关。
-    ON=常驻显示；OFF=跟随实时行情开关（仅实时开时显示）。"""
+    ON=常驻显示;OFF=跟随实时行情开关(仅实时开时显示)。"""
     from app.services import preferences
     preferences.save({"indices_nav_pinned": req.indices_nav_pinned})
     return {"indices_nav_pinned": req.indices_nav_pinned}
@@ -1132,8 +1207,7 @@ def update_feishu_webhook(req: FeishuWebhookPrefsIn) -> dict:
     - url: 传入空串表示清空配置; 非空则需为合法的飞书自定义机器人地址。
     - secret: 机器人启用了「签名校验」时填密钥, 留空表示不验签。
     """
-    from app.services import preferences
-    from app.services import webhook_adapter
+    from app.services import preferences, webhook_adapter
 
     url = (req.url or "").strip()
     if url and not webhook_adapter.is_valid_feishu_url(url):
@@ -1158,8 +1232,7 @@ def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
     - url: 传入空串表示清空配置; 非空需为合法企业微信群推送 Webhook 地址, 或纯 key。
     - 用户可只填 key (webhook/send?key=xxx 的 xxx 部分), 后端自动补全为完整 URL。
     """
-    from app.services import preferences
-    from app.services import webhook_adapter
+    from app.services import preferences, webhook_adapter
 
     url = (req.url or "").strip()
     if url and not webhook_adapter.is_valid_wecom_url(url):
@@ -1591,7 +1664,7 @@ def run_limit_ladder_fix(request: Request) -> dict:
     """立即手动修正一次真假板(拉取五档盘口 + 更新缓存)。需 Pro+。"""
     from app.tickflow.capabilities import Cap
     capset = request.app.state.capabilities
-    capset.require(Cap.DEPTH5_BATCH)  # 无能力抛 CapabilityDenied(403)
+    capset.require(Cap.DEPTH5_BATCH)  # 无能力抛 CapabilityDeniedError(403)
 
     depth_svc = getattr(request.app.state, "depth_service", None)
     if not depth_svc:
@@ -1679,7 +1752,7 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
     sched = preferences.set_review_schedule(req.enabled, req.hour, req.minute)
 
     # 动态操作 APScheduler job
-    from app.jobs.daily_pipeline import _register_review_job, REVIEW_JOB_ID
+    from app.jobs.daily_pipeline import REVIEW_JOB_ID, _register_review_job
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler:
         if sched["enabled"]:

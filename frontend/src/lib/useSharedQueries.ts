@@ -68,6 +68,18 @@ export function useVersion() {
   })
 }
 
+/** 数据新鲜度 — 底部状态栏常驻轮询 (同步进行中 3s, 空闲 30s) */
+export function useDataFreshness(opts?: { refetchInterval?: number | false }) {
+  return useQuery({
+    queryKey: QK.dataFreshness,
+    queryFn: api.dataFreshness,
+    staleTime: 2_000,
+    refetchInterval: opts?.refetchInterval ?? 30_000,
+    // 轮询期间保持上一帧, 避免状态栏闪烁
+    placeholderData: (prev: any) => prev,
+  })
+}
+
 /** 数据状态 — Data / Screener 共用 */
 export function useDataStatus(opts?: {
   staleTime?: number

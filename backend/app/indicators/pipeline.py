@@ -22,12 +22,12 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
-from app.markets.cn import CN_PROFILE
 from app.enriched_generation import (
     EnrichedPublication,
     enriched_publication_incomplete,
 )
 from app.market_time import cn_today
+from app.markets.cn import CN_PROFILE
 from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 from app.price_limits import (
     polars_is_risk_warning_name,
@@ -504,7 +504,14 @@ def compute_indicators(
     if "momentum_60d" in want:
         _p4mom.append((pl.col("close") / pl.col("close").shift(60).over("symbol") - 1).alias("momentum_60d"))
     if "change_pct" in want:
-        _p4mom.append((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("change_pct"))
+        # 前收价 <= 0 (退市归零/数据断层) 时无法计算有效涨跌幅, 置 None,
+        # 避免 HOS 这类退市重组标的算出 8508% 的脏 change_pct 污染涨幅榜。
+        _p4mom.append(
+            pl.when(pl.col("close").shift(1).over("symbol") > 0)
+            .then(pl.col("close") / pl.col("close").shift(1).over("symbol") - 1)
+            .otherwise(None)
+            .alias("change_pct")
+        )
     if _p4mom:
         df = df.with_columns(_p4mom)
     if "change_amount" in want:
@@ -1030,9 +1037,61 @@ def compute_enriched(
 
 
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (14 列)。"""
+    """写入 parquet 前裁剪到存储列。
+
+    缺失派生列 (换手率 / 连板数) 时必须 fail-loud 而不是静默裁剪:
+    静默裁剪会让分区悄悄退化成 12 列窄表, 下游主线/热点/连板梯队
+    直接 ColumnNotFoundError, 且要等到查询时才暴露。
+    """
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
+    missing = [c for c in ENRICHED_STORAGE_COLS if c not in df.columns]
+    if missing and df.height > 0:
+        raise ValueError(
+            f"enriched 缺列 {missing}, 拒绝写入窄表分区。"
+            "最常见原因是 instruments 维表加载失败 (跨市场 schema 冲突),"
+            "导致 compute_limit_signals 被跳过。"
+        )
     return df.select(cols)
+
+
+def _load_instruments(data_dir: Path) -> pl.DataFrame:
+    """加载 A 股 instruments 维表 (涨跌停价 / 流通股本 / 名称)。
+
+    data/instruments/ 下同时存放 hk_instruments.parquet / us_instruments.parquet,
+    与 A 股维表 schema 不一致 (region 列 Null vs String、列数 33/16 vs 14)。
+    用 glob 一起扫会触发 polars 跨文件 schema 冲突并整体失败, 使维表退化为空,
+    进而 compute_all 跳过 compute_limit_signals → enriched 静默退化为 12 列。
+    因此固定读 A 股文件; 仅在它缺失时才回退逐文件扫描 (diagonal_relaxed 容错)。
+    """
+    primary = data_dir / "instruments" / "instruments.parquet"
+    if primary.exists():
+        try:
+            return scan_parquet_compat(primary).collect()
+        except Exception as e:
+            logger.warning("A 股维表读取失败 (%s): %s", primary.name, e)
+
+    frames: list[pl.DataFrame] = []
+    inst_dir = data_dir / "instruments"
+    for p in sorted(inst_dir.rglob("*.parquet")) if inst_dir.exists() else []:
+        try:
+            frames.append(pl.read_parquet(p))
+        except Exception as e:
+            logger.warning("维表 %s 读取失败, 跳过: %s", p.name, e)
+    if not frames:
+        logger.error(
+            "instruments 维表不可用 (%s/instruments/), enriched 将缺换手率/连板数, "
+            "写入会被 _select_storage_cols 拒绝 — 请先同步 A 股维表",
+            data_dir,
+        )
+        return pl.DataFrame()
+    merged = pl.concat(frames, how="diagonal_relaxed")
+    if "market" in merged.columns:
+        merged = merged.filter(
+            pl.col("market").is_null() | (pl.col("market") == "cn") | (pl.col("market") == "CN")
+        )
+    if merged.height == 0:
+        logger.error("instruments 维表为空 (%s/instruments/), enriched 将缺换手率/连板数", data_dir)
+    return merged
 
 
 # ================================================================
@@ -1120,7 +1179,7 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
                     .rename({"close": "bench_close"})
                     .unique(subset=["date", "bench_exchange"])
                 )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("基准指数偏离数据加载失败: %s", exc)
         frame = None
 
@@ -1309,7 +1368,6 @@ def run_pipeline(data_dir: Path | None = None,
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
-    inst_glob = str(d / "instruments" / "**" / "*.parquet")
 
     if not daily_dir.exists() or not any(daily_dir.rglob("*.parquet")):
         logger.info("无日K数据, 跳过管道")
@@ -1320,11 +1378,7 @@ def run_pipeline(data_dir: Path | None = None,
     written = 0
 
     # 加载 instruments (涨跌停+换手率需要)
-    instruments = pl.DataFrame()
-    try:
-        instruments = scan_parquet_compat(inst_glob, cast_options=_cast).collect()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("instruments 读取失败: %s", e)
+    instruments = _load_instruments(d)
     historical_shares = load_share_history(d)
 
     if new_dates_only:
@@ -1589,7 +1643,7 @@ def _load_factors(factor_path: Path) -> pl.DataFrame:
         return pl.DataFrame()
     try:
         return pl.read_parquet(factor_path)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("复权因子读取失败: %s", e)
         return pl.DataFrame()
 
@@ -1619,7 +1673,7 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
                                  "volume", "amount", "raw_close", "raw_high", "raw_low"]
                     if c in lf.schema]
         return lf.select(hist_cols).collect()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("历史数据加载失败: %s", e)
         return pl.DataFrame()
 

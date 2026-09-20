@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, Pencil, Plus, Save, Trash2, X } from 'lucide-react'
-import { api, type FactorColumn, type ScoringDirection } from '@/lib/api'
+import { api, type ScoringColumn, type ScoringContext, type ScoringDirection, type StrategyBacktestAsset } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { ConceptHeatStatus, conceptHeatNeedsRefresh, useConceptMarketDate } from '@/components/screener/ConceptHeatStatus'
 
 interface Props {
   value: Record<string, number>
   directions: Record<string, ScoringDirection>
   onChange: (value: Record<string, number>, directions: Record<string, ScoringDirection>) => void
   fallbackLabels?: Record<string, string>
+  assetType?: StrategyBacktestAsset
+  context?: ScoringContext
+  asOf?: string
 }
 
 function weightsToPercentages(values: Record<string, number>) {
@@ -35,11 +39,10 @@ function weightsToPercentages(values: Record<string, number>) {
 }
 
 function normalizePercentages(values: Record<string, number>) {
-  const active = Object.entries(values).filter(([, value]) => Number(value) > 0)
-  const total = active.reduce((sum, [, value]) => sum + Number(value), 0)
-  if (total <= 0) return {}
+  const entries = Object.entries(values).map(([name, value]) => [name, Math.max(0, Number(value) || 0)] as const)
+  const total = entries.reduce((sum, [, value]) => sum + value, 0)
   return Object.fromEntries(
-    active.map(([name, value]) => [name, +(Number(value) / total).toFixed(6)]),
+    entries.map(([name, value]) => [name, total > 0 ? +(value / total).toFixed(6) : 0]),
   ) as Record<string, number>
 }
 
@@ -54,7 +57,7 @@ function ScoringRow({ name, label, weight, direction, editing, onWeightChange, o
   onRemove: () => void
 }) {
   return (
-    <div className="grid min-h-8 grid-cols-[minmax(4rem,6.5rem)_3.75rem_minmax(3.5rem,1fr)_2.25rem_1.75rem] items-center gap-1.5">
+    <div className="grid min-h-8 grid-cols-[minmax(3rem,6.5rem)_3.25rem_minmax(1.5rem,1fr)_2rem_1.75rem] items-center gap-1">
       <span className="truncate text-right text-[11px] text-secondary" title={`${label} · ${name}`}>{label}</span>
       {editing ? (
         <div className="grid h-6 grid-cols-2 overflow-hidden rounded border border-border bg-base">
@@ -113,26 +116,45 @@ function ScoringRow({ name, label, weight, direction, editing, onWeightChange, o
   )
 }
 
-export function ScoringEditor({ value, directions, onChange, fallbackLabels = {} }: Props) {
+export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}, assetType = 'stock', context = 'current', asOf }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, number>>(() => weightsToPercentages(value))
   const [directionDraft, setDirectionDraft] = useState<Record<string, ScoringDirection>>(directions)
   const [factorToAdd, setFactorToAdd] = useState('')
+  const currentMarketDate = useConceptMarketDate(assetType)
+  const queryDate = asOf || (context === 'current' ? currentMarketDate : undefined)
   const factors = useQuery({
-    queryKey: QK.factorColumns,
-    queryFn: api.factorColumns,
-    staleTime: 5 * 60_000,
+    queryKey: QK.scoringColumns(assetType, context, queryDate),
+    queryFn: () => api.scoringColumns({ assetType, context, asOf: queryDate }),
+    staleTime: 60_000,
+    refetchInterval: context === 'current' ? 60_000 : false,
+    refetchOnWindowFocus: 'always',
+    retry: false,
   })
   const factorLabels = useMemo(() => Object.fromEntries(
     (factors.data?.columns ?? []).map(item => [item.id, item.label]),
   ), [factors.data])
   const factorGroups = useMemo(() => {
-    const groups: Record<string, FactorColumn[]> = {}
+    const groups: Record<string, ScoringColumn[]> = {}
     for (const item of factors.data?.columns ?? []) {
       ;(groups[item.group] ??= []).push(item)
     }
     return groups
   }, [factors.data])
+  const conceptFactor = factors.data?.columns.find(item => item.id === 'concept_heat')
+  const canAdd = (item: ScoringColumn) => !factors.isPending && !factors.isError
+    && (item.id === 'concept_heat'
+      ? item.available === true
+        && (item.metadata?.status === 'available' || item.metadata?.status === 'partial')
+        && !conceptHeatNeedsRefresh(item.metadata, currentMarketDate)
+      : item.available !== false)
+  const selectedFactor = factors.data?.columns.find(item => item.id === factorToAdd)
+  const canAddSelected = !!selectedFactor && canAdd(selectedFactor)
+
+  useEffect(() => {
+    setEditing(false)
+    setFactorToAdd('')
+  }, [assetType, context, asOf])
 
   useEffect(() => {
     if (editing) return
@@ -153,7 +175,10 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
     setEditing(false)
   }
   const saveDraft = () => {
-    const normalized = normalizePercentages(draft)
+    const originalDraft = weightsToPercentages(value)
+    const weightsUnchanged = Object.keys(draft).length === Object.keys(originalDraft).length
+      && Object.entries(draft).every(([name, weight]) => weight === originalDraft[name])
+    const normalized = weightsUnchanged ? { ...value } : normalizePercentages(draft)
     const nextDirections = Object.fromEntries(
       Object.keys(normalized).map(name => [name, directionDraft[name] ?? 'high']),
     ) as Record<string, ScoringDirection>
@@ -162,7 +187,7 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
     setEditing(false)
   }
   const addFactor = () => {
-    if (!factorToAdd || factorToAdd in draft) return
+    if (!factorToAdd || factorToAdd in draft || !canAddSelected) return
     setDraft(current => ({ ...current, [factorToAdd]: Object.keys(current).length > 0 ? 10 : 100 }))
     setDirectionDraft(current => ({ ...current, [factorToAdd]: 'high' }))
     setFactorToAdd('')
@@ -182,13 +207,26 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
   const draftTotal = Object.values(visibleWeights).reduce((sum, weight) => sum + weight, 0)
 
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
+      {factors.isPending && <p className="text-[11px] text-muted" role="status">正在加载评分因子目录… 已有配置仍可编辑。</p>}
+      {factors.isError && (
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-warning" role="alert">
+          <span>评分因子目录加载失败，已有配置仍可编辑或移除。</span>
+          <button type="button" onClick={() => { void factors.refetch() }} disabled={factors.isFetching} className="underline disabled:opacity-50">{factors.isFetching ? '重试中…' : '重试加载'}</button>
+        </div>
+      )}
+      {factors.isSuccess && factors.data.columns.length === 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted" role="status">
+          <span>评分因子目录为空，已有配置仍可编辑或移除。</span>
+          <button type="button" onClick={() => { void factors.refetch() }} disabled={factors.isFetching} className="underline disabled:opacity-50">重新加载</button>
+        </div>
+      )}
       {editing && (
         <div className="flex gap-2 border-b border-border/40 pb-3">
           <select
             value={factorToAdd}
             onChange={event => setFactorToAdd(event.target.value)}
-            disabled={factors.isLoading || factors.isError}
+            disabled={factors.isPending || factors.isError || !factors.data?.columns.length}
             className="h-8 min-w-0 flex-1 rounded-input border border-border bg-base px-2 text-xs text-secondary focus:border-accent focus:outline-none disabled:opacity-50"
             aria-label="选择要添加的评分因子"
           >
@@ -199,7 +237,7 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
               const available = items.filter(item => !(item.id in draft))
               return available.length > 0 ? (
                 <optgroup key={group} label={group}>
-                  {available.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  {available.map(item => <option key={item.id} value={item.id} disabled={!canAdd(item)}>{item.label}{canAdd(item) ? '' : '（不可用）'}</option>)}
                 </optgroup>
               ) : null
             })}
@@ -207,7 +245,7 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
           <button
             type="button"
             onClick={addFactor}
-            disabled={!factorToAdd}
+            disabled={!canAddSelected}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-btn border border-accent/30 bg-accent/10 text-accent transition-colors hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-40"
             title="添加评分因子"
             aria-label="添加评分因子"
@@ -223,7 +261,7 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
             <ScoringRow
               key={name}
               name={name}
-              label={factorLabels[name] ?? fallbackLabels[name] ?? name}
+              label={factorLabels[name] ?? fallbackLabels[name] ?? (name === 'concept_heat' ? '概念热度' : name)}
               weight={visibleWeights[name] ?? 0}
               direction={visibleDirections[name] ?? 'high'}
               editing={editing}
@@ -239,10 +277,23 @@ export function ScoringEditor({ value, directions, onChange, fallbackLabels = {}
         </div>
       )}
 
+      {conceptFactor?.metadata?.status ? (
+        <ConceptHeatStatus
+          metadata={factors.isError ? { ...conceptFactor.metadata, status: 'unavailable', reason: '评分能力暂时无法确认，请重试加载。' } : conceptFactor.metadata}
+          currentMarketDate={currentMarketDate}
+          showFormula
+        />
+      ) : conceptFactor && (
+        <p className="break-words text-[11px] leading-5 text-muted">概念热度：{conceptFactor.reason || conceptFactor.desc}</p>
+      )}
+      {'concept_heat' in visibleWeights && (!conceptFactor || !canAdd(conceptFactor)) && (
+        <p className="break-words text-[11px] leading-5 text-warning">概念热度当前不可用。已有权重已保留，可调整为零或移除后使用其他因子。</p>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/40 pt-2">
         <div className="text-[10px] text-muted">
           权重 <span className={`font-mono text-xs font-medium ${editing && draftTotal !== 100 ? 'text-amber-400' : 'text-emerald-400'}`}>
-            {editing ? draftTotal : visibleKeys.length > 0 ? 100 : 0}%
+            {editing ? draftTotal : draftTotal > 0 ? 100 : 0}%
           </span>
         </div>
         <div className="flex items-center gap-1">

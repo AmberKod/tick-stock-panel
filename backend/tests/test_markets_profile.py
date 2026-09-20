@@ -8,10 +8,10 @@ from __future__ import annotations
 import random
 from datetime import date, datetime, timedelta
 
-import pytest
-
 from app.market_time import (
     trading_minutes_elapsed_from_dt as legacy_minutes_dt,
+)
+from app.market_time import (
     trading_minutes_elapsed_from_ts as legacy_minutes_ts,
 )
 from app.markets import get_profile, profile_for_symbol, resolve_market

@@ -434,3 +434,54 @@ def test_engine_abnormal_down_direction_event_type() -> None:
     events = engine.evaluate_abnormal([_row("600000.SH", ("3d", -0.16))], now=1006.0)
     assert len(events) == 1
     assert events[0]["type"] == "abnormal_down"
+
+
+# ── 港美 symbol 接入 (动量口径 rows 与 A股合流评估) ──────────
+
+def test_engine_abnormal_hk_us_symbol_triggers_and_message() -> None:
+    """港美 symbol 走同一 evaluate_abnormal: 触发语义一致, 文案区分动量口径。"""
+    engine = MonitorRuleEngine()
+    engine.set_rules([_ab_rule()])
+
+    def _hk_row(symbol: str, *wins: tuple[str, float]) -> dict:
+        # 港美阈值: 3d=0.25, 10d=1.20, 30d=2.40 (自定动量口径)
+        thresholds = {"3d": 0.25, "10d": 1.20, "30d": 2.40}
+        windows = {
+            key: {"value": value, "threshold": thresholds[key],
+                  "closeness": round(abs(value) / thresholds[key], 4)}
+            for key, value in wins
+        }
+        return {"symbol": symbol, "name": "港股A", "board": "港美市场", "st": False,
+                "close": 10.0, "rt_pct": 0.05, "windows": windows}
+
+    # 首轮观测不触发 (0.20/0.25 = 80% ≥ 70% 但首轮只建状态)
+    assert engine.evaluate_abnormal([_hk_row("01810.HK", ("3d", 0.20))], now=2000.0) == []
+    # 低接近度轮 (0.10/0.25 = 40% < 70%): 状态翻 False
+    engine.evaluate_abnormal([_hk_row("01810.HK", ("3d", 0.10))], now=2006.0)
+    # 上穿: 0.24/0.25 = 96% ≥ 70% → 触发, 文案为动量口径
+    events = engine.evaluate_abnormal([_hk_row("01810.HK", ("3d", 0.24))], now=2012.0)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["symbol"] == "01810.HK"
+    assert ev["type"] == "abnormal_up"
+    assert ev["abnormal_window"] == "3d"
+    assert ev["abnormal_closeness"] == pytest.approx(0.96)
+    assert "动量" in ev["message"] and "偏离值" not in ev["message"]
+
+
+def test_engine_abnormal_mixed_market_rows_one_pass() -> None:
+    """A股 + 港美 rows 合流一轮评估: 互不干扰, 各自按各自阈值触发。"""
+    engine = MonitorRuleEngine()
+    engine.set_rules([_ab_rule()])
+    # 首轮建状态 (均未达 70%)
+    engine.evaluate_abnormal(
+        [_row("600000.SH", ("3d", 0.10)), _row("AAPL.US", ("10d", 0.50))], now=3000.0,
+    )
+    # A股 0.19/0.2=95%; 美股 1.30/1.20≈108% — 同轮双双触发
+    events = engine.evaluate_abnormal(
+        [_row("600000.SH", ("3d", 0.19)), _row("AAPL.US", ("10d", 1.30))], now=3006.0,
+    )
+    by_symbol = {ev["symbol"]: ev for ev in events}
+    assert set(by_symbol) == {"600000.SH", "AAPL.US"}
+    assert "偏离值" in by_symbol["600000.SH"]["message"]
+    assert "动量" in by_symbol["AAPL.US"]["message"]

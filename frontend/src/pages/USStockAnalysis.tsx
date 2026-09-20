@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
-import { useState } from 'react'
+import { useParams, Link } from 'react-router-dom'
+import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
+import { StockDailyKChart } from '@/components/StockDailyKChart'
 
 interface USRealtime {
   symbol: string
@@ -18,43 +19,27 @@ interface USRealtime {
   market?: string
 }
 
-interface USDailyRow {
-  date: string
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
-}
-
-interface USDailyResponse {
-  symbol: string
-  name: string
-  rows: USDailyRow[]
-  source: string
-}
-
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(path)
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json() as Promise<T>
 }
 
+/**
+ * 美股个股页 — 实时行情卡片 + A股同款日K蜡烛图 (MA/MACD/KDJ/RSI/BOLL)。
+ *
+ * K线走 /api/kline/daily (repository.get_daily 对 .US symbol 分流读
+ * kline_hk_us_enriched 本地全量 enriched), 与 A股 StockDailyKChart 完全同源。
+ * 美股无涨跌停, 关闭 limitMarkers。
+ */
 export function USStockAnalysisPage() {
   const { symbol: rawSymbol = 'AAPL.US' } = useParams<{ symbol: string }>()
   const symbol = rawSymbol.toUpperCase()
-  const [days, setDays] = useState(120)
 
   const realtime = useQuery({
     queryKey: ['us', 'realtime', symbol],
     queryFn: () => fetchJson<USRealtime>(`/api/us/realtime/${encodeURIComponent(symbol)}`),
     refetchInterval: 60_000,
-  })
-
-  const daily = useQuery({
-    queryKey: ['us', 'daily', symbol, days],
-    queryFn: () => fetchJson<USDailyResponse>(`/api/us/daily/${encodeURIComponent(symbol)}?days=${days}`),
-    staleTime: 60_000,
   })
 
   const r = realtime.data
@@ -65,9 +50,7 @@ export function USStockAnalysisPage() {
         ? 'text-emerald-500'
         : 'text-rose-500'
 
-  // 美股惯例: 涨绿跌红 (与中国相反, 但本地视感不变 — 用绿色)
-  // 注意: 港股用红涨绿跌, 美股用绿涨红跌; 代码用 绿/红 反向
-
+  // 美股惯例: 涨绿跌红 (与中国相反)
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-baseline gap-3">
@@ -78,6 +61,9 @@ export function USStockAnalysisPage() {
         </h1>
         <span className="inline-block px-1.5 py-0.5 text-xs rounded bg-blue-500/10 text-blue-500">
           US · USD
+        </span>
+        <span className="ml-auto">
+          <MarketWatchlistButton symbol={symbol} market="us" />
         </span>
         {r && (
           <span className="text-xs text-fg-muted">
@@ -119,33 +105,11 @@ export function USStockAnalysisPage() {
       </div>
 
       <div className="text-xs text-fg-muted p-3 rounded border border-border bg-surface/40">
-        美股惯例: 绿涨红跌 · T+0 交收 · 无涨跌停 · 数据源 yfinance (免费档延迟 15min) · 装 <code>yfinance</code> 后可看 5 年日 K
+        美股惯例: 绿涨红跌 · T+0 交收 · 无涨跌停 · K线为本地 enriched 全量日K (新浪源优先, yfinance 兜底)
       </div>
 
-      <div className="rounded-lg border border-border bg-surface/60 p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-fg">日 K（近 {days} 日）</h2>
-          <div className="flex gap-2 text-xs">
-            {[60, 120, 250, 500].map((d) => (
-              <button
-                key={d}
-                onClick={() => setDays(d)}
-                className={`px-2 py-1 rounded ${days === d ? 'bg-blue-500 text-white' : 'bg-elevated text-fg-muted'}`}
-              >
-                {d}日
-              </button>
-            ))}
-          </div>
-        </div>
-        {daily.isLoading && <div className="text-fg-muted text-sm py-4">加载中...</div>}
-        {daily.error && <div className="text-rose-500 text-sm py-4">加载失败: {String((daily.error as Error).message)}</div>}
-        {daily.data && daily.data.rows.length === 0 && (
-          <div className="text-fg-muted text-sm py-4">
-            日 K 暂不可用 (yfinance 未装 或 网络失败)。装 yfinance 后刷新即可。
-          </div>
-        )}
-        {daily.data && daily.data.rows.length > 0 && <DailyTable rows={daily.data.rows} />}
-      </div>
+      {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) */}
+      <StockDailyKChart symbol={symbol} height={560} showLimitMarkers={false} />
     </div>
   )
 }
@@ -159,49 +123,14 @@ function Card({ label, children }: { label: string; children: React.ReactNode })
   )
 }
 
-function DailyTable({ rows }: { rows: USDailyRow[] }) {
-  const reversed = [...rows].reverse()
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="text-fg-muted border-b border-border">
-          <tr>
-            <th className="text-left py-2 px-3">日期</th>
-            <th className="text-right py-2 px-3">开</th>
-            <th className="text-right py-2 px-3">高</th>
-            <th className="text-right py-2 px-3">低</th>
-            <th className="text-right py-2 px-3">收</th>
-            <th className="text-right py-2 px-3">量</th>
-          </tr>
-        </thead>
-        <tbody>
-          {reversed.slice(0, 60).map((r) => (
-            <tr key={r.date} className="border-b border-border/50">
-              <td className="py-1.5 px-3 text-fg-muted font-mono">{r.date}</td>
-              <td className="py-1.5 px-3 text-right text-fg">{r.open.toFixed(2)}</td>
-              <td className="py-1.5 px-3 text-right text-emerald-500">{r.high.toFixed(2)}</td>
-              <td className="py-1.5 px-3 text-right text-rose-500">{r.low.toFixed(2)}</td>
-              <td className="py-1.5 px-3 text-right text-fg font-medium">{r.close.toFixed(2)}</td>
-              <td className="py-1.5 px-3 text-right text-fg-muted">{formatVolume(r.volume)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="text-xs text-fg-muted mt-2">共 {rows.length} 条, 仅显示最近 60 条</div>
-    </div>
-  )
-}
-
 function formatVolume(v: number): string {
-  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`
-  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`
-  if (v >= 1e3) return `${(v / 1e3).toFixed(2)}K`
+  if (v >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  if (v >= 1e4) return `${(v / 1e4).toFixed(2)}万`
   return v.toFixed(0)
 }
 
 function formatAmount(a: number): string {
-  if (a >= 1e9) return `$${(a / 1e9).toFixed(2)}B`
-  if (a >= 1e6) return `$${(a / 1e6).toFixed(2)}M`
-  if (a >= 1e3) return `$${(a / 1e3).toFixed(2)}K`
-  return `$${a.toFixed(0)}`
+  if (a >= 1e8) return `${(a / 1e8).toFixed(2)}亿`
+  if (a >= 1e4) return `${(a / 1e4).toFixed(2)}万`
+  return a.toFixed(0)
 }

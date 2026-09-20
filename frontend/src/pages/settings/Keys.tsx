@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Key,
@@ -15,6 +15,7 @@ import {
   Save,
   Check,
   HelpCircle,
+  Newspaper,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useCapabilities, useSettings } from '@/lib/useSharedQueries'
@@ -323,6 +324,185 @@ export function TickFlowKeyConfig() {
             <h3 className="text-sm font-medium text-foreground mb-2">清除 API Key</h3>
             <p className="text-xs text-secondary mb-5">
               清除后将退回 None 档(仅历史日K),需要重新输入 Key 才能恢复。
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setConfirmClear(false)}
+                className="px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:bg-elevated/80 text-sm transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { setConfirmClear(false); clear.mutate() }}
+                disabled={clear.isPending}
+                className="px-3 py-1.5 rounded-btn bg-danger/15 text-danger hover:bg-danger/25 text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                {clear.isPending ? '清除中...' : '确认清除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+// ===== 新闻搜索源 Key 配置 (热点页「新闻」tab 的后端依赖) =====
+
+const ANSPIRE_URL = 'https://open.anspire.cn/dsa?share_code=QFBC0FYC'
+
+export function SearchKeyConfig() {
+  const qc = useQueryClient()
+
+  const [keyInput, setKeyInput] = useState('')
+  const [revealing, setRevealing] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+
+  const status = useQuery({
+    queryKey: QK.searchKey('anspire'),
+    queryFn: () => api.getSearchKey('anspire'),
+  })
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: QK.searchKey('anspire') })
+    qc.invalidateQueries({ queryKey: QK.newsStatus })
+  }
+
+  const save = useMutation({
+    // 后端「先探后存」: Key 无效时返回 ok=false 且不落盘
+    mutationFn: (key: string) => api.saveSearchKey(key, 'anspire'),
+    onSuccess: (res) => {
+      if (!res.ok) return
+      setKeyInput('')
+      refresh()
+    },
+  })
+
+  const clear = useMutation({
+    mutationFn: () => api.deleteSearchKey('anspire'),
+    onSuccess: () => {
+      refresh()
+      qc.invalidateQueries({ queryKey: ['news'] })
+    },
+  })
+
+  const configured = status.data?.configured ?? false
+
+  return (
+    <>
+      <div className="max-w-3xl">
+        <Card icon={Newspaper} title="新闻搜索源 (Anspire)" badge={configured ? `${status.data?.key_count ?? 0} Key` : '未配置'}>
+          <p className="text-sm text-secondary leading-relaxed mb-4">
+            热点页的「新闻」tab 用联网检索补上"为什么涨"这一维(公告/事件/催化)。在{' '}
+            <a
+              href={ANSPIRE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline inline-flex items-baseline gap-0.5"
+            >
+              open.anspire.cn
+              <ExternalLink className="h-3 w-3 self-center" />
+            </a>{' '}
+            注册获取(一 Key 兼联网检索与大模型)。可填多个 Key 用逗号分隔, 请求轮询分摊限额。
+            Key 经系统级加密存于本机, 不写进配置文件。
+          </p>
+
+          <div className="flex items-center justify-between mb-4">
+            <div className="min-w-0">
+              <div className="text-[10px] uppercase tracking-widest text-muted">状态</div>
+              <div className="mt-1 flex items-center gap-2 min-w-0">
+                {configured ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 text-bear shrink-0" />
+                    <span className="text-sm font-medium shrink-0">已配置</span>
+                    <span className="font-mono text-xs text-secondary truncate">{status.data?.masked}</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="h-4 w-4 text-muted shrink-0" />
+                    <span className="text-sm font-medium text-muted">未配置</span>
+                    <span className="text-xs text-muted">· 新闻 tab 会提示配置, 不会返回空列表冒充"没新闻"</span>
+                  </>
+                )}
+              </div>
+            </div>
+            {configured && (
+              <button
+                onClick={() => setConfirmClear(true)}
+                disabled={clear.isPending}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-btn bg-elevated text-secondary hover:text-danger text-xs transition-colors duration-150 ease-smooth disabled:opacity-50 shrink-0"
+              >
+                <Trash2 className="h-3 w-3" />
+                清除
+              </button>
+            )}
+          </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (keyInput.trim()) save.mutate(keyInput.trim())
+            }}
+            className="space-y-2"
+          >
+            <div className="relative">
+              <input
+                type={revealing ? 'text' : 'password'}
+                placeholder={configured ? '粘贴新 Key 替换当前(可逗号分隔)' : '粘贴 Anspire API Key'}
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                className="w-full px-3 py-2 pr-9 rounded-input bg-base border border-border text-sm font-mono focus:outline-none focus:border-accent transition-colors duration-150 ease-smooth"
+              />
+              <button
+                type="button"
+                onClick={() => setRevealing((v) => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-foreground transition-colors duration-150 ease-smooth"
+                tabIndex={-1}
+                aria-label={revealing ? '隐藏' : '显示'}
+              >
+                {revealing ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <button
+              type="submit"
+              disabled={save.isPending || !keyInput.trim()}
+              className="w-full h-10 rounded-xl bg-accent text-white text-sm font-semibold flex items-center justify-center gap-2 hover:bg-accent/90 disabled:opacity-40 transition-all"
+            >
+              {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {save.isPending ? '校验中...' : '校验并保存'}
+            </button>
+            {save.isPending && (
+              <div className="text-[11px] leading-snug text-warning">
+                会先用该 Key 真发一次搜索请求, 校验通过才写入 · 请等待结果
+              </div>
+            )}
+          </form>
+
+          {save.isError && (
+            <div className="mt-3 text-xs text-danger">保存失败:{String((save.error as any).message)}</div>
+          )}
+          {save.data && !save.data.ok && (
+            <div className="mt-3 text-xs text-danger flex items-center gap-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              {save.data.error ?? 'Key 无效'} · 未保存
+            </div>
+          )}
+          {save.data?.ok && (
+            <div className="mt-3 text-xs text-bear flex items-center gap-1.5">
+              <CheckCircle2 className="h-3 w-3" />
+              已保存 {save.data.key_count} 个 Key — 热点页「新闻」tab 已可用
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {confirmClear && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmClear(false)} />
+          <div className="relative w-[90vw] max-w-[380px] rounded-card border border-border bg-base shadow-2xl p-6">
+            <h3 className="text-sm font-medium text-foreground mb-2">清除搜索源 Key</h3>
+            <p className="text-xs text-secondary mb-5">
+              清除后热点页「新闻」tab 将回到"去配置"状态, 需要重新输入 Key 才能恢复。
             </p>
             <div className="flex items-center justify-end gap-2">
               <button

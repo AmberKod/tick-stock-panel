@@ -19,6 +19,7 @@ import { StrategyCard, CardSize, loadCardSize, cardWrapCls } from '@/components/
 import { ScreenerTable } from '@/components/screener/ScreenerTable'
 import { ScreenerFilter as ScreenerFilterType, defaultFilter, filterActive, countActiveFilters, applyFilter, FilterPanel } from '@/components/screener/ScreenerFilter'
 import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDialog'
+import { ConceptHeatStatus, conceptHeatNeedsRefresh, useConceptMarketDate } from '@/components/screener/ConceptHeatStatus'
 import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
@@ -40,6 +41,7 @@ const SHOW_STRATEGY_STORE = false
 
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
+  const currentMarketDate = useConceptMarketDate(assetType)
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
@@ -120,8 +122,8 @@ export function Screener() {
   // 对原始结果应用过滤 (memo: 否则每次渲染都对全部结果行过滤,
   // 且新数组身份会击穿下游 displayRows 的 memo)
   const filteredRows = useMemo(
-    () => (result ? applyFilter(result.rows, filter) : []),
-    [result, filter],
+    () => (result && !conceptHeatNeedsRefresh(result.concept_heat_metadata, currentMarketDate) ? applyFilter(result.rows, filter) : []),
+    [result, filter, currentMarketDate],
   )
 
   const { data: prefs } = usePreferences()
@@ -155,6 +157,12 @@ export function Screener() {
   })
 
   const dataStatus = useDataStatus({ staleTime: 0 })
+
+  useEffect(() => {
+    void qc.invalidateQueries({ queryKey: QK.screenerCachedSummary.slice(0, 1) })
+    void qc.invalidateQueries({ queryKey: QK.scoringColumnsRoot })
+    void qc.invalidateQueries({ queryKey: QK.dataStatus })
+  }, [currentMarketDate, qc])
 
   // 默认日期 = enriched 最新日期（始终跟随最新）
   useEffect(() => {
@@ -264,7 +272,7 @@ export function Screener() {
     const counts: Record<string, number> = {}
     const expired: Record<string, number> = {}
     for (const [id, r] of Object.entries(summaryQuery.data.results)) {
-      if (r.as_of !== asOf) continue
+      if (r.as_of !== asOf || conceptHeatNeedsRefresh(r.concept_heat_metadata, currentMarketDate)) continue
       counts[id] = r.total
       const everCount = summaryQuery.data.today_ever_counts[id] ?? r.total
       const expiredCount = Math.max(everCount - r.total, 0)
@@ -272,7 +280,7 @@ export function Screener() {
     }
     setHitCounts(counts)
     setExpiredCounts(expired)
-  }, [summaryQuery.data, asOf])
+  }, [summaryQuery.data, asOf, currentMarketDate])
 
   // 当前单策略缓存更新后同步明细；参数保存的强制重算结果仍由 run 直接覆盖。
   useEffect(() => {
@@ -288,8 +296,9 @@ export function Screener() {
     if (fullCachedQuery.data?.as_of !== asOf) return null
     const entries = Object.entries(fullCachedQuery.data.results)
       .filter(([, item]) => item.as_of === asOf)
+      .map(([id, item]) => [id, conceptHeatNeedsRefresh(item.concept_heat_metadata, currentMarketDate) ? { ...item, rows: [], total: 0 } : item] as const)
     return Object.fromEntries(entries)
-  }, [fullCachedQuery.data, asOf])
+  }, [fullCachedQuery.data, asOf, currentMarketDate])
 
   // symbol → 所属策略列表。单策略接口同时返回轻量归属映射，保留策略列原有展示。
   const symbolStrategyMap = useMemo(() => {
@@ -334,12 +343,12 @@ export function Screener() {
   // 计算当前策略的失效行: 今日曾命中但当前已不命中。
   const expiredRows = useMemo(() => {
     const everRows = singleCachedQuery.data?.today_ever_rows
-    if (!everRows || !result || result.as_of !== asOf) return []
+    if (!everRows || !result || result.as_of !== asOf || conceptHeatNeedsRefresh(result.concept_heat_metadata, currentMarketDate)) return []
     const currentSymbols = new Set(result.rows.map((row: any) => row.symbol))
     return Object.entries(everRows)
       .filter(([symbol]) => !currentSymbols.has(symbol))
       .map(([, row]) => ({ ...row, _expired: true }))
-  }, [singleCachedQuery.data, result, asOf])
+  }, [singleCachedQuery.data, result, asOf, currentMarketDate])
 
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
@@ -469,6 +478,14 @@ export function Screener() {
       setHitCounts(prev => ({ ...prev, [vars.id]: data.total }))
       // 单策略重跑后刷新摘要和当前按需明细，避免参数保存后回退到旧缓存。
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
+    },
+    onError: (_error, vars) => {
+      setResult(previous => previous?.strategy === vars.id ? null : previous)
+      setHitCounts(previous => {
+        const next = { ...previous }
+        delete next[vars.id]
+        return next
+      })
     },
   })
 
@@ -761,6 +778,16 @@ export function Screener() {
             </div>
           )}
 
+          {!showAll && (
+            <ConceptHeatStatus
+              metadata={result?.concept_heat_metadata ?? (activeStrategy ? summaryQuery.data?.results[activeStrategy]?.concept_heat_metadata : undefined)}
+              currentMarketDate={currentMarketDate}
+            />
+          )}
+          {showAll && Object.entries(effectiveResults ?? {}).map(([id, item]) => (
+            <ConceptHeatStatus key={id} title={`${strategyIdToName[id] ?? id} · 概念热度`} metadata={item.concept_heat_metadata} currentMarketDate={currentMarketDate} />
+          ))}
+
           {(showAll ? allRows.length > 0 : !!result) && (
             <motion.div
               key={showAll ? `all-${asOf}` : `${result!.as_of}-${result!.strategy}`}
@@ -964,11 +991,18 @@ export function Screener() {
 
       <StrategySettingsDialog
         strategyId={settingsStrategyId}
+        assetType={assetType}
+        context={assetType === 'stock' && asOf && asOf !== dataStatus.data?.enriched?.latest_date ? 'historical' : 'current'}
+        asOf={assetType === 'etf' ? dataStatus.data?.etf_enriched?.latest_date ?? undefined : asOf || undefined}
         onClose={() => setSettingsStrategyId(null)}
         onSaved={(limit) => {
           if (settingsStrategyId) {
             setStrategyLimits(prev => ({ ...prev, [settingsStrategyId]: limit }))
-            run.mutate({ id: settingsStrategyId, date: asOf })
+            setResult(null)
+            setActiveStrategy(settingsStrategyId)
+            setShowAll(false)
+            handleStrategySwitch(settingsStrategyId)
+            run.mutate({ id: settingsStrategyId, date: assetType === 'etf' ? '' : asOf })
           }
         }}
         onAiModify={async () => {
