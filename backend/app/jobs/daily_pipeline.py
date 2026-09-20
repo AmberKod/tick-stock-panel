@@ -1576,8 +1576,8 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         logger.info("scheduled_review enabled @%02d:%02d mon-fri",
                     review_sched["hour"], review_sched["minute"])
 
-    # 热点工作区同步 (A 股东财概念/行业板块): 工作日盘中每 30 分钟。
-    # 港美无 topic 数据源, job 内部走 fail-closed 不影响本调度器。
+    # 热点工作区同步 (A 股 / 港股 / 美股三个市场): 交易日盘中每 30 分钟。
+    # 三个市场都是本地聚合源, 港美源也可用; 注册失败不影响本调度器。
     try:
         from app.jobs.hotspot_sync import register_hotspot_jobs
 

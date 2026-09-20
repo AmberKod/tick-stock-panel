@@ -24,6 +24,17 @@
   - ``volume_ratio``: 日K路取 enriched 的 ``vol_ratio_5d`` (5 日量比, 真实值);
     实时路不可得 → None。口径差异记在 ``HotspotStock.source`` 里。
   - ``amount``: 实时/日K 均可得 (币种 HKD / USD, 与 A 股元不同量纲, 只对内排序用)。
+
+进程内缓存 (2026-09-20 修):
+  source 实例在 ``source.py`` 里是**模块级惰性单例** (``_DEFAULT_HK_SOURCE`` /
+  ``_DEFAULT_US_SOURCE``), 创建后永不重建。此前 instruments 与行情都是"命中即
+  返回、永不过期", 于是进程内第一次算完之后 instruments / 行情 / mode / as_of
+  全部锁死到进程重启 —— 港美快照日期永远停在首算那天, ``stale`` 恒亮、盘中
+  永不更新。现在两者都带 TTL (见 ``QUOTE_TTL_S`` / ``INSTRUMENTS_TTL_S``):
+  - 行情三元组 ``(quotes, mode, as_of)`` 是**一个整体**, 一起写一起失效,
+    不会出现"新行情 + 旧 as_of"这种自相矛盾状态。
+  - 一次对外调用 (``discover`` / ``fetch_detail``) 内部 pin 住本轮快照,
+    TTL 不会在一轮之中途把数据换掉 (保证同轮一致性)。
 """
 from __future__ import annotations
 
@@ -58,6 +69,28 @@ logger = logging.getLogger(__name__)
 
 # 行业成分股门槛: 太小的行业平均涨幅噪声大, 不进入热点榜
 MIN_MEMBERS = 10
+
+# ---------------------------------------------------------------------------
+# 进程内缓存 TTL (秒)
+# ---------------------------------------------------------------------------
+# 行情缓存 TTL = 3 分钟。取值理由:
+#   1. 必须远小于 cron 间隔 (30 分钟): 否则定时任务永远命中旧缓存, 加定时等于白加;
+#   2. 必须大于一次 discover + 若干 detail 的耗时窗口 (秒级): 避免用户翻详情时
+#      反复打行情;
+#   3. 港美实时成本可承受: 港股 ~2800 只 (500/批 → 6 次请求)、美股 ~5653 只
+#      (200/批 → 30 次请求, 实测秒级), 3 分钟一次没有配额/限流压力;
+#   4. 热点榜是"盘中会动"的诉求, 3 分钟的滞后在行业等权涨幅口径下无感知。
+QUOTE_TTL_S = 180.0
+
+# instruments 缓存 TTL = 1 小时。取值理由:
+#   1. instruments 决定"哪些标的属于哪个行业", 是**日级变量** (随 instruments
+#      parquet 的日级批处理更新), 盘中根本不会变, 1 小时滞后无业务影响;
+#   2. 选 TTL 而不是"按 parquet mtime 失效": TTL 对注入式 loader 与真实 parquet
+#      两条路径统一生效, 且只需注入一个时钟就能确定性断言 (测试不依赖 sleep);
+#      mtime 方案只对文件路有效 (注入 loader 时无文件可 stat), 还要处理 stat
+#      失败、不同文件系统 mtime 精度 (NTFS/FAT 约 2s 粒度) 等边界, 收益却只是
+#      把"最多滞后 1 小时"变成"零滞后" —— 对一个日级变量没有价值。
+INSTRUMENTS_TTL_S = 3600.0
 
 # 实时行情单次批量上限 (腾讯/新浪约 50, 美股 provider 亦分片)
 REALTIME_BATCH = 50
@@ -141,15 +174,52 @@ class HkUsIndustryHotspotSource(HotspotSource):
         instruments_loader: Callable[[str], Sequence[dict[str, Any]]] | None = None,
         quote_loader: Callable[[str, list[str]], tuple[Sequence[dict[str, Any]], str, str]] | None = None,
         now_fn: Callable[[str], datetime] | None = None,
+        clock_fn: Callable[[], float] | None = None,
+        quote_ttl_s: float | None = None,
+        instruments_ttl_s: float | None = None,
     ) -> None:
+        """``clock_fn`` / ``quote_ttl_s`` / ``instruments_ttl_s`` 供测试确定性控制缓存。
+
+        ``clock_fn`` 默认 ``time.monotonic`` (不受系统时间回拨影响); 测试注入一个
+        可推进的假时钟即可断言过期行为, 不需要真的 sleep。
+        """
         self.data_dir = Path(data_dir) if data_dir else None
         self._instruments_loader = instruments_loader
         self._quote_loader = quote_loader
         self._now_fn = now_fn
+        self._clock_fn: Callable[[], float] = clock_fn or monotonic
+        self._quote_ttl_s = float(QUOTE_TTL_S if quote_ttl_s is None else quote_ttl_s)
+        self._instruments_ttl_s = float(INSTRUMENTS_TTL_S if instruments_ttl_s is None else instruments_ttl_s)
         self._rows_by_market: dict[str, list[dict[str, Any]]] = {}
+        self._rows_at: dict[str, float] = {}
         self._quotes: dict[str, dict[str, dict[str, Any]]] = {}
         self._mode: dict[str, str] = {}
         self._as_of: dict[str, str] = {}
+        self._quotes_at: dict[str, float] = {}
+        # 同轮一致性: 一次对外调用内 pin 住已取数据 (见 _begin_round)
+        self._round_rows: dict[str, list[dict[str, Any]]] = {}
+        self._round_quotes: dict[str, tuple[dict[str, dict[str, Any]], str, str]] = {}
+
+    # ------------------------------------------------------------------
+    # 缓存: 一轮 = 一次对外调用 (discover / fetch_detail)
+    # ------------------------------------------------------------------
+
+    def _begin_round(self) -> None:
+        """标记一次对外调用的开始, 清空上一轮的 pin。
+
+        同一轮内 instruments / 行情只真正加载一次, 之后读的都是本轮 pin 住的
+        同一份对象 —— 即使加载过程本身把时钟推过了 TTL, 本轮后续读取也不会
+        中途换成新数据, 因此不会出现"半新半旧"的自相矛盾结果。
+        """
+        self._round_rows.clear()
+        self._round_quotes.clear()
+
+    def _is_expired(self, market: str, stamps: dict[str, float], ttl: float) -> bool:
+        """缓存条目是否已过期 (单调递增时钟, 缺失时间戳视为过期)。"""
+        stamp = stamps.get(market)
+        if stamp is None:
+            return True
+        return (self._clock_fn() - stamp) >= ttl
 
     # ------------------------------------------------------------------
     # 协议
@@ -159,6 +229,7 @@ class HkUsIndustryHotspotSource(HotspotSource):
         return market in _MARKET_SUFFIX
 
     def discover(self, *, market: str = "hk", top: int = 20) -> HotspotResults:
+        self._begin_round()
         if not self.supports(market):
             err = SourceError(
                 provider=self.name, method="discover",
@@ -176,8 +247,6 @@ class HkUsIndustryHotspotSource(HotspotSource):
 
         symbols = [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
         quotes, mode, as_of = self._load_quotes(market, symbols)
-        self._mode[market] = mode
-        self._as_of[market] = as_of
         if not quotes:
             err = SourceError(
                 provider=self.name, method="quotes",
@@ -206,6 +275,7 @@ class HkUsIndustryHotspotSource(HotspotSource):
         market: str = "hk",
         top_stocks: int = 10,
     ) -> HotspotDetail | None:
+        self._begin_round()
         industry = _industry_key(topic)
         if not industry or not self.supports(market):
             return None
@@ -236,21 +306,37 @@ class HkUsIndustryHotspotSource(HotspotSource):
     # ------------------------------------------------------------------
 
     def _load_instruments(self, market: str) -> list[dict[str, Any]]:
-        """读 instruments 的行业分类; 无 industry 的标的直接丢弃。"""
-        if market in self._rows_by_market:
-            return self._rows_by_market[market]
+        """读 instruments 的行业分类; 无 industry 的标的直接丢弃。
+
+        缓存: ``INSTRUMENTS_TTL_S`` 到期后重读 (理由见常量处注释)。同一轮内
+        复用本轮 pin 住的那份, 不重复读盘。
+        """
+        pinned = self._round_rows.get(market)
+        if pinned is not None:
+            return pinned
+        cached = self._rows_by_market.get(market)
+        if cached is not None and not self._is_expired(market, self._rows_at, self._instruments_ttl_s):
+            self._round_rows[market] = cached
+            return cached
+        rows = self._build_instruments_rows(market)
+        self._rows_by_market[market] = rows
+        self._rows_at[market] = self._clock_fn()
+        self._round_rows[market] = rows
+        return rows
+
+    def _build_instruments_rows(self, market: str) -> list[dict[str, Any]]:
+        """从注入 loader 或 instruments parquet 构造 (symbol, name, industry) 行。"""
         if self._instruments_loader is not None:
             raw = list(self._instruments_loader(market) or [])
         else:
             raw = self._read_instruments_parquet(market)
-        rows = []
+        rows: list[dict[str, Any]] = []
         for item in raw:
             industry = _industry_key(item.get("industry"))
             symbol = safe_text(item.get("symbol"))
             if not industry or not symbol:
                 continue
             rows.append({"symbol": symbol, "name": safe_text(item.get("name")) or symbol, "industry": industry})
-        self._rows_by_market[market] = rows
         return rows
 
     def _read_instruments_parquet(self, market: str) -> list[dict[str, Any]]:
@@ -281,10 +367,18 @@ class HkUsIndustryHotspotSource(HotspotSource):
         Returns:
             (symbol -> quote dict, mode, as_of)
             mode: "realtime" | "daily" ; as_of: YYYY-MM-DD (实时取今天本地日期)
+
+        缓存: ``QUOTE_TTL_S`` 到期后重取, 且 ``(quotes, mode, as_of)`` 作为**一个
+        整体**一起失效 (见 ``_store_quotes``)。同一轮内复用本轮 pin 住的快照。
         """
+        pinned = self._round_quotes.get(market)
+        if pinned is not None:
+            return pinned
         cached = self._quotes.get(market)
-        if cached is not None:
-            return cached, self._mode.get(market, "daily"), self._as_of.get(market, "")
+        if cached is not None and not self._is_expired(market, self._quotes_at, self._quote_ttl_s):
+            snapshot = (cached, self._mode.get(market, "daily"), self._as_of.get(market, ""))
+            self._round_quotes[market] = snapshot
+            return snapshot
 
         if self._quote_loader is not None:
             raw, mode, as_of = self._quote_loader(market, symbols)
@@ -302,10 +396,28 @@ class HkUsIndustryHotspotSource(HotspotSource):
                 quotes, as_of = self._read_daily_quotes(market)
                 mode = "daily"
 
+        self._store_quotes(market, quotes, mode, as_of)
+        snapshot = (quotes, mode, as_of)
+        self._round_quotes[market] = snapshot
+        return snapshot
+
+    def _store_quotes(
+        self,
+        market: str,
+        quotes: dict[str, dict[str, Any]],
+        mode: str,
+        as_of: str,
+    ) -> None:
+        """写入行情缓存的唯一入口: quotes / mode / as_of / 时间戳一起写。
+
+        三者是同一个快照的三个侧面, 分开失效会产生"新行情 + 旧 as_of"这种自相
+        矛盾状态 (前端会看到 realtime 模式却标着昨天的日期, 或反过来)。所以这里
+        只有这一个写入点, 一次写全。
+        """
         self._quotes[market] = quotes
         self._mode[market] = mode
         self._as_of[market] = as_of
-        return quotes, mode, as_of
+        self._quotes_at[market] = self._clock_fn()
 
     def _is_trading_now(self, market: str) -> bool:
         now = self._now_fn(market) if self._now_fn else None

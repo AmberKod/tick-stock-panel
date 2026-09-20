@@ -13,7 +13,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.services.hotspot.hk_us_source import (
+    INSTRUMENTS_TTL_S,
     MIN_MEMBERS,
+    QUOTE_TTL_S,
     HkUsIndustryHotspotSource,
     _industry_key,
     _is_in_session,
@@ -460,3 +462,121 @@ def test_pct_from_quote_row_prefers_last_over_prev_close():
     assert _pct_from_quote_row({"last_price": 105.0, "prev_close": 100.0}) == pytest.approx(0.05)
     # 没有 prev_close 才退回 change_pct, 且按百分数处理
     assert _pct_from_quote_row({"change_pct": 5.0}) == pytest.approx(0.05)
+
+
+# ---------------------------------------------------------------------------
+# 进程内缓存 TTL (2026-09-20 修): 单例 source 算一次后永久冻住 → 盘中永不更新
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """可推进的单调时钟: TTL 断言不依赖真实 sleep。"""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_quotes_cache_refreshes_after_ttl():
+    """TTL 内复用, 越过 TTL 必须重取 —— 否则盘中热点永远停在首算那一次。"""
+    clock = _FakeClock()
+    calls: list[str] = []
+
+    def loader(market, symbols):
+        calls.append(market)
+        return _quotes(market, mode="daily", as_of="2026-09-03")
+
+    source = HkUsIndustryHotspotSource(
+        instruments_loader=_instruments, quote_loader=loader, clock_fn=clock,
+    )
+    source.discover(market="hk", top=0)
+    assert len(calls) == 1
+
+    clock.advance(QUOTE_TTL_S / 2)  # TTL 内
+    source.discover(market="hk", top=0)
+    assert len(calls) == 1
+
+    clock.advance(QUOTE_TTL_S)  # 越过 TTL
+    source.discover(market="hk", top=0)
+    assert len(calls) == 2
+
+
+def test_quotes_cache_invalidates_mode_and_as_of_together():
+    """回归: quotes / mode / as_of 是一个整体, 必须一起失效。
+
+    只失效一部分会拿到"新行情 + 旧 as_of"这种自相矛盾状态 —— 前端会看到
+    realtime 模式却标着昨天的日期。
+    """
+    clock = _FakeClock()
+    state = {"mode": "daily", "as_of": "2026-09-03"}
+
+    def loader(market, symbols):
+        return _quotes(market, mode=state["mode"], as_of=state["as_of"])
+
+    source = HkUsIndustryHotspotSource(
+        instruments_loader=_instruments, quote_loader=loader, clock_fn=clock,
+    )
+    first = source.discover(market="hk", top=0)
+    assert first.provider_used == "hkus_industry:daily"
+    assert first[0].topic_date == "2026-09-03"
+
+    state["mode"] = "realtime"
+    state["as_of"] = "2026-09-14"
+    clock.advance(QUOTE_TTL_S)
+
+    second = source.discover(market="hk", top=0)
+    assert second.provider_used == "hkus_industry:realtime"
+    assert second[0].topic_date == "2026-09-14"
+
+
+def test_instruments_cache_refreshes_after_ttl():
+    """instruments TTL 更长 (日级变量), 但同样必须会过期, 不能永不重读。"""
+    clock = _FakeClock()
+    calls: list[str] = []
+
+    def loader(market):
+        calls.append(market)
+        return _instruments(market)
+
+    source = HkUsIndustryHotspotSource(
+        instruments_loader=loader, quote_loader=_quotes, clock_fn=clock,
+    )
+    source.discover(market="hk", top=0)
+    assert len(calls) == 1
+
+    clock.advance(QUOTE_TTL_S)  # 行情该过期了, instruments 还不该
+    source.discover(market="hk", top=0)
+    assert len(calls) == 1
+
+    clock.advance(INSTRUMENTS_TTL_S)
+    source.discover(market="hk", top=0)
+    assert len(calls) == 2
+
+
+def test_same_round_pins_snapshot_even_if_clock_passes_ttl():
+    """同轮一致性: 一轮内多次取行情不会中途换成新数据 (不会半新半旧)。"""
+    clock = _FakeClock()
+    calls: list[str] = []
+
+    def loader(market, symbols):
+        calls.append(market)
+        return _quotes(market, mode="daily", as_of="2026-09-03")
+
+    source = HkUsIndustryHotspotSource(
+        instruments_loader=_instruments, quote_loader=loader, clock_fn=clock, quote_ttl_s=1.0,
+    )
+    source._begin_round()
+    first = source._load_quotes("hk", ["X001.HK"])
+    clock.advance(QUOTE_TTL_S)  # 同轮内时钟越过 TTL(加载耗时 / 跨分钟)
+    second = source._load_quotes("hk", ["X001.HK"])
+    assert len(calls) == 1
+    assert second == first
+
+    # 下一轮开始才允许重取
+    source.discover(market="hk", top=0)
+    assert len(calls) == 2

@@ -7,9 +7,13 @@
     ├── <market>/constituents/<topic>.parquet  # 每个市场各自的成分股
     ├── topics.parquet              # 【已废弃】迁移前的不分片快照, 首次访问即拆走
     ├── history/
-    │   ├── topics.jsonl           # 每个交易日追加 topic 行
-    │   └── constituents.jsonl     # 每个交易日追加每 topic 成分股行
+    │   ├── topics.jsonl           # 每个交易日追加 topic 行 (带 market)
+    │   └── constituents.jsonl     # 每个交易日追加每 topic 成分股行 (带 market)
     └── job_state.json              # 最近一次 sync 状态/时间戳
+
+history 的 market 字段 (2026-09-20 起): 三个市场共用一个 jsonl, 同名 topic
+只有靠 market 才能区分。**存量老行没有 market 字段 = market 未知**, 按 market
+过滤时一律不匹配 (绝不倒推成 cn); 需要的话另做一次显式迁移, 不在默认路径里。
 
 设计要点:
   - <market>/topics.parquet 是"当前活动快照", 按市场分片:某市场 sync 时只覆盖
@@ -430,10 +434,20 @@ def append_history_row(
     data_dir: Path,
     items: Iterable[HotspotSummary],
     *,
+    market: str,
     generated_at: str | None = None,
     filename: str = "topics.jsonl",
 ) -> Path:
-    """把一批 summary 追加到 history JSONL,每行一条记录。"""
+    """把一批 summary 追加到 history JSONL,每行一条记录。
+
+    ``market`` **必填**: 与按市场分片的 topics.parquet 不同, history 是三个市场
+    共用的同一个 jsonl。港美开始落盘后, 同名 topic (A 股概念名 / 港美行业名) 在
+    同一个文件里只有靠 market 才能区分, 否则任何回放/趋势都会把三个市场的数据
+    当成一条时间序列。
+
+    存量老行 (2026-09-20 之前写入) 没有这个字段 —— 它们的 market 是**未知**,
+    读取侧一律不匹配任何 market (见 ``load_history_jsonl``), 绝不倒推成 "cn"。
+    """
     base = history_dir(data_dir)
     base.mkdir(parents=True, exist_ok=True)
     target = base / filename
@@ -442,6 +456,7 @@ def append_history_row(
         for item in items:
             record = {
                 "generated_at": timestamp,
+                "market": safe_text(market),
                 "topic": safe_text(item.topic),
                 "name": safe_text(item.name) or safe_text(item.topic),
                 "source": safe_text(item.source),
@@ -467,8 +482,16 @@ def load_history_jsonl(
     data_dir: Path,
     *,
     filename: str = "topics.jsonl",
+    market: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """惰性遍历 history JSONL 行;跳过坏行。"""
+    """惰性遍历 history JSONL 行;跳过坏行。
+
+    ``market`` 不为 None 时只返回 ``market`` 字段等于该值的行。
+
+    ⚠️ 存量老行没有 market 字段, 它们的 market 是**未知**, 这里一律不匹配 ——
+    哪怕它们的 source 看着像 A 股 (``cn_local_concept``), 那也只是旁证, 不是
+    落盘时写下的事实。宁可让这批行在按 market 的口径里缺席, 也不伪造成 "cn"。
+    """
     path = history_dir(data_dir) / filename
     if not path.exists():
         return
@@ -477,9 +500,14 @@ def load_history_jsonl(
         if not line:
             continue
         try:
-            yield json.loads(line)
+            row = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(row, dict):
+            continue
+        if market is not None and safe_text(row.get("market")) != market:
+            continue
+        yield row
 
 
 def write_constituents_history(
@@ -487,9 +515,14 @@ def write_constituents_history(
     topic: str,
     stocks: Iterable[HotspotStock],
     *,
+    market: str,
     generated_at: str | None = None,
 ) -> Path:
-    """把成分股追加到 constituents.jsonl,每行含 topic+stock 一行。"""
+    """把成分股追加到 constituents.jsonl,每行含 market+topic+stock 一行。
+
+    ``market`` 必填, 理由同 ``append_history_row``: 成分股只按 topic 名分文件,
+    而港美产出的是行业名、A 股是概念名, 撞名概率不低, 缺了 market 无法区分。
+    """
     base = history_dir(data_dir)
     base.mkdir(parents=True, exist_ok=True)
     target = base / "constituents.jsonl"
@@ -498,6 +531,7 @@ def write_constituents_history(
         for stock in stocks:
             record = {
                 "generated_at": timestamp,
+                "market": safe_text(market),
                 "topic": topic,
                 **_stock_to_dict(stock),
             }
@@ -598,14 +632,26 @@ class HotspotStorage:
         delete_constituents(self.data_dir, topic, market=market)
 
     # history
-    def append_history(self, items: Iterable[HotspotSummary], **kwargs: Any) -> Path:
-        return append_history_row(self.data_dir, items, **kwargs)
+    def append_history(
+        self,
+        items: Iterable[HotspotSummary],
+        *,
+        market: str,
+        **kwargs: Any,
+    ) -> Path:
+        return append_history_row(self.data_dir, items, market=market, **kwargs)
 
     def load_history(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
         return load_history_jsonl(self.data_dir, **kwargs)
 
-    def append_constituents_history(self, topic: str, stocks: Iterable[HotspotStock]) -> Path:
-        return write_constituents_history(self.data_dir, topic, stocks)
+    def append_constituents_history(
+        self,
+        topic: str,
+        stocks: Iterable[HotspotStock],
+        *,
+        market: str,
+    ) -> Path:
+        return write_constituents_history(self.data_dir, topic, stocks, market=market)
 
     # job state
     def read_job_state(self) -> dict[str, Any]:

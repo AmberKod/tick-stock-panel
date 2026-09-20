@@ -53,7 +53,7 @@ def discover_hotspots(
     Args:
         data_dir: 数据根目录(Path 或 str)。
         provider: provider 名称(暂作为占位参数,未来可与 akshare 双源兼容)。
-        market: "cn" | "hk" | "us"(港美暂时返回 missing_mapping)。
+        market: "cn" | "hk" | "us"(三个市场都有本地聚合源; 未知市场返回 missing_mapping)。
         top: 保留前 N 个主题。
         refresh: 本批占位参数; True/False 均先访问 source, 失败后读快照。
         source: 测试可注入桩。
@@ -129,7 +129,9 @@ def get_hotspot_detail(
     if detail.stocks:
         # 成分股按 market 分片: 港美产出的是行业名、A 股是概念名, 撞名会互相整文件覆盖
         storage.write_constituents(detail.summary.topic, detail.stocks, market=market)
-        storage.append_constituents_history(detail.summary.topic, detail.stocks)
+        storage.append_constituents_history(
+            detail.summary.topic, detail.stocks, market=market,
+        )
 
     return detail
 
@@ -206,7 +208,8 @@ def _persist_and_return(
         item.snapshot_market = market
         item.topic_date = item.topic_date or item.snapshot_at[:10]
     storage.write_topics(list(result), market=market)
-    storage.append_history(result)
+    # market 必传: history 是三市场共用的一个 jsonl, 缺了它同名 topic 无法区分
+    storage.append_history(result, market=market)
     status = "success" if result.quality_status == QUALITY_OK else "degraded"
     _record_attempt(storage, market=market, status=status, results=result)
     return result
@@ -250,7 +253,7 @@ def _record_attempt(
 
 
 def _missing_market_result(*, market: str) -> HotspotResults:
-    """港美市场:fail-closed,返回 missing_mapping。"""
+    """未知市场(非 cn/hk/us):fail-closed,返回 missing_mapping。"""
     err = SourceError(
         provider="hotspot",
         method="discover",

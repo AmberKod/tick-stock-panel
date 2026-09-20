@@ -191,7 +191,7 @@ def test_storage_class_delegates(data_dir):
     storage = HotspotStorage(data_dir)
     storage.write_topics([_summary("A"), _summary("B")])
     storage.write_constituents("A", [_stock("X")])
-    storage.append_history([_summary("A", stage="加速主升")])
+    storage.append_history([_summary("A", stage="加速主升")], market="cn")
 
     assert len(storage.read_topics()) == 2
     assert storage.read_constituents("A")[0].code == "X"
@@ -207,11 +207,61 @@ def test_storage_constituents_history(data_dir):
     storage.append_constituents_history(
         "人工智能",
         [_stock("300474.SZ"), _stock("603019.SH")],
+        market="cn",
     )
     history = list(storage.load_history(filename="constituents.jsonl"))
     codes = [r["code"] for r in history]
     assert codes == ["300474.SZ", "603019.SH"]
     assert all(r["topic"] == "人工智能" for r in history)
+    assert all(r["market"] == "cn" for r in history)
+
+
+def test_append_history_writes_market_and_filter_selects_it(data_dir):
+    """history 是三市场共用的一个 jsonl: 同名 topic 只能靠 market 区分。"""
+    storage = HotspotStorage(data_dir)
+    storage.append_history([_summary("半导体")], market="cn")
+    storage.append_history([_summary("半导体")], market="hk")
+
+    all_rows = list(storage.load_history(filename="topics.jsonl"))
+    assert len(all_rows) == 2
+    assert [r["market"] for r in all_rows] == ["cn", "hk"]
+
+    hk_rows = list(storage.load_history(filename="topics.jsonl", market="hk"))
+    assert [r["topic"] for r in hk_rows] == ["半导体"]
+    assert all(r["market"] == "hk" for r in hk_rows)
+
+
+def test_legacy_rows_without_market_never_match_market_filter(data_dir):
+    """存量老行没有 market 字段 → market 未知 → 过滤时一律不匹配(绝不倒推 cn)。"""
+    storage = HotspotStorage(data_dir)
+    target = history_dir(data_dir) / "topics.jsonl"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        # 老行: source 看着像 A 股, 但落盘时没写 market —— 那只是旁证, 不是事实
+        handle.write(
+            '{"generated_at": "2026-09-01T00:00:00+00:00", "topic": "老行",'
+            ' "source": "cn_local_concept"}\n',
+        )
+    storage.append_history([_summary("新行")], market="cn")
+
+    # 不过滤: 老行照出(不丢数据)
+    assert [r["topic"] for r in storage.load_history(filename="topics.jsonl")] == ["老行", "新行"]
+    # 按 cn 过滤: 只匹配显式写了 market 的新行
+    assert [r["topic"] for r in storage.load_history(filename="topics.jsonl", market="cn")] == ["新行"]
+    # 按 hk 过滤: 一条都没有
+    assert list(storage.load_history(filename="topics.jsonl", market="hk")) == []
+
+
+def test_constituents_history_carries_market(data_dir):
+    """港美成分股与 A 股同名 topic 靠 market 区分, 不能被混成一条序列。"""
+    storage = HotspotStorage(data_dir)
+    storage.append_constituents_history("半导体", [_stock("300474.SZ")], market="cn")
+    storage.append_constituents_history("半导体", [_stock("NVDA.US")], market="us")
+
+    cn_rows = list(storage.load_history(filename="constituents.jsonl", market="cn"))
+    us_rows = list(storage.load_history(filename="constituents.jsonl", market="us"))
+    assert [r["code"] for r in cn_rows] == ["300474.SZ"]
+    assert [r["code"] for r in us_rows] == ["NVDA.US"]
 
 
 def test_job_state_round_trip(data_dir):
@@ -230,7 +280,7 @@ def test_job_state_round_trip(data_dir):
 
 def test_load_history_skips_malformed_lines(tmp_path, data_dir):
     storage = HotspotStorage(data_dir)
-    storage.append_history([_summary("valid")])
+    storage.append_history([_summary("valid")], market="cn")
     # 故意追加坏行 + 额外一条良行
     target = history_dir(data_dir) / "topics.jsonl"
     with target.open("a", encoding="utf-8") as f:
