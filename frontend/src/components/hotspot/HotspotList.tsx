@@ -25,6 +25,13 @@ function ScoreBar({ value, tone }: { value: number | null | undefined; tone: 'ac
   )
 }
 
+/** 完整列(# / 主题 / 阶段 / 涨跌幅 / 热度 / 趋势 / 持续 / 领涨股 / 数据质量) */
+const GRID_WITH_STAGE =
+  'grid-cols-[2.5rem_minmax(9rem,1.6fr)_5rem_5.5rem_6rem_6rem_6rem_minmax(10rem,1.4fr)_6.5rem]'
+/** 抽掉「阶段」一列后的列;与上面只差一个 5rem 轨道,保证表头与数据行列数一致 */
+const GRID_WITHOUT_STAGE =
+  'grid-cols-[2.5rem_minmax(9rem,1.6fr)_5.5rem_6rem_6rem_6rem_minmax(10rem,1.4fr)_6.5rem]'
+
 /**
  * 热点主题列表 — 一行一个 topic。
  *
@@ -43,12 +50,20 @@ export function HotspotList({ items, loading, selectedTopic, onSelect }: Hotspot
     )
   }
 
+  // 阶段列取舍: 三条链路(cn/hk/us)都没有真实趋势观测点时 stage 恒为 null, 整列会刷满"未判定"
+  // ——零信息量纯噪音, 所以**全部为 null 时整列隐藏**(表头一起)。
+  // 但只要有**任意一条**有真实 stage, 就照常显示整列(那些 null 的显示"未判定"),
+  // 否则会误伤"部分可见"的场景。items 为空时不隐藏, 保持原空态行为。
+  const everyStageUnknown = items.length > 0 && items.every(item => !item.stage)
+  const showStageColumn = !everyStageUnknown
+  const gridCols = showStageColumn ? GRID_WITH_STAGE : GRID_WITHOUT_STAGE
+
   return (
     <div className="overflow-hidden rounded-card border border-border bg-surface">
-      <div className="grid grid-cols-[2.5rem_minmax(9rem,1.6fr)_5rem_5.5rem_6rem_6rem_6rem_minmax(10rem,1.4fr)_6.5rem] items-center gap-2 border-b border-border bg-elevated/60 px-3 py-2 text-[11px] font-medium text-muted">
+      <div className={`grid ${gridCols} items-center gap-2 border-b border-border bg-elevated/60 px-3 py-2 text-[11px] font-medium text-muted`}>
         <span>#</span>
         <span>主题</span>
-        <span>阶段</span>
+        {showStageColumn && <span>阶段</span>}
         <span className="text-right">涨跌幅</span>
         <span>热度</span>
         <span>趋势</span>
@@ -67,7 +82,7 @@ export function HotspotList({ items, loading, selectedTopic, onSelect }: Hotspot
               type="button"
               onClick={() => onSelect(item.topic)}
               aria-current={active ? 'true' : undefined}
-              className={`grid w-full grid-cols-[2.5rem_minmax(9rem,1.6fr)_5rem_5.5rem_6rem_6rem_6rem_minmax(10rem,1.4fr)_6.5rem] items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
+              className={`grid w-full ${gridCols} items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
                 active ? 'bg-accent/10' : 'hover:bg-elevated'
               }`}
             >
@@ -83,20 +98,22 @@ export function HotspotList({ items, loading, selectedTopic, onSelect }: Hotspot
                     .join(' · ')}
                 </span>
               </span>
-              <span>
-                {/* stage 为 null = 未判定(趋势三维度没有观测值)。
-                    这里**不渲染任何徽标**: 渲染成"初次异动"会把"没有趋势数据"
-                    说成"数据判定它处于初次异动阶段"。 */}
-                {item.stage ? (
-                  <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] ${stageClass(item.stage)}`}>
-                    {item.stage}
-                  </span>
-                ) : (
-                  <span className="text-[10px] text-muted" title="趋势/持续性/降温三个维度均无观测值,未判定阶段">
-                    未判定
-                  </span>
-                )}
-              </span>
+              {showStageColumn && (
+                <span>
+                  {/* stage 为 null = 未判定(趋势三维度没有观测值)。
+                      这里**不渲染任何徽标**: 渲染成"初次异动"会把"没有趋势数据"
+                      说成"数据判定它处于初次异动阶段"。 */}
+                  {item.stage ? (
+                    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] ${stageClass(item.stage)}`}>
+                      {item.stage}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-muted" title="趋势/持续性/降温三个维度均无观测值,未判定阶段">
+                      未判定
+                    </span>
+                  )}
+                </span>
+              )}
               <span className={`text-right font-mono ${priceColorClass(item.change_pct)}`}>
                 {fmtPct(item.change_pct)}
               </span>
