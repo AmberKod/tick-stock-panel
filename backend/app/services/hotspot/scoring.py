@@ -60,6 +60,16 @@ def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def observed_float(value: Any) -> float | None:
+    """把一个趋势维度归一化成 float;**没有观测值**时返回 ``None``。
+
+    与 ``safe_float`` 的区别: ``safe_float`` 把缺失兜成 0.0(用于"我可以当 0 用"
+    的场景),本函数严格保留"未知"语义 —— None / NaN / 不可解析一律 None,
+    调用方据此决定是否可用该维度做判定。
+    """
+    return safe_float(value, default=None)
+
+
 # ---------------------------------------------------------------------------
 # 板块 heat score (本项目已批准的涨幅与排名权重)
 # ---------------------------------------------------------------------------
@@ -102,29 +112,61 @@ def classify_stage(
     persistence_score: float | None = None,
     latest_score: float | None = None,
     observations: int | None = None,
-) -> str:
+) -> str | None:
     """将趋势三维度 + state/observations 投影到 5 段生命周期。
 
-    与参考项目逻辑保持一致(先判 cooling,再判 persistence/trend,最后兜底)。
+    与参考项目逻辑保持一致(先判 cooling,再判 persistence/trend,最后兜底),
+    但**不再把"没有观测到"当成"观测到 0"**。
+
+    未判定语义 (**None vs 0 必须分清**):
+      - 三个趋势维度 (``trend_score`` / ``cooling_score`` / ``persistence_score``)
+        **全部未知** (None / NaN / 不可解析) → 返回 ``None``,表示"观测点不足,
+        未判定"。``初次异动`` 是一个**观测结论**(趋势刚起来),不是兜底值:
+        没有历史观测点时可说的只有"不知道",不能渲染成"数据判定它处于初次异动"。
+      - **显式传入的真实数值仍照旧判定**,包括 ``0``。``trend_score=0`` 是
+        "观测到趋势为 0"的结论,不是缺失,因此仍走原分支逻辑,不会被判为未判定。
+      - 只有部分维度未知时(至少一个维度有观测值),未观测维度在比较式中按 0
+        处理 —— 这是本函数沿用参考项目的既有规则,不是"缺失当 0":此时判定
+        依据是那些**确实有观测值**的维度。
+
+    Args:
+        state: 源侧状态字符串(``weakening`` / ``cooling`` / ``persistent_hot`` ...)。
+        trend_score: 趋势分,None = 未观测。
+        cooling_score: 降温分,None = 未观测。
+        persistence_score: 持续性分 (0-100),None = 未观测。
+        latest_score: 当期热度分;缺失按 0 参与比较(沿用原行为)。
+        observations: 观测点数。
+
+    Returns:
+        五段之一,或 ``None``(三个趋势维度全部未知 → 未判定)。
     """
     state_text = safe_text(state).lower()
-    trend = safe_float(trend_score) or 0.0
-    cooling = safe_float(cooling_score) or 0.0
-    persistence = safe_float(persistence_score) or 0.0
+    trend = observed_float(trend_score)
+    cooling = observed_float(cooling_score)
+    persistence = observed_float(persistence_score)
     latest = safe_float(latest_score) or 0.0
     obs = int(safe_float(observations) or 0)
 
-    if state_text in {"weakening", "cooling"} and (latest < 60 or trend <= -5):
+    if trend is None and cooling is None and persistence is None:
+        # fail-closed: 趋势三维度全部没有观测值 → 未判定, 绝不冒充"初次异动"
+        return None
+
+    # 至少一个维度有观测值 → 缺的那些在比较式里按 0(参考项目既有规则)
+    trend_value = 0.0 if trend is None else trend
+    cooling_value = 0.0 if cooling is None else cooling
+    persistence_value = 0.0 if persistence is None else persistence
+
+    if state_text in {"weakening", "cooling"} and (latest < 60 or trend_value <= -5):
         return "降温退潮"
-    if cooling >= 8 and (latest < 60 or trend <= -5):
+    if cooling_value >= 8 and (latest < 60 or trend_value <= -5):
         return "降温退潮"
-    if cooling >= 5:
+    if cooling_value >= 5:
         return "分歧放量"
-    if latest >= 75 and trend >= 8 and persistence >= 50:
+    if latest >= 75 and trend_value >= 8 and persistence_value >= 50:
         return "加速主升"
-    if state_text == "persistent_hot" or persistence >= 66.6667:
+    if state_text == "persistent_hot" or persistence_value >= 66.6667:
         return "确认扩散"
-    if trend >= 5 and obs >= 2:
+    if trend_value >= 5 and obs >= 2:
         return "确认扩散"
     return "初次异动"
 
@@ -272,6 +314,7 @@ __all__ = [
     "classify_stage",
     "compute_board_heat_score",
     "hot_stock_score_breakdown",
+    "observed_float",
     "safe_float",
     "safe_text",
     "score_constituent",

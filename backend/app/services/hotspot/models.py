@@ -65,7 +65,9 @@ class HotspotSummary:
     cooling_score: float | None = None  # 0-100
     observations: int = 0
     state: str = ""  # 自由字符串,供 stage 分类使用
-    stage: str = "初次异动"
+    # 生命周期阶段。None = 未判定(趋势维度没有观测值),不是"初次异动" —
+    # "初次异动"是观测结论,缺观测点时只能说未判定 —— 拿缺省值冒充它会被渲染成假结论。
+    stage: str | None = None
     sample_stock_count: int = 0
     leaders: list[str] = field(default_factory=list)
     leader_stocks: list[HotspotStock] = field(default_factory=list)
@@ -133,6 +135,7 @@ class HotspotResults(list[HotspotSummary]):
         stale_age_hours: float | None = None,
         market: str = "cn",
         quality_status: str = "",
+        sample_coverage: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(items or [])
         self.provider_used = provider_used
@@ -141,6 +144,9 @@ class HotspotResults(list[HotspotSummary]):
         self.stale = stale
         self.stale_age_hours = stale_age_hours
         self.market = market
+        # 本次结果的样本覆盖率 {"covered","universe","ratio","as_of","stale_symbols",...}
+        # None = 分母不可得 (universe 读不到) 或该源不适用, 前端据此不显示。
+        self.sample_coverage = sample_coverage
         if quality_status:
             self.quality_status = quality_status
         elif stale:
@@ -169,6 +175,7 @@ class HotspotResults(list[HotspotSummary]):
             "stale_age_hours": self.stale_age_hours,
             "market": self.market,
             "quality_status": self.quality_status,
+            "sample_coverage": dict(self.sample_coverage) if self.sample_coverage else None,
         }
 
 

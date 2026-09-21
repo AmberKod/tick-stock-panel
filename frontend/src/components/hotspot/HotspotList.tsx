@@ -84,9 +84,18 @@ export function HotspotList({ items, loading, selectedTopic, onSelect }: Hotspot
                 </span>
               </span>
               <span>
-                <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] ${stageClass(item.stage)}`}>
-                  {item.stage || '—'}
-                </span>
+                {/* stage 为 null = 未判定(趋势三维度没有观测值)。
+                    这里**不渲染任何徽标**: 渲染成"初次异动"会把"没有趋势数据"
+                    说成"数据判定它处于初次异动阶段"。 */}
+                {item.stage ? (
+                  <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] ${stageClass(item.stage)}`}>
+                    {item.stage}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-muted" title="趋势/持续性/降温三个维度均无观测值,未判定阶段">
+                    未判定
+                  </span>
+                )}
               </span>
               <span className={`text-right font-mono ${priceColorClass(item.change_pct)}`}>
                 {fmtPct(item.change_pct)}

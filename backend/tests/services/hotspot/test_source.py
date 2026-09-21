@@ -34,7 +34,11 @@ def test_stub_discover_cn_returns_usable_results():
     for summary in results:
         assert summary.heat_score >= 0 and summary.heat_score <= 100
         assert summary.topic
-        assert summary.stage in {"初次异动", "确认扩散", "加速主升", "分歧放量", "降温退潮"}
+        # 三维度趋势从无观测值 → 未判定(None); 绝不允许兜成"初次异动"
+        assert summary.stage is None
+        assert summary.trend_score is None
+        assert summary.persistence_score is None
+        assert summary.cooling_score is None
 
 
 def test_stub_discover_top_limit():

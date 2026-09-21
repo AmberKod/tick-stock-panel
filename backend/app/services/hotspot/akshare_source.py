@@ -295,9 +295,12 @@ class AkshareHotspotSource(HotspotSource):
             stage=classify_stage(
                 latest_score=heat,
                 observations=0,
-                persistence_score=0,
-                trend_score=0,
-                cooling_score=0,
+                # 这三个趋势维度本源从未计算过 (需要历史观测点) → 显式传 None。
+                # 绝不能传 0: 0 会被当成"观测到趋势为 0"的真实结论, 从而把
+                # "没有趋势数据"渲染成"数据判定它处于初次异动阶段"。
+                persistence_score=None,
+                trend_score=None,
+                cooling_score=None,
             ),
             sample_stock_count=0,
             leaders=leaders,

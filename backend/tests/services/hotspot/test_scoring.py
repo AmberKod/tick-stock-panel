@@ -112,8 +112,24 @@ def test_board_score_missing_rank_only_change_counts():
 # classify_stage
 # ---------------------------------------------------------------
 
-def test_classify_stage_initial_when_empty():
-    assert classify_stage() == "初次异动"
+def test_classify_stage_unknown_when_trend_dims_all_missing():
+    """趋势三维度全部没有观测值 → 未判定 (None), 不能兜成 "初次异动"。
+
+    "初次异动"是观测结论, 缺观测点时可说的只有"不知道"。
+    """
+    assert classify_stage() is None
+    assert classify_stage(latest_score=10, observations=0) is None
+    assert classify_stage(latest_score=80, observations=5, state="persistent_hot") is None
+
+
+def test_classify_stage_explicit_zero_is_an_observation_not_a_gap():
+    """显式传 0 ≠ 缺失: 0 是"观测到趋势为 0"的真实结论, 仍按原逻辑判定。"""
+    assert classify_stage(
+        latest_score=10, observations=0, trend_score=0, persistence_score=0, cooling_score=0,
+    ) == "初次异动"
+    assert classify_stage(
+        latest_score=50, observations=3, trend_score=10, persistence_score=0, cooling_score=0,
+    ) == "确认扩散"
 
 
 def test_classify_stage_acceleration_path():
@@ -152,7 +168,10 @@ def test_classify_stage_diffusion_path():
 
 
 def test_classify_stage_fallback_initial():
-    stage = classify_stage(latest_score=10, observations=0)
+    """三个趋势维度都观测到了、但都没越阈值 → 这时才可以说是"初次异动"。"""
+    stage = classify_stage(
+        latest_score=10, observations=0, trend_score=0, persistence_score=0, cooling_score=0,
+    )
     assert stage == "初次异动"
 
 

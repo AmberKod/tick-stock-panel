@@ -301,7 +301,14 @@ class StubHotspotSource(HotspotSource):
             cooling_score=None,
             observations=0,
             state="",
-            stage=classify_stage(latest_score=heat, observations=0, persistence_score=0, trend_score=0, cooling_score=0),
+            # 趋势三维度没有观测值 → classify_stage 返回 None (未判定), 不兜 "初次异动"
+            stage=classify_stage(
+                latest_score=heat,
+                observations=0,
+                persistence_score=None,
+                trend_score=None,
+                cooling_score=None,
+            ),
             sample_stock_count=int(safe_float(raw.get("sample_stock_count")) or 0),
             canonical_topic=safe_text(raw["topic"]),
             aliases=[safe_text(raw["topic"])],

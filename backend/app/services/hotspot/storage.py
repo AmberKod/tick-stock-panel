@@ -245,7 +245,9 @@ def _summary_to_dict(item: HotspotSummary) -> dict[str, Any]:
         "cooling_score": safe_float(item.cooling_score),
         "observations": int(safe_float(item.observations) or 0),
         "state": safe_text(item.state),
-        "stage": safe_text(item.stage) or "初次异动",
+        # stage 未判定时原样存 None — 不要在这里兜 "初次异动": 读回时会被渲染
+        # 成"数据判定它处于初次异动阶段", 而事实只是没观测到趋势三维度。
+        "stage": safe_text(item.stage) or None,
         "sample_stock_count": int(safe_float(item.sample_stock_count) or 0),
         "leaders": list(item.leaders or []),
         "leader_stocks": [_stock_to_dict(stock) for stock in item.leader_stocks],
@@ -330,7 +332,7 @@ def _row_to_summary(row: dict[str, Any]) -> HotspotSummary:
         cooling_score=safe_float(row.get("cooling_score")),
         observations=int(safe_float(row.get("observations")) or 0),
         state=safe_text(row.get("state")),
-        stage=safe_text(row.get("stage")) or "初次异动",
+        stage=safe_text(row.get("stage")) or None,
         sample_stock_count=int(safe_float(row.get("sample_stock_count")) or 0),
         leaders=list(row.get("leaders") or []),
         leader_stocks=[_row_to_stock(stock) for stock in (row.get("leader_stocks") or [])],

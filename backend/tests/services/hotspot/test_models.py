@@ -13,10 +13,24 @@ def test_summary_defaults():
     s = HotspotSummary(topic="半导体")
     assert s.topic == "半导体"
     assert s.heat_score == 50.0  # 默认 50.0
-    assert s.stage == "初次异动"
+    # stage 缺省是 None = 未判定(没有趋势观测值), 不是假的"初次异动"
+    assert s.stage is None
     assert s.quality_status == "partial"
     assert s.aliases == [] and s.leaders == []
     assert s.sample_stock_count == 0
+
+
+def test_results_sample_coverage_defaults_to_unknown():
+    """覆盖率缺省 None: 分母不可得时不猜, 也不在该挂钩"全量样本"。"""
+    empty = HotspotResults([], market="hk")
+    assert empty.sample_coverage is None
+    assert empty.to_dict()["sample_coverage"] is None
+
+    coverage = {"covered": 1187, "universe": 2798, "ratio": 0.4242, "as_of": "2026-09-18",
+                "stale_symbols": 973, "stale_as_of": "2026-09-03"}
+    results = HotspotResults([HotspotSummary(topic="T")], market="hk", sample_coverage=coverage)
+    assert results.sample_coverage == coverage
+    assert results.to_dict()["sample_coverage"]["ratio"] == 0.4242
 
 
 def test_results_extends_list():

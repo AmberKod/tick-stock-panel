@@ -93,6 +93,9 @@ def list_hotspots(
         "stale_age_hours": results.stale_age_hours,
         "quality_status": results.quality_status,
         "source_errors": list(results.source_errors),
+        # 样本覆盖率 {"covered","universe","ratio","as_of","stale_symbols","stale_as_of"}
+        # None = 分母不可得 / 该源不适用 → 前端不显示, 不用缺省值伪装成"全量样本"
+        "sample_coverage": results.sample_coverage,
         "market": results.market,
         "hotspots": [summary_to_dict(item) for item in results],
         "hotspot_count": len(results),
@@ -177,6 +180,8 @@ def summary_to_dict(item: HotspotSummary) -> dict[str, Any]:
         "cooling_score": item.cooling_score,
         "observations": item.observations,
         "state": item.state,
+        # stage 允许为 None (JSON null): 趋势三维度没有观测值 → 未判定,
+        # 前端据此不渲染阶段徽标, 而不是显示一个假的"初次异动"。
         "stage": item.stage,
         "sample_stock_count": item.sample_stock_count,
         "leaders": list(item.leaders or []),

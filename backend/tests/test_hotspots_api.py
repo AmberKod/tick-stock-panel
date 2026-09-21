@@ -122,7 +122,13 @@ def test_list_hotspots_cn_returns_envelope(client):
     # 至少一个 topic 应有 heat_score 数值
     first = payload["hotspots"][0]
     assert 0 <= first["heat_score"] <= 100
-    assert first["stage"]
+    # 趋势三维度全市场都没有观测值 → stage 是 null (未判定), 不能是假的"初次异动"
+    assert first["stage"] is None
+    assert first["trend_score"] is None
+    assert first["persistence_score"] is None
+    assert first["cooling_score"] is None
+    # 覆盖率: CN 源不计算 → null; universe 不可得时也不许挂 0/100% 的假数字
+    assert payload["sample_coverage"] is None
 
 
 def test_list_hotspots_invalid_market_returns_400(client):
