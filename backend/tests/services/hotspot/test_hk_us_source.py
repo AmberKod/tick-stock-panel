@@ -302,11 +302,32 @@ def test_daily_used_outside_session(monkeypatch):
     monkeypatch.setattr(
         source,
         "_read_daily_quotes",
-        lambda market: ({row["symbol"]: row for row in _quotes(market)[0]}, "2026-09-03"),
+        lambda market: ({row["symbol"]: row for row in _quotes(market)[0]}, "2026-09-03", None),
     )
     results = source.discover(market="hk", top=0)
     assert results.provider_used == "hkus_industry:daily"
     assert results[0].topic_date == "2026-09-03"
+
+
+def test_daily_coverage_surfaces_in_results(monkeypatch):
+    """日K路的样本覆盖率必须冒到 HotspotResults.sample_coverage (幸存者偏差显式化)。"""
+    coverage = {
+        "covered": 2, "universe": 5, "ratio": 0.4, "as_of": "2026-09-03",
+        "stale_symbols": 3, "stale_as_of": "2026-08-20",
+    }
+    source = HkUsIndustryHotspotSource(
+        instruments_loader=_instruments,
+        now_fn=lambda market: datetime(2026, 9, 12, 10, 0, tzinfo=HK_TZ),  # 周六
+    )
+    monkeypatch.setattr(
+        source,
+        "_read_daily_quotes",
+        lambda market: (
+            {row["symbol"]: row for row in _quotes(market)[0]}, "2026-09-03", coverage,
+        ),
+    )
+    results = source.discover(market="hk", top=0)
+    assert results.sample_coverage == coverage
 
 
 def test_daily_snapshot_older_than_today_is_marked_stale():
@@ -345,7 +366,7 @@ def test_daily_used_when_realtime_fails(monkeypatch):
     monkeypatch.setattr(
         source,
         "_read_daily_quotes",
-        lambda market: ({row["symbol"]: row for row in _quotes(market)[0]}, "2026-09-03"),
+        lambda market: ({row["symbol"]: row for row in _quotes(market)[0]}, "2026-09-03", None),
     )
     results = source.discover(market="hk", top=0)
     assert results.provider_used == "hkus_industry:daily"
@@ -358,10 +379,15 @@ def test_read_daily_quotes_accepts_non_empty_frame(monkeypatch):
     frame = polars.DataFrame({
         "symbol": ["00001.HK"], "change_pct": [0.01], "amount": [100.0], "vol_ratio_5d": [1.1],
     })
-    monkeypatch.setattr(builder, "_load_latest_rows", lambda data_dir, market: (frame, date(2026, 9, 3)))
+    monkeypatch.setattr(
+        builder,
+        "_load_latest_rows",
+        lambda data_dir, market: builder.LatestRows(frame, date(2026, 9, 3), None),
+    )
 
-    quotes, as_of = HkUsIndustryHotspotSource(data_dir=Path("unused"))._read_daily_quotes("hk")
+    quotes, as_of, coverage = HkUsIndustryHotspotSource(data_dir=Path("unused"))._read_daily_quotes("hk")
     assert as_of == "2026-09-03"
+    assert coverage is None
     assert quotes["00001.HK"]["change_pct"] == 0.01
 
 

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
-import { api } from '@/lib/api'
+import { api, type HotspotSampleCoverage } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { MarketTab, type Market } from '@/components/MarketTab'
 import { HotspotList } from '@/components/hotspot/HotspotList'
@@ -27,6 +27,44 @@ const MARKET_QUERY: Record<Market, string> = {
 }
 
 const MARKET_LABEL: Record<Market, string> = { cn: 'A 股', hk: '港股', us: '美股' }
+
+/**
+ * 覆盖率低于该阈值才显式提示;健康样本不刷存在感。
+ * 取 0.95 而不是 1.0: 标的退市/停牌/当日无成交导致的个位数缺席是正常的,
+ * 不该每次都弹提示。
+ */
+const COVERAGE_ALERT_THRESHOLD = 0.95
+
+/**
+ * 样本覆盖率提示文案。
+ *
+ * 分母不可得(后端给 null)或覆盖率健康时返回 null —— 没有数据要说的时候就说
+ * "没调查",不用 100% 冒充全量样本。
+ */
+function buildCoverageNotice(
+  cov: HotspotSampleCoverage | null,
+  marketLabel: string,
+): string | null {
+  if (!cov) return null
+  const { covered, universe, ratio, as_of, stale_symbols, stale_buckets } = cov
+  if (covered == null || universe == null || universe <= 0 || ratio == null) return null
+  if (ratio >= COVERAGE_ALERT_THRESHOLD) return null
+
+  // 无 as_of 时不编造日期, 直接说"当日"
+  const head = `样本覆盖 ${covered}/${universe}（${(ratio * 100).toFixed(1)}%）:${marketLabel}本期只统计了${
+    as_of ? ` ${as_of} ` : ' '
+  }当日有更新的标的`
+  // stale_buckets 后端保留最多 3 档(诊断用), 这里只展示峰值档
+  const peak = stale_buckets?.[0]
+  let stale = ''
+  if (stale_symbols != null && stale_symbols > 0) {
+    stale =
+      peak?.count && peak.date
+        ? `;另有 ${stale_symbols} 只未更新到该日、未计入本期(最多的一档 ${peak.count} 只停在 ${peak.date})`
+        : `;另有 ${stale_symbols} 只未更新到该日、未计入本期`
+  }
+  return `${head}${stale}。这是部分样本的热度榜,不代表全市场强弱。`
+}
 
 const STATUS_LABEL: Record<string, { text: string; className: string }> = {
   ok: { text: '同步成功', className: 'text-bull' },
@@ -91,6 +129,11 @@ export function Hotspots() {
   const missingSource = quality === 'missing_mapping'
   const snapshotDate = rows.find(item => item.topic_date)?.topic_date ?? null
   const isStale = Boolean(list.data?.stale) || rows.some(item => item.stale)
+  // 覆盖率不足 → 显式提示幸存者偏差;健康或不可得时不显示
+  const coverageNotice = buildCoverageNotice(
+    list.data?.sample_coverage ?? null,
+    MARKET_LABEL[market],
+  )
 
   return (
     <div className="h-full overflow-auto bg-base p-4">
@@ -203,6 +246,12 @@ export function Hotspots() {
         </div>
       )}
 
+      {!missingSource && coverageNotice && (
+        <div className="mb-3 flex items-start gap-2 rounded-card border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-secondary">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <span>{coverageNotice}</span>
+        </div>
+      )}
       {refresh.isError && (
         <div className="mb-3 rounded-card border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
           手动同步失败{(refresh.error as Error)?.message ? `: ${(refresh.error as Error).message}` : ''}

@@ -10,13 +10,19 @@
 - board 映射: HK 按 08 前缀分主板/创业板; US 统一 "美股"。
 - 指数段: 返回核心指数 symbol/name (行情由独立指数源补充, 暂空)。
 - 无概念/行业 ext_data → concept_rank/industry_rank 暂空。
+- 幸存者偏差显式化: ``_load_latest_rows`` 只取全市场 ``max(date)`` 那天的行,
+  停在更早日期的标的会被静默丢弃。它同时返回 **样本覆盖率**
+  (``covered / universe``,见 ``_build_coverage``),把这层偏差标出来而不是藏起来。
+  分母不可得时返回 None — **不可用不计入分母**,不拿命中数冒充分母。
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 import urllib.request
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +30,29 @@ import polars as pl
 
 from app.markets import get_profile
 
+logger = logging.getLogger(__name__)
+
 # 强势股阈值 (替代涨停; 港美无涨跌停制度)
 _STRONG_UP_THRESHOLD = 0.05    # 涨幅 >=5%
 _STRONG_DOWN_THRESHOLD = -0.05  # 跌幅 <=-5%
 
 # 强势梯队分档 (替代涨停连板梯队)
 _TIER_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)
+
+
+@dataclass(frozen=True)
+class LatestRows:
+    """``_load_latest_rows`` 的返回值:最新交易日行 + 样本覆盖率。
+
+    Attributes:
+        rows: 最新交易日的全市场指标行 (已 inner join instruments 补 name)。
+        as_of: rows 所属交易日;无数据为 None。
+        coverage: 样本覆盖率 dict (见 ``_build_coverage``);分母不可得时为 None。
+    """
+
+    rows: pl.DataFrame
+    as_of: date | None = None
+    coverage: dict[str, Any] | None = None
 
 
 def _finite(v: Any) -> float | None:
@@ -167,15 +190,15 @@ def _fetch_index_quotes(market: str) -> dict[str, dict]:
     return quotes
 
 
-def _load_latest_rows(data_dir: Path, market: str) -> tuple[pl.DataFrame, date | None]:
-    """读取港美 enriched 最新交易日的全市场行 (含 name)。
+def _load_latest_rows(data_dir: Path, market: str) -> LatestRows:
+    """读取港美 enriched 最新交易日的全市场行 (含 name) 与样本覆盖率。
 
     Returns:
-        (最新日全市场指标行 DataFrame, as_of date)。无数据返回 (空 df, None)。
+        LatestRows(rows, as_of, coverage)。无数据时 rows 为空、as_of/coverage 为 None。
     """
     enriched_dir = data_dir / "kline_hk_us_enriched"
     if not enriched_dir.exists():
-        return pl.DataFrame(), None
+        return LatestRows(pl.DataFrame(), None, None)
     suffix = _market_suffix(market)
     try:
         lf = pl.scan_parquet(
@@ -186,13 +209,23 @@ def _load_latest_rows(data_dir: Path, market: str) -> tuple[pl.DataFrame, date |
             cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
         )
     except Exception:
-        return pl.DataFrame(), None
+        return LatestRows(pl.DataFrame(), None, None)
 
-    # 先确定该市场最新交易日
-    dates = lf.filter(pl.col("symbol").str.ends_with(suffix)).select("date").collect()
-    if dates.is_empty():
-        return pl.DataFrame(), None
-    as_of = dates["date"].max()
+    # 一次扫描同时拿到: 市场最新交易日 + 每只标的自身的最新日期(覆盖率用)。
+    # 只 select 两列, 与原先只 select("date") 的成本基本同量级。
+    try:
+        timeline = (
+            lf.filter(pl.col("symbol").str.ends_with(suffix))
+            .select("symbol", "date")
+            .collect()
+        )
+    except Exception:
+        return LatestRows(pl.DataFrame(), None, None)
+    if timeline.is_empty():
+        return LatestRows(pl.DataFrame(), None, None)
+
+    latest = timeline.group_by("symbol").agg(pl.col("date").max().alias("latest_date"))
+    as_of = latest["latest_date"].max()
     if hasattr(as_of, "date"):
         as_of = as_of.date()
 
@@ -203,13 +236,12 @@ def _load_latest_rows(data_dir: Path, market: str) -> tuple[pl.DataFrame, date |
         )
         .collect()
     )
-    if df.is_empty():
-        return df, as_of
 
     # JOIN instruments 拿 name, 并用 inner join 过滤掉 universe 外的残留标的
     # (美股旧脏清单同步遗留的粉单/OTC 日K 仍在 kline_daily 目录, 需按 universe 收敛)。
+    joined_universe = False
     inst_path = data_dir / "instruments" / f"{market.lower()}_instruments.parquet"
-    if inst_path.exists():
+    if inst_path.exists() and not df.is_empty():
         try:
             inst = pl.read_parquet(inst_path)
             inst_cols = ["symbol", "name"]
@@ -220,9 +252,136 @@ def _load_latest_rows(data_dir: Path, market: str) -> tuple[pl.DataFrame, date |
             inst = inst.select(inst_cols)
             if "name" not in df.columns:
                 df = df.join(inst, on="symbol", how="inner")
+                joined_universe = True
         except Exception:
             pass
-    return df, as_of
+    coverage = _build_coverage(
+        data_dir, market, rows=df, latest=latest, as_of=as_of, joined_universe=joined_universe,
+    )
+    return LatestRows(df, as_of, coverage)
+
+
+def _read_universe_symbols(data_dir: Path, market: str) -> list[str] | None:
+    """读该市场 universe 标的清单;文件缺失/损坏/无 symbol 列返回 None。
+
+    None 的含义是"分母不可得",不是"分母为 0" —— 覆盖率显式未知,不猜分母。
+    """
+    suffix = _market_suffix(market)
+    inst_path = data_dir / "instruments" / f"{market.lower()}_instruments.parquet"
+    if not inst_path.exists():
+        return None
+    try:
+        inst = pl.read_parquet(inst_path)
+    except Exception:
+        logger.warning("coverage: universe 读取失败 %s", inst_path)
+        return None
+    if "symbol" not in inst.columns:
+        return None
+    try:
+        symbols = (
+            inst.select(pl.col("symbol").cast(pl.Utf8, strict=False))
+            .filter(pl.col("symbol").str.ends_with(suffix))
+            .unique()["symbol"]
+            .to_list()
+        )
+    except Exception:
+        return None
+    return [str(s) for s in symbols if s]
+
+
+def _build_coverage(
+    data_dir: Path,
+    market: str,
+    *,
+    rows: pl.DataFrame,
+    latest: pl.DataFrame,
+    as_of: date | None,
+    joined_universe: bool,
+) -> dict[str, Any] | None:
+    """样本覆盖率 = 命中 ``as_of`` 的标的数 / 该市场 universe 总数。
+
+    这是**计数比值**,不是打分: ``ratio = covered / universe``。目的是把
+    "看起来正常但其实只覆盖部分样本的热度榜"显式标注出来 (幸存者偏差)。
+
+    - ``covered``: 进入了本次排名的标的数 —— 最新日期命中 ``as_of`` 的行数。
+      rows 已被 inner join 到 universe (``joined_universe=True``) 时,它天然
+      不含 universe 外标的, 否则需与 universe 取交集后再计数。
+    - ``universe``: ``instruments`` 里该市场的标的总数 (分母)。读不到 →
+      返回 None: **不可用不计入分母**,宁可显示"未知"也不用命中数冒充分母。
+    - ``stale_symbols``: universe 里有 enriched 历史行、但最新日期 != as_of
+      的标的数 (这批被静默丢弃, 是幸存者偏差的直接来源)。
+    - ``stale_buckets``: 这批标的按"各自停在哪个日期"分桶, 按数量降序取前 3 档
+      (计数事实,不是打分)。**不是死代码**: 前端当前只用 ``[0]``(峰值档)写文案
+      (见 ``frontend/src/pages/Hotspots.tsx::buildCoverageNotice``), 多留两档是
+      给排查用的 —— 覆盖率掉下来时要能一眼看出是"全市场同步停了某一天"还是
+      "长尾标的各自停在不同日期", 只给一个峰值档区分不了。
+    - ``stale_as_of``: 这批 stale 标的中最新的那个日期。
+    """
+    universe_symbols = _read_universe_symbols(data_dir, market)
+    if universe_symbols is None or not universe_symbols:
+        return None
+    universe_set = set(universe_symbols)
+
+    covered_set: set[str] = set()
+    if rows is not None and "symbol" in getattr(rows, "columns", []):
+        raw = rows.select(pl.col("symbol").cast(pl.Utf8, strict=False).unique())["symbol"].to_list()
+        symbols = {str(s) for s in raw if s}
+        covered_set = symbols if joined_universe else (symbols & universe_set)
+
+    stale_symbols = 0
+    stale_buckets: list[dict[str, Any]] = []
+    stale_as_of: date | None = None
+    if latest is not None and "latest_date" in latest.columns and as_of is not None:
+        stale = latest.filter(pl.col("latest_date") != as_of)
+        # 只统计 universe 内的标的: universe 外的残留日均数据是另一个问题
+        # (源头同步脏清单), 不该混进"样本没更新"的口径里。
+        stale_rows = [
+            _as_date(value)
+            # strict=True: 两列来自同一 frame, 长度必然一致
+            for sym, value in zip(
+                stale["symbol"].to_list(), stale["latest_date"].to_list(), strict=True,
+            )
+            if str(sym) in universe_set
+        ]
+        stale_rows = [value for value in stale_rows if value is not None]
+        stale_symbols = len(stale_rows)
+        if stale_rows:
+            stale_as_of = max(stale_rows)
+            buckets: dict[str, int] = {}
+            for value in stale_rows:
+                key = value.isoformat()
+                buckets[key] = buckets.get(key, 0) + 1
+            stale_buckets = [
+                {"date": key, "count": count}
+                for key, count in sorted(buckets.items(), key=lambda item: -item[1])[:3]
+            ]
+
+    covered = len(covered_set)
+    universe = len(universe_set)
+    return {
+        "covered": covered,
+        "universe": universe,
+        "ratio": round(covered / universe, 4),
+        "as_of": _as_date(as_of).isoformat() if _as_date(as_of) else None,
+        "stale_symbols": stale_symbols,
+        "stale_as_of": _as_date(stale_as_of).isoformat() if _as_date(stale_as_of) else None,
+        "stale_buckets": stale_buckets,
+    }
+
+
+def _as_date(value: Any) -> date | None:
+    """把 polars 读出的 Date/Datetime 归一为 ``datetime.date``;未知返回 None。
+
+    enriched 的 ``date`` 列由多个写入源产生, dtype 可能是 Date 也可能是 Datetime,
+    对外统一按 YYYY-MM-DD 表达, 避免出现 ``2026-09-03T00:00:00`` 这种半吊子字符串。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
 
 
 def _pct_band_rows(values: list[float]) -> list[dict]:
@@ -325,8 +484,9 @@ def _sector_rank(rows: list[dict], limit: int = 5) -> dict[str, list[dict]]:
 def build_hk_us_overview(market: str, data_dir: Path, as_of: date | None = None) -> dict:
     """装配港美市场总览 (结构对齐 A股 build_market_overview)。"""
     market = market.upper()
-    df, resolved_as_of = _load_latest_rows(data_dir, market)
-    as_of = as_of or resolved_as_of
+    snapshot = _load_latest_rows(data_dir, market)
+    df = snapshot.rows
+    as_of = as_of or snapshot.as_of
 
     _quotes = _fetch_index_quotes(market)
     indices = [

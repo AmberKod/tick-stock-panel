@@ -239,6 +239,8 @@ def _limit_results(result: HotspotResults, top: int) -> HotspotResults:
         fallback_used=result.fallback_used, source_errors=result.source_errors,
         stale=result.stale, stale_age_hours=result.stale_age_hours, market=result.market,
         quality_status=result.quality_status,
+        # 覆盖率描述的是源那批样本, 截断 top 不改变它, 必须原样冒上去
+        sample_coverage=result.sample_coverage,
     )
 
 

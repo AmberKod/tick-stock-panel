@@ -4049,6 +4049,33 @@ export interface HotspotDetailResult {
   news_search_status: string
 }
 
+/**
+ * 样本覆盖率 (日K聚合路径专用)。
+ *
+ * 背景: 热点榜只取全市场 max(date) 那天的行, 停在更早日期的标的会被静默丢弃 ——
+ * 产出的是"看起来正常但其实只覆盖部分样本"的榜单 (幸存者偏差)。这里把偏差显式
+ * 标注出来, 而不是藏起来。
+ *
+ * 全部字段都是**计数值**: ratio = covered / universe, 不是打分。
+ * 全流程 null 表示"分母不可得", 前端据此不显示, 不用 100% 冒充全量样本。
+ */
+export interface HotspotSampleCoverage {
+  /** 命中 as_of、进入本期排名的标的数 */
+  covered: number | null
+  /** 该市场 universe 标的总数 (分母) */
+  universe: number | null
+  /** covered / universe */
+  ratio: number | null
+  /** 本期数据日期 YYYY-MM-DD */
+  as_of: string | null
+  /** universe 内有历史数据、但最新日期 != as_of 的标的数 (被丢弃的那批) */
+  stale_symbols: number | null
+  /** 这批 stale 标的中最新的日期 */
+  stale_as_of: string | null
+  /** stale 标的按"停在哪个日期"分桶, 数量最多的前 3 桶 */
+  stale_buckets: { date: string; count: number }[]
+}
+
 export interface HotspotListResult {
   enabled: boolean
   provider: string
@@ -4060,6 +4087,8 @@ export interface HotspotListResult {
   stale_age_hours: number | null
   quality_status: string | null
   source_errors: string[]
+  /** 样本覆盖率;null = 分母不可得 / 该源不适用 */
+  sample_coverage: HotspotSampleCoverage | null
   market: string
   hotspots: HotspotSummaryRow[]
   hotspot_count: number

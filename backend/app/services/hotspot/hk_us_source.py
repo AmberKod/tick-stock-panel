@@ -195,10 +195,12 @@ class HkUsIndustryHotspotSource(HotspotSource):
         self._quotes: dict[str, dict[str, dict[str, Any]]] = {}
         self._mode: dict[str, str] = {}
         self._as_of: dict[str, str] = {}
+        # 该批日K行情的样本覆盖率 (与 _quotes/_mode/_as_of 同一个快照的侧面)
+        self._coverage: dict[str, dict[str, Any] | None] = {}
         self._quotes_at: dict[str, float] = {}
         # 同轮一致性: 一次对外调用内 pin 住已取数据 (见 _begin_round)
         self._round_rows: dict[str, list[dict[str, Any]]] = {}
-        self._round_quotes: dict[str, tuple[dict[str, dict[str, Any]], str, str]] = {}
+        self._round_quotes: dict[str, tuple[dict[str, dict[str, Any]], str, str, dict[str, Any] | None]] = {}
 
     # ------------------------------------------------------------------
     # 缓存: 一轮 = 一次对外调用 (discover / fetch_detail)
@@ -246,7 +248,7 @@ class HkUsIndustryHotspotSource(HotspotSource):
             return HotspotResults([], provider_used=self.name, source_errors=[err.as_str()], market=market)
 
         symbols = [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
-        quotes, mode, as_of = self._load_quotes(market, symbols)
+        quotes, mode, as_of, coverage = self._load_quotes(market, symbols)
         if not quotes:
             err = SourceError(
                 provider=self.name, method="quotes",
@@ -266,6 +268,8 @@ class HkUsIndustryHotspotSource(HotspotSource):
             provider_used=f"{self.name}:{mode}",
             source_errors=[],
             market=market,
+            # 日K路才有的样本覆盖率(count 比值, 不是打分);实时路/universe 不可得时为 None
+            sample_coverage=coverage,
         )
 
     def fetch_detail(
@@ -281,7 +285,7 @@ class HkUsIndustryHotspotSource(HotspotSource):
             return None
 
         rows = self._load_instruments(market)
-        quotes, mode, as_of = self._load_quotes(
+        quotes, mode, as_of, _coverage = self._load_quotes(
             market, [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
         )
         members = [
@@ -361,30 +365,37 @@ class HkUsIndustryHotspotSource(HotspotSource):
 
     def _load_quotes(
         self, market: str, symbols: list[str]
-    ) -> tuple[dict[str, dict[str, Any]], str, str]:
+    ) -> tuple[dict[str, dict[str, Any]], str, str, dict[str, Any] | None]:
         """取行情: 盘中实时, 否则 enriched 日K 快照。
 
         Returns:
-            (symbol -> quote dict, mode, as_of)
+            (symbol -> quote dict, mode, as_of, sample_coverage)
             mode: "realtime" | "daily" ; as_of: YYYY-MM-DD (实时取今天本地日期)
+            sample_coverage: 日K路的样本覆盖率 dict; 实时路 / 分母不可得 → None
 
-        缓存: ``QUOTE_TTL_S`` 到期后重取, 且 ``(quotes, mode, as_of)`` 作为**一个
-        整体**一起失效 (见 ``_store_quotes``)。同一轮内复用本轮 pin 住的快照。
+        缓存: ``QUOTE_TTL_S`` 到期后重取, 且 ``(quotes, mode, as_of, coverage)`` 作为
+        **一个整体**一起失效 (见 ``_store_quotes``)。同一轮内复用本轮 pin 住的快照。
         """
         pinned = self._round_quotes.get(market)
         if pinned is not None:
             return pinned
         cached = self._quotes.get(market)
         if cached is not None and not self._is_expired(market, self._quotes_at, self._quote_ttl_s):
-            snapshot = (cached, self._mode.get(market, "daily"), self._as_of.get(market, ""))
+            snapshot = (
+                cached,
+                self._mode.get(market, "daily"),
+                self._as_of.get(market, ""),
+                self._coverage.get(market),
+            )
             self._round_quotes[market] = snapshot
             return snapshot
 
+        coverage: dict[str, Any] | None = None
         if self._quote_loader is not None:
             raw, mode, as_of = self._quote_loader(market, symbols)
             quotes = self._normalize_quotes(raw)
         else:
-            quotes: dict[str, dict[str, Any]] = {}
+            quotes = {}
             mode = "daily"
             as_of = ""
             if self._is_trading_now(market):
@@ -393,11 +404,11 @@ class HkUsIndustryHotspotSource(HotspotSource):
                     mode = "realtime"
                     as_of = self._today(market)
             if not quotes:
-                quotes, as_of = self._read_daily_quotes(market)
+                quotes, as_of, coverage = self._read_daily_quotes(market)
                 mode = "daily"
 
-        self._store_quotes(market, quotes, mode, as_of)
-        snapshot = (quotes, mode, as_of)
+        self._store_quotes(market, quotes, mode, as_of, coverage)
+        snapshot = (quotes, mode, as_of, coverage)
         self._round_quotes[market] = snapshot
         return snapshot
 
@@ -407,16 +418,18 @@ class HkUsIndustryHotspotSource(HotspotSource):
         quotes: dict[str, dict[str, Any]],
         mode: str,
         as_of: str,
+        coverage: dict[str, Any] | None = None,
     ) -> None:
-        """写入行情缓存的唯一入口: quotes / mode / as_of / 时间戳一起写。
+        """写入行情缓存的唯一入口: quotes / mode / as_of / coverage / 时间戳一起写。
 
-        三者是同一个快照的三个侧面, 分开失效会产生"新行情 + 旧 as_of"这种自相
-        矛盾状态 (前端会看到 realtime 模式却标着昨天的日期, 或反过来)。所以这里
-        只有这一个写入点, 一次写全。
+        四者(加时间戳)是同一个快照的几个侧面, 分开失效会产生"新行情 + 旧 as_of"
+        这种自相矛盾状态 (前端会看到 realtime 模式却标着昨天的日期, 或反过来;
+        coverage 是 as_of 那一批行的属性, 更不能跨批次串)。所以这里只有这一个写入点。
         """
         self._quotes[market] = quotes
         self._mode[market] = mode
         self._as_of[market] = as_of
+        self._coverage[market] = coverage
         self._quotes_at[market] = self._clock_fn()
 
     def _is_trading_now(self, market: str) -> bool:
@@ -567,25 +580,34 @@ class HkUsIndustryHotspotSource(HotspotSource):
                     pass
         return out
 
-    def _read_daily_quotes(self, market: str) -> tuple[dict[str, dict[str, Any]], str]:
-        """读 enriched 最新交易日快照。"""
+    def _read_daily_quotes(
+        self, market: str,
+    ) -> tuple[dict[str, dict[str, Any]], str, dict[str, Any] | None]:
+        """读 enriched 最新交易日快照 + 该批次的样本覆盖率。
+
+        Returns:
+            (symbol -> quote dict, as_of, sample_coverage)。任一步失败 → ({}, "", None)。
+        """
         if self.data_dir is None:
-            return {}, ""
+            return {}, "", None
         try:
             from app.services.hk_us_overview_builder import _load_latest_rows
         except Exception as exc:  # 复用失败不影响 stub 注入路径
             logger.warning("hk_us hotspot daily loader unavailable: %s", exc)
-            return {}, ""
+            return {}, "", None
         try:
-            df, as_of = _load_latest_rows(Path(self.data_dir), _PROFILE_MARKET.get(market, market.upper()))
+            snapshot = _load_latest_rows(
+                Path(self.data_dir), _PROFILE_MARKET.get(market, market.upper())
+            )
         except Exception as exc:
             logger.warning("hk_us hotspot daily read failed: %s", exc)
-            return {}, ""
+            return {}, "", None
+        df, as_of, coverage = snapshot.rows, snapshot.as_of, snapshot.coverage
         # 注意: polars 的 is_empty 是方法, getattr 取到的是 bound method (恒真), 必须判 height
         if df is None or getattr(df, "height", 0) == 0:
-            return {}, ""
+            return {}, "", coverage
         out = self._normalize_quotes(df.to_dicts())
-        return out, as_of.isoformat() if isinstance(as_of, date) else safe_text(as_of)
+        return out, as_of.isoformat() if isinstance(as_of, date) else safe_text(as_of), coverage
 
     # ------------------------------------------------------------------
     # 聚合
