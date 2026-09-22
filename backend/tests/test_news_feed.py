@@ -95,14 +95,23 @@ def test_norm_title_strips_punctuation():
 
 
 def test_duplicate_titles_are_merged(monkeypatch):
-    """同一条新闻多源重复 → 只留一条, 且留时间更新的那个。"""
+    """同一条新闻多源重复 → 只留一条, 且留时间更新的那个。
+
+    时间必须**相对 now** 生成: fetch_category 会按 hours 窗口过滤
+    (news_feed.fetch_category 里 cutoff = now - hours)。写死绝对日期会随着
+    真实时间推移滑出窗口, 让本用例在任意机器上都必然腐化失败
+    (写死 2026-09-19T12:00Z + 48h 窗口 → 2026-09-21 12:00Z 之后必挂)。
+    """
+    older = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    newer = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+
     def fake(feed, timeout=None):
         if feed.name == "A":
-            return [nf.NewsEntry("同一条新闻", "https://a/1", "A", "2026-09-19T10:00:00+00:00")], None
-        return [nf.NewsEntry("同一条新闻", "https://b/1", "B", "2026-09-19T12:00:00+00:00")], None
+            return [nf.NewsEntry("同一条新闻", "https://a/1", "A", older)], None
+        return [nf.NewsEntry("同一条新闻", "https://b/1", "B", newer)], None
 
     monkeypatch.setattr(nf, "_fetch_one", fake)
-    # 借 world 分类的壳(4 个源), 全部返回同一条
+    # 借 world 分类的壳(多源), 全部返回同一条
     r = nf.fetch_category("world", hours=48, limit=10)
     assert len(r.entries) == 1
     assert r.entries[0].source == "B"  # 时间更新的胜出
