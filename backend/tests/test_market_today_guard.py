@@ -837,3 +837,95 @@ def test_scheduled_hk_us_window_uses_cross_market_window(pinned_registry, monkey
         f"窗口右端必须是跨市场最大值 {CN_PIN}, 实际 {captured['end_date'].date()}"
     )
     assert captured["end_date"].date() != HK_PIN, "右端退化成单一市场时钟: 会漏掉领先市场当日K"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 第三批 (mkt-clock-mainline): #18 市场时钟改造的收尾 — regime.py /mainline/recompute
+#
+# 背景事实(推翻早前"B类保留"的判断):
+# - market 参数就在端点签名上 (regime.py:307), 不存在"无 market 可传";
+# - earliest (regime.py:317) 已按 market 计算 ⇒ "左端市场口径 + 右端宿主机
+#   口径"的混用才是改造前的现状, 改成市场当天是消除混口径;
+# - compute_mainline_range 只用传入的 start/end, 无 market 参数需求;
+# - 同一个 compute_mainline_range 被两个端点喂: /recompute (:167) 早已是
+#   get_profile(market.upper()).today(), 只有 /mainline/recompute 停在
+#   宿主机 date.today() —— 两种口径并存才是 bug 的实质。
+#
+# 沿用两条硬约束: 维度 A(互异哨兵, 断言值与真实可达值可分) + 维度 B(跑真实
+# 端点 mainline_recompute, 不测 helper)。变异验证: 把 :333 改回 date.today()
+# 后下列用例必须变红 (红灯证据见提交说明)。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_mainline_recompute_end_uses_market_today(pinned_registry, monkeypatch, tmp_path):
+    """/mainline/recompute: 右端必须是该 market 的当天, 与 /recompute 同口径。
+
+    【加值断言】market=us 与 market=cn 各跑一次, 期望值互异 (US_PIN / CN_PIN)
+    —— 同时排除三种改法: 退回宿主机 date.today() (两次同值且非哨兵)、取常量、
+    取跨市场最大值 (两次都等于 CN_PIN, us 那次必红)。
+    """
+    assert date.today() != CN_PIN
+    assert US_PIN != CN_PIN, "US/CN 哨兵必须互异, 否则加值断言退化"
+
+    captured: list[date] = []
+
+    def _fake_range(repo, data_dir, start, end, kind="concept", **kwargs):
+        captured.append(end)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(
+        regime_builder, "earliest_enriched_date",
+        lambda repo, market=None: CN_PIN - timedelta(days=10),
+    )
+    monkeypatch.setattr(market_mainline, "compute_mainline_range", _fake_range)
+    monkeypatch.setattr(market_mainline, "upsert_mainline_history", lambda *a, **k: None)
+
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    )))
+
+    regime_api.mainline_recompute(req, market="us")
+    regime_api.mainline_recompute(req, market="cn")
+
+    assert len(captured) >= 2, "端点未走到主线计算分支, 用例失去意义"
+    # concept + industry 两轮, 取每个 market 的首次出现顺序
+    us_ends = {captured[0], captured[1]}
+    cn_ends = {captured[2], captured[3]}
+    assert us_ends == {US_PIN}, f"us 右端必须是美股当天 {US_PIN}, 实际 {sorted(us_ends)}"
+    assert cn_ends == {CN_PIN}, f"cn 右端必须是A股当天 {CN_PIN}, 实际 {sorted(cn_ends)}"
+
+
+def test_mainline_recompute_must_not_use_cross_market_today(pinned_registry, monkeypatch, tmp_path):
+    """反向护栏: 本端点按 market 分别计算, **不得**改用 cross_market_today()。
+
+    cross_market_today() 已存在且"看起来更统一", 但它是盘后管道的超集语义;
+    /mainline/recompute 的 earliest 已按 market 分流, 右端若抬到跨市场最大值,
+    美股会多算一个美东尚不存在的未来日。判据: US 哨兵严格落后 CN, 所以
+    "us 右端 == CN_PIN" 就是退化的充要信号。
+    """
+    assert US_PIN < CN_PIN, "US 哨兵必须严格落后 CN, 否则本用例无法识别退化"
+
+    captured: list[date] = []
+
+    def _fake_range(repo, data_dir, start, end, kind="concept", **kwargs):
+        captured.append(end)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(
+        regime_builder, "earliest_enriched_date",
+        lambda repo, market=None: CN_PIN - timedelta(days=10),
+    )
+    monkeypatch.setattr(market_mainline, "compute_mainline_range", _fake_range)
+    monkeypatch.setattr(market_mainline, "upsert_mainline_history", lambda *a, **k: None)
+
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    )))
+
+    regime_api.mainline_recompute(req, market="us")
+
+    assert captured, "端点未走到主线计算分支, 用例失去意义"
+    assert all(end == US_PIN for end in captured), (
+        f"us 右端必须停在美股当天 {US_PIN}; 出现 {sorted(set(captured))} —— "
+        f"若含 {CN_PIN} 即退化成 cross_market_today()"
+    )

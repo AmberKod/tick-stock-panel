@@ -318,14 +318,19 @@ def mainline_recompute(request: Request, market: Annotated[str, Query(pattern=_M
     if earliest is None:
         return {"ok": True, "rows": 0}
     rows = 0
-    # 市场时钟·B类 (卡点, 未改): 本端点**没有**把 market 下传给
-    # compute_mainline_range (其签名无 market 参数), 只有 earliest_enriched_date
-    # 用了 market ⇒ 区间口径本身是混的。在 market 未下传之前把右端改成
-    # get_profile(market).today() 只会把不一致固化, 故保留服务器本地日期。
-    # 待主线支持 market 分流后, 此处应与 /recompute 一起改用市场当天。
+    # 市场时钟·A类: /mainline/recompute 与 /recompute 喂的是**同一个**
+    # compute_mainline_range, 但此前两端口径不一致 —— /recompute (:167) 已用
+    # get_profile(market.upper()).today(), 本端点却用宿主机 date.today()。
+    # 修正说明(三点, 推翻早前"保留"的结论):
+    # 1. market 参数就在本端点签名上 (:307), 不存在"无 market 可传";
+    # 2. earliest (:317) 已按 market 计算, 左端市场口径 + 右端宿主机口径的
+    #    混用才是现状; 改成市场当天是**消除**混口径, 不是把不一致固化;
+    # 3. compute_mainline_range 只用传入的 start/end (内部唯一的日期逻辑是
+    #    `if start > end: return 空`), 不需要 market 参数, 无前置阻塞。
+    # KeyError 暴露面与 :167 完全一致 (market 已由 _MARKET_PATTERN 校验)。
     for kind in ("concept", "industry"):
         computed = market_mainline.compute_mainline_range(
-            repo, data_dir, earliest, date.today(), kind=kind
+            repo, data_dir, earliest, get_profile(market.upper()).today(), kind=kind
         )
         if not computed.is_empty():
             market_mainline.upsert_mainline_history(data_dir, computed)
