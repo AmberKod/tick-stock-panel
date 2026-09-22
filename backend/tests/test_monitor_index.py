@@ -141,7 +141,10 @@ def test_evaluate_monitors_index_round_survives_empty_stock_snapshot():
     )
 
     with (
-        patch.object(QuoteService, "_is_continuous_trading", return_value=True),
+        # 接缝迁移 (#6): 门控改走 registry.is_continuous_trading (按市场),
+        # A 股段语义 = CN 开市。旧 _is_continuous_trading 静态方法已不再被
+        # _evaluate_monitors 调用, patch 它会假绿。
+        patch("app.markets.registry.is_continuous_trading", return_value=True),
         patch.object(QuoteService, "get_enriched_today",
                      return_value=(pl.DataFrame(), None)),  # 股票快照为空
         patch.object(QuoteService, "_inject_intraday_signals",
@@ -188,7 +191,7 @@ def test_evaluate_monitors_stock_round_runs_when_snapshot_ready():
     stock_df = pl.DataFrame({"symbol": ["600000.SH"], "close": [10.0], "rsi_14": [50.0]})
 
     with (
-        patch.object(QuoteService, "_is_continuous_trading", return_value=True),
+        patch("app.markets.registry.is_continuous_trading", return_value=True),  # 接缝迁移 #6
         patch.object(QuoteService, "get_enriched_today",
                      return_value=(stock_df, date(2026, 7, 28))),
         patch.object(QuoteService, "_inject_intraday_signals",

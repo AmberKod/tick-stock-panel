@@ -92,3 +92,24 @@ def cross_market_window(span_days: int) -> tuple[date, date]:
     """
     todays = [get_profile(m).today() for m in _PROFILES]
     return min(todays) - timedelta(days=span_days), max(todays)
+
+
+def is_continuous_trading(market: str) -> bool:
+    """该市场当前是否处于连续竞价时段 (该市场当地时间口径)。
+
+    判定: 工作日 + 任一 session 命中 (含端点)。与 quote_service 侧 A 股专用
+    的 ``_is_continuous_trading()`` 静态方法语义一致, 但按市场取档案:
+    CN 9:30-11:30/13:00-15:00; HK 9:30-12:00/13:00-16:00; US 9:30-16:00。
+
+    节假日无交易日历 —— 由调用方既有的"快照日期 = 该市场当日"新鲜度判据
+    兜底 (节假日当天快照日期停在上一交易日, 不等于当日, 自然跳过)。
+
+    ⚠️ 调用方必须以模块属性方式调用 (``registry.is_continuous_trading``),
+    顶层 from-import 会让测试哨兵 patch 打不进去。
+    """
+    profile = get_profile(market)
+    now = profile.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return any(session.start <= t <= session.end for session in profile.sessions)

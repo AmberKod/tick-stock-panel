@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.data_providers.base import MarketDataProvider
 from app.data_providers.hk_daily_provider import HKDailyProvider
 from app.data_providers.hk_quickquote_provider import HKQuickQuoteProvider
+from app.data_providers.sina_us_provider import SinaUSProvider
 from app.data_providers.tickflow_provider import TickFlowProvider
 from app.data_providers.yfinance_provider import YFinanceProvider
 from app.markets.registry import resolve_market
@@ -16,21 +17,24 @@ from app.markets.registry import resolve_market
 # market → provider 注册表
 # CN: tickflow 独占 (含 tick 级能力)
 # HK: hk_quickquote 走腾讯/美股 HTTP (日级 + 实时; 分钟/tick 不可用)
-# US: yfinance (日K + 延迟 15min 实时; 全市场池不可用 → 热门池)
+# US: sina (新浪日K主源, yfinance 兜底在适配层) + yfinance (日K/实时兜底)
 _MARKET_PROVIDERS: dict[str, dict[str, type]] = {
     "CN": {"tickflow": TickFlowProvider},
     "HK": {"hk_quickquote": HKQuickQuoteProvider, "hk_daily": HKDailyProvider},
-    "US": {"yfinance": YFinanceProvider},
+    "US": {"yfinance": YFinanceProvider, "sina": SinaUSProvider},
 }
 
 # 兼容旧入口: 无市场维度的按名取 provider (默认 CN)
 _PROVIDERS = _MARKET_PROVIDERS["CN"]
 
 # 各市场默认数据源 (get_provider 未指定 name 时使用)
+# US 默认 sina (2026-09-22 数据地基批 #5): yfinance 的 Yahoo 端点已持续 403,
+# 且 403 不触发原熔断 (只认 429 系) → 循环空烧后静默空 df。新浪为免费美股
+# 日 K 主源, 默认源切它; yfinance 保留注册作显式兜底。
 _MARKET_DEFAULT_PROVIDER = {
     "CN": "tickflow",
     "HK": "hk_quickquote",
-    "US": "yfinance",
+    "US": "sina",
 }
 
 

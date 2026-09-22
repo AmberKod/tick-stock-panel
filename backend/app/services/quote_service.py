@@ -1083,17 +1083,32 @@ class QuoteService:
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
-            # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
-            # 缓冲。轮询窗口(_is_trading_hours)更宽是为盘前预热/收盘捕捉, 但告警不应
-            # 基于这些非连续竞价价格。
-            if not self._is_continuous_trading():
+            # ── 按市场分别门控 (2026-09-22 数据地基批 #6) ──
+            # 旧实现是"非 A 股连续竞价时段 → 整个 return", 把排在后面的港美
+            # 异动段一起挡死 (从未执行过)。现在拆开: A 股各轮维持原语义;
+            # 港美异动段每市场各自判定 (HK 开市而 US 未开时只跑 HK)。
+            # ⚠️ 禁止改成"任一市场开市就评估全部" —— 那会让 A 股监控在
+            # 竞价/收盘后基于非连续竞价价格误告警。
+            from app.markets import registry as _registry
+
+            cn_continuous = _registry.is_continuous_trading("CN")
+            hk_continuous = _registry.is_continuous_trading("HK")
+            us_continuous = _registry.is_continuous_trading("US")
+            # A 股闭市 (含竞价/午休/收盘缓冲/周末) 时, 股票/ETF/指数/板块各轮
+            # 全部跳过 —— 与旧行为一致, 只是不再连坐港美段。
+            if not cn_continuous and not (hk_continuous or us_continuous):
                 return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
             # ETF/指数轮有各自的空表+日期守卫, 不受影响 (纯指数行情/自选场景可独立评估)。
-            stock_ready = (not enriched_today.is_empty()) and (enriched_date == cn_today())
-            if not stock_ready:
+            # A 股口径判据 (enriched 本来就是 A 股快照, 与门控拆分无关, 保持)。
+            stock_ready = (
+                cn_continuous
+                and (not enriched_today.is_empty())
+                and (enriched_date == cn_today())
+            )
+            if cn_continuous and not stock_ready:
                 logger.debug("股票快照未就绪(空=%s, 日期=%s), 跳过股票轮",
                              enriched_today.is_empty(), enriched_date)
 
@@ -1123,7 +1138,7 @@ class QuoteService:
                         rule_events = engine.evaluate(eval_df, asset_type="stock")
                         if engine.consume_strategy_result_updates():
                             self.notify_strategy_results_updated()
-                    if engine.has_rule_type("sector"):
+                    if cn_continuous and engine.has_rule_type("sector"):
                         rule_events += engine.evaluate_sectors(
                             enriched_today if stock_ready else pl.DataFrame(),
                             self.get_index_quotes(),
@@ -1145,12 +1160,18 @@ class QuoteService:
                                     limit=1000,
                                 )
                                 _rows = list(_overview.get("rows") or [])
-                                # 港美动量快照: 独立 try — 任一市场失败不丢弃 A股事件
+                                # 港美动量快照: 独立 try — 任一市场失败不丢弃 A股事件。
+                                # 按市场分别门控 (#6): 仅当该市场处于连续竞价时段才构建其
+                                # 快照 (HK 开市而 US 未开 → 只跑 HK); A 股部分 (上面
+                                # _overview) 由 cn_continuous 门控, 闭市时段不基于陈旧价告警。
                                 from app.config import settings as _settings
                                 from app.services.hk_us_abnormal import (
                                     build_hk_us_abnormal_overview,
                                 )
+                                _mkt_gates = {"HK": hk_continuous, "US": us_continuous}
                                 for _mkt in ("HK", "US"):
+                                    if not _mkt_gates[_mkt]:
+                                        continue
                                     try:
                                         _hk_us = build_hk_us_abnormal_overview(
                                             _settings.data_dir, _mkt,
@@ -1167,7 +1188,9 @@ class QuoteService:
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
                     # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
                     # flush 焐热; 未焐热说明无 ETF 实时数据, 跳过本轮 ETF 评估)。
-                    if engine.has_asset_rules("etf") and self._repo is not None:
+                    # ETF 快照是 A 股口径 → 受 cn_continuous 门控 (#6: 旧全局
+                    # return 拆分后, 港美时段不再连坐评估 A 股 ETF 陈旧价)。
+                    if cn_continuous and engine.has_asset_rules("etf") and self._repo is not None:
                         try:
                             etf_enriched, _ = self._repo.get_enriched_latest_asset("etf", refresh=False)
                             if not etf_enriched.is_empty():
@@ -1180,7 +1203,8 @@ class QuoteService:
                     # 指数规则轮: 复刻 ETF 轮。快照由指数实时 flush 焐热;
                     # refresh=False 冷缓存不同步重算; 显式日期守卫防陈旧 parquet 误告警
                     # (ETF 轮靠空表隐式跳过, 指数轮更显式, 行为等价)。
-                    if engine.has_asset_rules("index") and self._repo is not None:
+                    # 指数快照同为 A 股口径 → 同受 cn_continuous 门控。
+                    if cn_continuous and engine.has_asset_rules("index") and self._repo is not None:
                         try:
                             index_enriched, index_date = self._repo.get_enriched_latest_asset("index", refresh=False)
                             if not index_enriched.is_empty() and index_date == cn_today():

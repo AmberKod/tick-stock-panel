@@ -39,6 +39,11 @@ _YF_RATE_LIMIT_MARKERS = (
     "Rate limited",
     "rate limit",
     "429",
+    # 2026-09-22 数据地基批 #5: Yahoo 对本部署 IP 已持续 403 (Forbidden)。
+    # 403 空烧与 429 空烧同罪: else 分支只 warning 后 continue, 全量循环
+    # 烧完一轮 0 数据收益, 还可能延长封禁 —— 并入熔断计数。
+    "403",
+    "Forbidden",
 )
 _YF_CIRCUIT = {"failures": 0, "opens": 0, "blocked_until": 0.0}
 _YF_CIRCUIT_LOCK = threading.Lock()

@@ -421,7 +421,8 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
     service._repo = _Repo()
     service.get_enriched_today = lambda: (_quotes(), quote_service.cn_today())
 
-    with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
+    # 接缝迁移 #6: 门控改走 registry.is_continuous_trading (旧静态方法不再被调用)
+    with patch("app.markets.registry.is_continuous_trading", return_value=True):
         service._evaluate_monitors(pl.DataFrame(), None)
 
     assert subscriber.pop()["alerts"][0]["strategy_id"] == "demo"

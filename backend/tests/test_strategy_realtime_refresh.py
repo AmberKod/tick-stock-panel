@@ -201,7 +201,7 @@ def test_quote_service_notifies_only_after_strategy_result_update():
     service.set_app_state(SimpleNamespace(monitor_engine=_MonitorWithUpdate(updated=True)))
     service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
-    with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
+    with patch("app.markets.registry.is_continuous_trading", return_value=True):  # 接缝迁移 #6
         service._evaluate_monitors(pl.DataFrame(), None)
 
     assert subscriber.pop()["strategy_results_updated"] is True
@@ -213,7 +213,7 @@ def test_quote_service_skips_notification_without_strategy_result_update():
     service.set_app_state(SimpleNamespace(monitor_engine=_MonitorWithUpdate(updated=False)))
     service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
-    with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
+    with patch("app.markets.registry.is_continuous_trading", return_value=True):  # 接缝迁移 #6
         service._evaluate_monitors(pl.DataFrame(), None)
 
     assert subscriber.pop()["strategy_results_updated"] is False
