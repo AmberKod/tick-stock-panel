@@ -54,6 +54,38 @@ def test_upsert_edit_invalidates_cache(tmp_path):
     assert store.load_all()[0].label == "new"
 
 
+def test_upsert_edit_invalidates_cache_even_when_dir_signature_unchanged(tmp_path):
+    """同字节数覆写 + 落在同一 mtime 刻度 —— 目录签名逐字节相同, 仍必须读到新值。
+
+    这是缓存失效的**确定性**回归用例。上面的 test_upsert_edit_invalidates_cache
+    只是碰巧两次 upsert 落在了不同 mtime 刻度才绿(文件系统粒度一粗就会假绿),
+    抓不到"签名不变"这个真正的失效盲区。这里用 os.utime 把 mtime 拨回缓存记录的
+    同一刻度, 把触发条件钉死, 不依赖任何时序运气。
+
+    修复前: 签名不变 -> 命中陈旧缓存, 返回 "AAA"(磁盘上其实是 "BBB")。
+    """
+    import os
+
+    store = ExtConfigStore(tmp_path)
+    store.upsert(_config("cfg_a", "AAA"))
+    assert store.load_all()[0].label == "AAA"
+
+    cp = tmp_path / "ext_data" / "cfg_a" / "config.json"
+    cached = cp.stat()
+
+    # 同字节数覆写(AAA -> BBB 长度相同), 再把 mtime 拨回缓存记录的同一刻度
+    store.upsert(_config("cfg_a", "BBB"))
+    os.utime(cp, ns=(cached.st_mtime_ns, cached.st_mtime_ns))
+
+    # 前置条件自检: 确保真的构造出了"签名不变"的编辑, 否则本用例会退化成假绿
+    assert cp.stat().st_size == cached.st_size, "前置条件: 覆写必须是同字节数"
+    assert ext_data._ext_config_dir_signature(store._base) == (
+        ("cfg_a", cached.st_mtime_ns, cached.st_size),
+    ), "前置条件: 目录签名必须与缓存时逐字节一致"
+
+    assert store.load_all()[0].label == "BBB"
+
+
 def test_delete_invalidates_cache(tmp_path):
     store = ExtConfigStore(tmp_path)
     store.upsert(_config("cfg_a", "A"))
