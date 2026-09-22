@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.db_safe import is_valid_ext_ident
 from app.indicators.pipeline import compute_enriched
 from app.market_time import cn_now, cn_today
+from app.markets.registry import profile_for_symbol
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.services import kline_sync
 
@@ -347,7 +348,10 @@ def get_daily(
     import polars as pl
 
     repo = request.app.state.repo
-    end = date.fromisoformat(end_date) if end_date else date.today()
+    # 默认截止日期取"标的所属市场的今天"而非宿主机 date.today(): 容器/美西主机
+    # 本地时区多为 UTC, 美股场景下北京日期已翻篇而美东尚未翻篇(或反之)时,
+    # 用本地日期会把当日K整根漏掉, 表现为"缓存冷时当天日K缺失"。
+    end = date.fromisoformat(end_date) if end_date else profile_for_symbol(symbol).today()
     start = date.fromisoformat(start_date) if start_date else end - timedelta(days=days)
 
     asset_type = repo.resolve_asset_type(symbol)

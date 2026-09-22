@@ -8,6 +8,7 @@ import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched
+from app.markets.registry import profile_for_symbol
 from app.services import index_sync, kline_sync
 from app.tickflow.capabilities import Cap
 
@@ -78,7 +79,9 @@ def get_index_daily(
 ):
     """读取指数日 K。指数数据使用独立 kline_index_* parquet。"""
     repo = request.app.state.repo
-    end = date.fromisoformat(end_date) if end_date else date.today()
+    # 同 kline.get_daily: 默认截止日期取"指数所属市场的今天", 不用宿主机
+    # date.today() —— 容器多为 UTC, 会漏掉(或提前漏掉)当日K。
+    end = date.fromisoformat(end_date) if end_date else profile_for_symbol(symbol).today()
     start = date.fromisoformat(start_date) if start_date else end - timedelta(days=days)
     info = _index_info(repo, symbol)
 

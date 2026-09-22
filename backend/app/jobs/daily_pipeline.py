@@ -23,6 +23,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import run_pipeline
+from app.market_time import cn_today
 from app.services import index_sync, instrument_sync, kline_sync
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -55,6 +56,22 @@ def _invalidate(table: str | None = None) -> None:
     """stage 写完调用,让 /api/data/status 只重算被影响的那张表。"""
     from app.api.data import invalidate_data_cache
     invalidate_data_cache(table)
+
+
+def pipeline_window_end() -> date:
+    """管道拉取窗口的右端日期 = 北京日期 (Asia/Shanghai)。
+
+    本管道一次跑 A 股 / 港股 / 美股, 没有单一 symbol 上下文, 因此不能套用
+    profile_for_symbol(symbol).today()。取北京日期的理由:
+      北京 (UTC+8) 与香港 (Asia/Hong_Kong, 同为 UTC+8) 日期恒等;
+      美东 (America/New_York, UTC-5/-4) 比北京慢 12~13 小时, 任一时刻
+      北京日期 >= 美东日期。故北京日期恒为三市场日期的最大值 —— 作为窗口
+      右端只会多覆盖、绝不会截断任一市场的当日数据, 是安全的上界。
+    同时必须用 cn_today() 而非宿主机 date.today(): 容器/美西主机本地时区
+    多为 UTC, 北京 15:30 盘后跑管道时 UTC 还是当天凌晨, 本地日期会落后一天,
+    导致当日日K永远拉不到 (或窗口右端偏早)。
+    """
+    return cn_today()
 
 
 def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
@@ -149,7 +166,9 @@ def run_now(
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     latest_daily = repo.latest_daily_date()
-    today = _date.today()
+    # 跨市场管道窗口右端: 北京日期 (理由见 pipeline_window_end 的 docstring,
+    # 勿改回宿主机 date.today())
+    today = pipeline_window_end()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
 
