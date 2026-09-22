@@ -18,6 +18,7 @@ import logging
 from collections.abc import Callable
 from datetime import date
 
+from app.markets.registry import cross_market_today
 from app.tickflow.capabilities import CapabilitySet
 from app.tickflow.repository import KlineRepository
 
@@ -46,7 +47,10 @@ def run_repair_daily(
     Returns:
         run_now() 的完整结果 dict。
     """
-    today = date.today()
+    # 上界取跨市场当天: 本服务复用盘后管道 run_now(), 后者一次覆盖 A股/港/美,
+    # 没有单一 symbol 上下文。用宿主机 date.today() 会在 UTC 容器上比北京日期
+    # 落后一天 (北京 00:00-08:00 段), 把"今天"判成未来日期而误拒绝合法请求。
+    today = cross_market_today()
     if start_date > today:
         return {"error": "起始日期不能晚于今天"}
 

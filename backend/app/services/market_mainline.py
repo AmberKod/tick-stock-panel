@@ -282,6 +282,9 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
 def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = None,
                                  kind: str = "concept") -> pl.DataFrame:
     """增量补算主线(供 daily_pipeline / 手动触发): 补 enriched 已有而主线缺失的日。"""
+    # 市场时钟·B类: 同 regime_builder —— date.today() 只是 `today` 参数的缺省
+    # 兜底, 真正调用 (盘后管道 / /api/regime/mainline/recompute) 会显式传值;
+    # 改成市场日期会让主线的"今日"与上游 enriched 的当日口径不一致。
     today = today or date.today()
     from app.services.regime_builder import enriched_date_set
 

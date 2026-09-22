@@ -119,6 +119,9 @@ def get_levels(
         raise HTTPException(400, "symbol 不能为空")
 
     repo = request.app.state.repo
+    # 市场时钟·B类 (按本批约定保留): 语义是"截止到服务器此刻"的窗口右端,
+    # 不是标的所属市场的交易日。改成市场日期会让 /levels 的关键价位随宿主机
+    # 时区漂移, 与 /api/kline/daily 的市场口径窗口不再同源 —— 本批不做修改。
     end = date.today()
     start = end - timedelta(days=days * 2)
     # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径

@@ -276,6 +276,9 @@ def save_rule(req: RuleModel, request: Request):
                 StrategyDataContext(
                     asset_type=str(rule.get("asset_type") or "stock"),
                     timeframe="1d",
+                    # 市场时钟·B类: as_of 是策略校验上下文里的"当前展示时刻"
+                    # (服务器自然日), 与市场交易日无关; 改成市场日期会让同一条
+                    # 监控规则在不同时区宿主机上给出不同的校验结论。
                     as_of=date.today(),
                 ),
             )

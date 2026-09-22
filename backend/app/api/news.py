@@ -158,6 +158,9 @@ def _batch_entry(
     search = search_fn or news_search.search
     label = name or _lookup_name(symbol)
     query = news_search.stock_query(symbol, label)
+    # 市场时钟·B类: 这里要的是"服务器本地这一自然日"(缓存按宿主机自然日翻篇),
+    # 不是任何市场交易日; 改成市场日期会让美股标的的缓存在美东翻篇时与宿主机
+    # 自然日错位, 同一批新闻一天内被重复拉取(配额翻倍)或提前失效。
     cache_key = (symbol, label or "", days, max_results, date.today().isoformat())
 
     now = time.monotonic()

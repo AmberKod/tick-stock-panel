@@ -248,6 +248,9 @@ def compute_strength_ladder_incremental(
     - 返回本次新写入的行数; 无缺口/市场不支持返回 0。
     - 单日失败不影响其他日(软失败, 仅记日志)。
     """
+    # 市场时钟·B类: 同 regime_builder —— date.today() 只是 `today` 参数的缺省
+    # 兜底 (管道侧显式传市场感知的 today); 本函数只服务 hk/us, 改成市场日期
+    # 会把"补到哪天"与调用方传入的上界解耦, 产生重复补算或漏补。
     today = today or date.today()
     m = market.lower()
     if m not in ("hk", "us"):

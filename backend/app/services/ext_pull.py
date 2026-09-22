@@ -155,6 +155,8 @@ async def fetch_and_ingest(
         raise ValueError("数据行中缺少 symbol/code 字段，请配置字段映射或标的映射")
 
     # 写入
+    # 市场时钟·B类: 快照日 = 拉取时刻的服务器自然日, 且要**回传给调用方展示**
+    # (return n, snap.isoformat()); 改成市场日期会让展示日期与用户所在自然日不符。
     snap = date.today()
     n = rows_to_parquet(rows, config, data_dir, snapshot_date=snap)
     return n, snap.isoformat()

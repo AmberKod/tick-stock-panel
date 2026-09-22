@@ -43,6 +43,10 @@ def _load_kline(repo, symbol: str) -> pl.DataFrame:
     """
     from datetime import date, timedelta
 
+    # 市场时钟·B类 (按本批约定保留): 语义是"截止到服务器此刻"的窗口右端,
+    # 不是标的所属市场的交易日。改成市场日期会让美股标的的窗口右端在美东
+    # 翻篇前后跳动, 同一份分析提示词在一天内给出两套样本 —— 本批不做修改,
+    # 后续若确认要按市场口径统一, 需连同 api/stock_analysis.py 一起改并补测。
     end = date.today()
     start = end - timedelta(days=_KLINE_WINDOW * 2)  # 多取一些保证交易日够
     # 按资产类型分流: ETF/指数走独立 enriched 存储 (无财务数据, 提示词已有兜底)

@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
+from app.markets.registry import cross_market_today
 from app.services import kline_sync
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.repository import KlineRepository
@@ -117,7 +118,10 @@ def run_extend_history(
 
     # 0. 计算时间偏移
     offset = compute_offset(value, unit)
-    today = date.today()
+    # 标的池 = CN_Equity_A + watchlist/instruments 兜底 (可能含 .HK/.US), 无单一
+    # symbol 上下文 ⇒ 走跨市场当天。它在这里是除权因子区间的**上界**, 取跨市场
+    # 最大值只会多读不会截断; 用宿主机 date.today() (UTC 容器) 反而会少读一天。
+    today = cross_market_today()
 
     # 1. 获取当前最早日期
     emit("extend_history", 2, "检查当前数据范围…")

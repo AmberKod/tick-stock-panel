@@ -457,6 +457,9 @@ def _fetch_us_daily_sina(code: str) -> pl.DataFrame:
             "volume": df["volume"].cast(pl.Float64),
             "amount": df["amount"].cast(pl.Float64),
         })
+        # 市场时钟·B类: max_year 是"过滤掉数据源脏年份"的上界, 只取**年份**,
+        # 且已 +1 留足余量; 改成市场日期对其无影响 (年粒度), 只会平白引入
+        # 市场上下文 —— 此处语义是服务器当前年份, 不是任何市场的交易日。
         max_year = date.today().year + 1
         return out.filter(pl.col("date").dt.year() <= max_year)
     except Exception as e:
@@ -505,6 +508,9 @@ def _fetch_us_daily_yfinance(code: str) -> pl.DataFrame:
             pl.lit("shares").alias("volume_unit"),
             pl.lit("USD").alias("currency"),
         )
+        # 市场时钟·B类: max_year 是"过滤掉数据源脏年份"的上界, 只取**年份**,
+        # 且已 +1 留足余量; 改成市场日期对其无影响 (年粒度), 只会平白引入
+        # 市场上下文 —— 此处语义是服务器当前年份, 不是任何市场的交易日。
         max_year = date.today().year + 1
         out = out.filter(pl.col("date").dt.year() <= max_year)
         return out

@@ -1654,6 +1654,8 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
     只读基础行情列, 作为指标计算的历史前缀。
     """
     from datetime import date, timedelta
+    # 市场时钟·B类: cutoff 是"往前多读几天"的余量下界, 已经多留了 30 天, 与当天
+    # 差一天不影响读到的窗口; 改成市场日期反而要引入市场上下文, 收益为零。
     cutoff = date.today() - timedelta(days=days + 30)  # 多读 30 天余量
 
     cast_options = pl.ScanCastOptions(integer_cast="allow-float")

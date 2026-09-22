@@ -906,6 +906,9 @@ def compute_regime_incremental(
     pipeline_regime_enabled 默认关闭的原因。只补最近 N 天即可满足看板需求:
     每天盘后新增的缺口只有 1 天, 永远落在窗口内。设 0/负数 = 不限制(慎用)。
     """
+    # 市场时钟·B类: 这里的 date.today() 只是 `today` 参数的**缺省兜底** ——
+    # 盘后管道会显式传入市场感知的 today, 缺省路径只在手工调用时走; 改成市场
+    # 日期会让缺省值与调用方传入值口径不一致, 且本函数已有 market 参数可分流。
     today = today or date.today()
     m = _normalize_market(market)
     existing = load_regime_history(data_dir, market=m)

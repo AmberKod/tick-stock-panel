@@ -114,7 +114,9 @@ def get_index_minute(
     """实时读取指数分钟 K。不写入股票分钟 parquet。"""
     repo = request.app.state.repo
     info = _index_info(repo, symbol)
-    day = trade_date or date.today()
+    # 同 /daily: 默认交易日取"指数所属市场的今天"而非宿主机 date.today();
+    # 美股指数 (^GSPC.US 等) 场景下本地日期与美东日期差一天, 会拉到空白分钟K。
+    day = trade_date or profile_for_symbol(symbol).today()
     df = kline_sync.fetch_minute_single(symbol, day, asset_type="index")
     return {
         "symbol": symbol,

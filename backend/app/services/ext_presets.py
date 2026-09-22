@@ -212,6 +212,8 @@ async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:
     rows = flatten(raw)
     if not rows:
         raise ValueError(f"接口返回 0 行: {config.pull.url}")
+    # 市场时钟·B类: 预设拉取的快照日 = 拉取时刻的服务器自然日; 改成市场日期会让
+    # 定时拉取在跨日边界上重复写同一分区或跳过一天, 预设时序出现空洞。
     n = rows_to_parquet(rows, config, data_dir, snapshot_date=date.today())
     return n
 

@@ -20,6 +20,7 @@ from app.data_providers.yfinance_provider import (
     US_DEMO_NAMES,
     YFinanceProvider,
 )
+from app.markets.registry import profile_for_symbol
 
 router = APIRouter(prefix="/api/us", tags=["us"])
 
@@ -195,7 +196,10 @@ def get_us_daily(
 
     from app.services.hk_data_adapter import sync_hk_daily_to_parquet
     sym = _norm(symbol)
-    end_d = end or date.today()
+    # 美股日 K 默认截止日必须取**美股市场当天**, 不能用宿主机 date.today():
+    # 容器多为 UTC / 美西主机, 本地日期与美东日期在美东 19:00-24:00 这段
+    # (UTC 当日 00:00-05:00) 相差一天 —— 用本地日期会把当日K整根漏掉。
+    end_d = end or profile_for_symbol(sym).today()
     start_d = start or (end_d - timedelta(days=days))
     provider = YFinanceProvider()
     from datetime import datetime, time

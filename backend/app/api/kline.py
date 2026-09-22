@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.db_safe import is_valid_ext_ident
 from app.indicators.pipeline import compute_enriched
 from app.market_time import cn_now, cn_today
-from app.markets.registry import profile_for_symbol
+from app.markets.registry import cross_market_today, profile_for_symbol
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.services import kline_sync
 
@@ -451,8 +451,10 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
     if df_today.is_empty():
         return rows
 
-    # 非交易日(周末/假日)缓存的行情日期 != 今天,跳过注入避免产生重复蜡烛
-    if not enriched_date or enriched_date != date.today():
+    # 非交易日(周末/假日)缓存的行情日期 != 标的所属市场的今天,跳过注入避免产生重复蜡烛。
+    # 这里必须用市场当天而非宿主机 date.today(): 美股场景下本地日期与美东日期
+    # 差一天时, 会把**今天真实存在的**实时蜡烛误判成陈旧数据而整根丢弃。
+    if not enriched_date or enriched_date != profile_for_symbol(symbol).today():
         return rows
 
     # 查找该 symbol 的实时 enriched 行
@@ -531,11 +533,13 @@ def get_daily_batch(request: Request, body: dict):
     days = max(5, min(60, days))
 
     repo = request.app.state.repo
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     import polars as pl
 
-    end = date.today()
+    # 批量多标的: 无单一 symbol 上下文, 走跨市场窗口右端 (已注册市场当天最大值)。
+    # 取最大值只会多读、不会截断任一市场的当日K; 反向取最小值或本地日期都会漏。
+    end = cross_market_today()
     start = end - timedelta(days=days * 2)  # 多取一些确保交易日够
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
@@ -1245,7 +1249,10 @@ async def repair_daily(request: Request):
         except ValueError:
             raise HTTPException(status_code=400, detail="start_date 格式错误 (应为 YYYY-MM-DD)") from None
 
-        if start_date > _date.today():
+        # 上界用跨市场当天 (与 services/repair_daily.run_repair_daily 的判据同源):
+        # 本接口与服务层必须用同一个时钟, 否则 API 放行而服务层回退(或反之),
+        # 同一请求在不同时区宿主机上给出不同结果。
+        if start_date > cross_market_today():
             raise HTTPException(status_code=400, detail="起始日期不能晚于今天")
 
         repo = request.app.state.repo

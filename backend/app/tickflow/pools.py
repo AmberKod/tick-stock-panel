@@ -65,7 +65,9 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
     symbols = _fetch_pool(pool_id)
     if symbols:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}).write_parquet(cache)
+        # 市场时钟·B类: as_of = 标的池落盘缓存的服务器自然日 (缓存过期判据),
+    # 不是市场交易日; 改成市场日期会让缓存刷新周期随时区漂移, 池子不按天更新。
+    pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}).write_parquet(cache)
     return symbols
 
 

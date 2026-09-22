@@ -22,7 +22,6 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 import polars as pl
@@ -171,7 +170,12 @@ def build_overview(
 
     bench_rt = _bench_rt_pct(quote_service) if quote_service is not None else 0.0
     # enriched 已含今日收盘 (盘后已同步) 时, 今日涨跌已计入历史偏离, 不再叠加
-    includes_today = cache_date is not None and cache_date >= date.today().isoformat()
+    # 判为 A 类 (CN 市场上下文): 本模块是**A 股专属口径** —— 阈值按沪深/创业板/
+    # 科创板/北交所规则, 基准指数取 CN_PROFILE.bench_rt_candidates。所以比较基准
+    # 必须是北京当天, 不是宿主机当天: UTC 容器在北京 00:00-08:00 段本地日期落后
+    # 一天, 会把"昨日收盘已入 enriched"误判成未入, 于是把昨日的 rt_pct 又叠加
+    # 一次 ⇒ 异动接近度虚高。
+    includes_today = cache_date is not None and cache_date >= CN_PROFILE.today().isoformat()
 
     out_rows: list[dict[str, Any]] = []
     for symbol, base in hist_rows.items():

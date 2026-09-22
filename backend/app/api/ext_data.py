@@ -546,6 +546,8 @@ async def upload_data(
     df = df.select(keep)
 
     # 解析快照日期
+    # 市场时钟·B类: 快照日 = 数据落盘的服务器自然日, 不是市场交易日; 改成市场
+    # 日期会让同一次导入在不同时区宿主机上落到不同 date= 分区, 时序对不齐。
     snap = date.fromisoformat(snapshot_date) if snapshot_date else date.today()
 
     rows = write_ext_parquet(df, config, _data_dir(request), snapshot_date=snap)
@@ -578,6 +580,8 @@ def ingest_data(request: Request, config_id: str, body: IngestReq):
         if missing:
             raise HTTPException(400, f"第 {i + 1} 行缺少字段: {', '.join(sorted(missing))}")
 
+    # 市场时钟·B类: 同上行 (549) —— 快照日按服务器自然日落盘, 与市场交易日无关;
+    # 改成市场日期会让 POST 写入的分区随宿主机时区漂移, 前后两次导入不一致。
     snap = date.fromisoformat(body.date) if body.date else date.today()
 
     rows_written = rows_to_parquet(body.rows, config, _data_dir(request), snapshot_date=snap)

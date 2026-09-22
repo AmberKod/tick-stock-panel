@@ -292,6 +292,38 @@ class TestScheduledFullHistorySwitch:
 
         return SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
 
+    @staticmethod
+    def _pin_markets(monkeypatch, span_days: int = 365) -> tuple[date, date]:
+        """把 CN/HK/US 三个市场的"今天"钉成互异哨兵, 返回期望窗口 (start, end)。
+
+        增量窗口已改为跨市场口径 (左端 = 最落后市场 - span_days, 右端 = 最靠前
+        市场当天)。若继续用宿主机 date.today() 做期望值, 断言只在"本机日期恰好
+        等于最落后市场当日"时成立 —— 换到 UTC 容器/美西主机就静默失效, 所以这里
+        必须钉哨兵, 让期望值与本机时钟彻底解耦。
+        """
+        from app.markets import registry
+
+        class _Pin:
+            def __init__(self, pinned: date) -> None:
+                self.pinned = pinned
+                self.calls = 0
+
+            def today(self) -> date:
+                self.calls += 1
+                return self.pinned
+
+        anchor = date(2026, 3, 2)
+        if anchor == date.today():
+            anchor = anchor.replace(year=anchor.year + 1)
+        pins = {
+            "CN": anchor,
+            "HK": anchor - timedelta(days=1),
+            "US": anchor - timedelta(days=2),
+        }
+        for market, pinned in pins.items():
+            monkeypatch.setitem(registry._PROFILES, market, _Pin(pinned))
+        return min(pins.values()) - timedelta(days=span_days), max(pins.values())
+
     def test_default_is_incremental_365d(self, tmp_path: Path, monkeypatch) -> None:
         from app.tickflow.policy import CapabilitySet
 
@@ -300,6 +332,7 @@ class TestScheduledFullHistorySwitch:
         monkeypatch.setattr(
             "app.services.hk_data_adapter.sync_hk_instruments", lambda root, allow_demo=False: 10
         )
+        expected_start, expected_end = self._pin_markets(monkeypatch)
 
         result = daily_pipeline._run_market_daily_scheduled(
             self._fake_repo(tmp_path), CapabilitySet(), "HK",
@@ -307,7 +340,8 @@ class TestScheduledFullHistorySwitch:
 
         assert result["status"] == "ok"
         assert captured["mode"] == "incremental"
-        assert captured["start_date"].date() == date.today() - timedelta(days=365)
+        assert captured["start_date"].date() == expected_start
+        assert captured["end_date"].date() == expected_end
 
     def test_full_history_maps_full_mode_and_1998_window(self, tmp_path: Path, monkeypatch) -> None:
         from app.tickflow.policy import CapabilitySet

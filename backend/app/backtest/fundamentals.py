@@ -110,6 +110,9 @@ def load_fundamental_snapshot(
         columns = {HK_FINANCIAL_ALIASES[name] for name in requested}
         if not columns:
             return None
+        # 市场时钟·B类: 这是磁盘快照的**缓存签名**(判断文件是否被换过), 语义是
+        # "本次进程看到的服务器自然日"; 改成市场日期会让签名在跨市场回测里
+        # 对每个市场取不同值, 同一份文件被反复判定为失效而重复解析。
         return _load_hk_snapshot_cached(str(data_dir.resolve()), _hk_snapshot_signature(data_dir), tuple(sorted(columns)), date.today())
     path = data_dir / "financials" / "metrics" / "part.parquet"
     if not path.exists():

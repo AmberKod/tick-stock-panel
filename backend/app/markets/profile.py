@@ -11,7 +11,7 @@ from datetime import date, datetime
 from datetime import time as dt_time
 from typing import Protocol
 
-MarketId = str  # "CN" | "HK" | "US" (M0 仅实现 CN; HK/US 见 M1/M2)
+MarketId = str  # "CN" | "HK" | "US" —— 三者均已实现并在 registry 注册
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 
 import polars as pl
@@ -23,7 +23,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import run_pipeline
-from app.markets.registry import cross_market_today
+from app.markets.registry import cross_market_today, cross_market_window
 from app.services import index_sync, instrument_sync, kline_sync
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -1216,9 +1216,14 @@ def _run_market_daily_scheduled(
         progress("sync_instruments", 10, f"{market} 标的池已更新，共 {rows} 只")
         if full_history:
             sync_start = date(1998, 6, 1)
+            sync_end = cross_market_today()
             sync_mode = "full"
         else:
-            sync_start = date.today() - timedelta(days=365)
+            # 港美日 K 同步窗口: 一次覆盖 HK + US, 没有单一 symbol 上下文,
+            # 因此走跨市场窗口 (左端 = 最落后市场 - 365d, 右端 = 最靠前市场当天)。
+            # 用宿主机 date.today() 会漏当日K: 美东 19:00-24:00 时 UTC 本地日期
+            # 已领先美东一天, 而美西主机则相反地落后 —— 两头都可能错。
+            sync_start, sync_end = cross_market_window(365)
             sync_mode = "incremental"
         result = market_daily_sync.run_market_daily_sync(
             repo=repo,
@@ -1227,7 +1232,7 @@ def _run_market_daily_scheduled(
             market=market,
             symbols=None,
             start_date=datetime.combine(sync_start, time.min),
-            end_date=datetime.combine(date.today(), time.max),
+            end_date=datetime.combine(sync_end, time.max),
             mode=sync_mode,
             on_progress=progress,
         )

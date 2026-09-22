@@ -580,6 +580,8 @@ def write_ext_parquet(
     Returns:
         写入行数。
     """
+    # 市场时钟·B类: 快照日 = 写入时刻的服务器自然日, 不是市场交易日; 改成市场
+    # 日期会让默认快照日随时区漂移, 同一份数据在不同宿主机上落到不同分区。
     snap = snapshot_date or date.today()
     cfg_dir = _config_dir(config.id, data_dir)
 

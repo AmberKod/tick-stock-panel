@@ -1,8 +1,8 @@
 """市场档案注册表: market → profile, symbol → market。
 
-M0 注册 CN; M1 注册 HK; M2 注册 US。
-profile_for_symbol 对未注册市场显式 KeyError,
-防止港美股标的静默套用 A 股规则 (H1 之前是 M0 护栏)。
+M0 注册 CN; M1 注册 HK; M2 注册 US —— 三个市场**均已注册**,
+profile_for_symbol 对三个市场都返回档案。get_profile 对未注册市场仍显式
+KeyError, 防止新市场标的静默套用别家规则 (M0 护栏在 M2 之后依然有效)。
 """
 from __future__ import annotations
 
@@ -57,7 +57,9 @@ def resolve_market(symbol: str) -> str:
 def profile_for_symbol(symbol: str) -> MarketProfile:
     """按 symbol 解析市场档案。
 
-    M1 起 HK 已注册; US 仍抛 KeyError (M2 落地前保留护栏)。
+    CN / HK / US 均已注册 (M0→M2), 因此本函数对带 .SH/.SZ/.BJ/.HK/.US 后缀的
+    symbol 都能返回档案; 未注册市场才会由 get_profile 抛 KeyError。
+    无后缀 symbol 按 resolve_market 兜底为 CN。
     """
     return get_profile(resolve_market(symbol))
 
@@ -83,6 +85,10 @@ def cross_market_window(span_days: int) -> tuple[date, date]:
     左端取最小值以保证连最落后的市场也覆盖到 span_days 天; 右端取最大值以
     保证最靠前的市场当日数据不被截断。与 cross_market_today() 同源: 遍历
     _PROFILES, 不引用任何单一市场常量。
+
+    生产调用方: jobs.daily_pipeline._run_market_daily_scheduled 的港美日 K
+    增量同步窗口 (span_days=365)。窗口是**超集**语义 —— 两端都比任一单一市场
+    更宽, 所以对某个具体市场而言只会多读, 不会截断。
     """
     todays = [get_profile(m).today() for m in _PROFILES]
     return min(todays) - timedelta(days=span_days), max(todays)

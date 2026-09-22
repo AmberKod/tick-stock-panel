@@ -95,6 +95,9 @@ def run(req: BacktestRequest, request: Request):
     """信号回测 — 现有接口，向后兼容。"""
     repo = request.app.state.repo
     svc = BacktestService(repo)
+    # 市场时钟·B类: 回测默认区间右端 = "用户视角的到今天为止", 不是任何单一
+    # 市场的交易日; 改成市场日期会让跨市场回测里另一个市场的最后一根K被
+    # 排除(或包含尚不存在的未来日), 同一份回测在不同时区宿主机上结果不同。
     end = req.end or date.today()
     start = req.start or (end - timedelta(days=365 * 3))
 
@@ -168,6 +171,9 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     engine = _get_engine(request)
     svc = FactorBacktestService(engine)
 
+    # 市场时钟·B类: 回测默认区间右端 = "用户视角的到今天为止", 不是任何单一
+    # 市场的交易日; 改成市场日期会让跨市场回测里另一个市场的最后一根K被
+    # 排除(或包含尚不存在的未来日), 同一份回测在不同时区宿主机上结果不同。
     end = req.end or date.today()
     start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
@@ -222,6 +228,9 @@ def factor_batch(req: FactorBatchRequest, request: Request):
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
 
+    # 市场时钟·B类: 回测默认区间右端 = "用户视角的到今天为止", 不是任何单一
+    # 市场的交易日; 改成市场日期会让跨市场回测里另一个市场的最后一根K被
+    # 排除(或包含尚不存在的未来日), 同一份回测在不同时区宿主机上结果不同。
     end = req.end or date.today()
     start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
@@ -385,6 +394,9 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    # 市场时钟·B类: 回测默认区间右端 = "用户视角的到今天为止", 不是任何单一
+    # 市场的交易日; 改成市场日期会让跨市场回测里另一个市场的最后一根K被
+    # 排除(或包含尚不存在的未来日), 同一份回测在不同时区宿主机上结果不同。
     end = req.end or date.today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
@@ -883,6 +895,8 @@ async def optimize_stream(
     from app.backtest.optimizer import OptimizeConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    # 市场时钟·B类: 同上 (/run) —— 回测默认右端是用户视角的"今天"(服务器自然日),
+    # 不是市场交易日; 改成市场日期会破坏跨市场回测的区间一致性。
     end_date = date.fromisoformat(end) if end else date.today()
     if start:
         start_date = date.fromisoformat(start)
@@ -1105,6 +1119,8 @@ async def walkforward_stream(
 
     direction = direction or None
 
+    # 市场时钟·B类: 同上 (/run) —— 回测默认右端是用户视角的"今天"(服务器自然日),
+    # 不是市场交易日; 改成市场日期会破坏跨市场回测的区间一致性。
     end_date = date.fromisoformat(end) if end else date.today()
     if start:
         start_date = date.fromisoformat(start)

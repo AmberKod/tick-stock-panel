@@ -479,6 +479,9 @@ class BacktestEngine:
                     blocked[symbol] = "buy_lot_size_unverified"
                     continue
             status = row.get("lot_size_status")
+            # 市场时钟·B类: 校验"每手股数快照的 as_of 不能来自未来", 上界必须是
+            # 服务器此刻 (用户看到的未来); 改成市场日期会让美股的 as_of(美东日期)
+            # 在北京时间的"明天"被误判为未来数据而整只标的被拒买。
             if symbol in conflicting or status not in {None, "", "verified_snapshot", "missing"} or (as_of is not None and as_of > date.today()):
                 blocked[symbol] = "buy_lot_size_unverified"
                 continue

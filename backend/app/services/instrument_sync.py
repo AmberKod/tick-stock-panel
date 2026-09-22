@@ -95,6 +95,9 @@ def sync_instruments(data_dir: Path) -> int:
         return 0
 
     df = pl.DataFrame(all_rows)
+    # 市场时钟·B类: as_of = 维表同步的服务器自然日 (记录"这份维表是哪天拉的"),
+    # 不是市场交易日; 改成市场日期会让同一份跨市场维表被打上不同 as_of,
+    # 新鲜度检查 (as_of 是否过期) 在不同时区宿主机上给出相反结论。
     df = df.with_columns(pl.lit(date.today()).alias("as_of"))
     # M0: 派生 market 列 (symbol 后缀 → CN/HK/US), 多市场路由的命名空间主键
     df = df.with_columns(

@@ -12,6 +12,7 @@ from typing import Annotated, Any
 import polars as pl
 from fastapi import APIRouter, Query, Request
 
+from app.markets.registry import get_profile
 from app.services import regime_builder
 
 router = APIRouter(prefix="/api/regime", tags=["regime"])
@@ -159,7 +160,11 @@ def regime_recompute(
     """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
-    end = end or date.today()
+    # 判为 A 类: regime 是**按 market 分别计算**的 (run_regime_batch /
+    # upsert_regime_history 全程带 market), 所以右端必须是该市场当天。
+    # 用宿主机 date.today() 会漏掉该市场当日 (UTC 容器上北京 00:00-08:00 段
+    # 本地日期落后一天), 也可能给美股多算一个尚不存在的未来日。
+    end = end or get_profile(market.upper()).today()
     if start is None:
         # 全量: 从 enriched 最早日强制重算到今天
         earliest = regime_builder.earliest_enriched_date(repo, market=market)
@@ -313,6 +318,11 @@ def mainline_recompute(request: Request, market: Annotated[str, Query(pattern=_M
     if earliest is None:
         return {"ok": True, "rows": 0}
     rows = 0
+    # 市场时钟·B类 (卡点, 未改): 本端点**没有**把 market 下传给
+    # compute_mainline_range (其签名无 market 参数), 只有 earliest_enriched_date
+    # 用了 market ⇒ 区间口径本身是混的。在 market 未下传之前把右端改成
+    # get_profile(market).today() 只会把不一致固化, 故保留服务器本地日期。
+    # 待主线支持 market 分流后, 此处应与 /recompute 一起改用市场当天。
     for kind in ("concept", "industry"):
         computed = market_mainline.compute_mainline_range(
             repo, data_dir, earliest, date.today(), kind=kind
