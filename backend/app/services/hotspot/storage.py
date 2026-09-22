@@ -432,6 +432,48 @@ def _row_to_stock(row: dict[str, Any]) -> HotspotStock:
 # history JSONL
 # ---------------------------------------------------------------------------
 
+def _existing_history_keys(
+    path: Path,
+    *,
+    key_fields: tuple[str, ...],
+    day_field: str | None = None,
+) -> set[tuple[Any, ...]]:
+    """读回已存在的业务键集合; 文件不存在/读失败时返回空集 (退化为直接写)。
+
+    - 坏行 (json 解析失败 / 非 dict) 跳过不参与查重 —— 宁可多写一行重复, 也不
+      因坏行丢失整个文件的写入能力。
+    - ``day_field``: 给定字段名时, 该字段值取前 10 位作天级键 (constituents 用
+      generated_at[:10], 因为它没有 topic_date 字段)。
+    """
+    keys: set[tuple[Any, ...]] = set()
+    if not path.exists():
+        return keys
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("history dedup read %s failed: %s", path, exc)
+        return keys
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        values: list[Any] = []
+        for field in key_fields:
+            if day_field is not None and field == day_field:
+                raw_value = row.get(field)
+                values.append(str(raw_value)[:10] if raw_value is not None else None)
+            else:
+                values.append(row.get(field))
+        keys.add(tuple(values))
+    return keys
+
+
 def append_history_row(
     data_dir: Path,
     items: Iterable[HotspotSummary],
@@ -440,7 +482,19 @@ def append_history_row(
     generated_at: str | None = None,
     filename: str = "topics.jsonl",
 ) -> Path:
-    """把一批 summary 追加到 history JSONL,每行一条记录。
+    """把一批 summary **幂等**追加到 history JSONL,每行一条记录。
+
+    幂等语义 (2026-09-22 数据卫生批): 追加前按业务键
+    ``(market, topic, topic_date)`` 查重, 已存在的组合不再写 —— 源返回旧快照
+    时 topic_date 不变、重复落盘不再产生新行。文件保持 append-only 语义,
+    只做"追加前查重", 不重写/排序整个文件。
+
+    ``market=None`` 的存量老行是**独立键**: 查重读取到的老行 market 为 None,
+    与本次写入的 ``safe_text(market)`` (cn/hk/us) 永不相等, 因此老行不会被
+    "吃"进任何市场的重复组 —— 与读取侧 ``load_history_jsonl`` 的不伪造口径一致。
+
+    其余约束: 文件不存在/读失败时退化为直接写; topics.jsonl 现状约 3277 行
+    (≈1.6MB), 全量读回查重成本可接受。
 
     ``market`` **必填**: 与按市场分片的 topics.parquet 不同, history 是三个市场
     共用的同一个 jsonl。港美开始落盘后, 同名 topic (A 股概念名 / 港美行业名) 在
@@ -454,8 +508,15 @@ def append_history_row(
     base.mkdir(parents=True, exist_ok=True)
     target = base / filename
     timestamp = generated_at or datetime.now(UTC).isoformat()
+    existing = _existing_history_keys(
+        target, key_fields=("market", "topic", "topic_date")
+    )
+    written = 0
     with target.open("a", encoding="utf-8") as handle:
         for item in items:
+            key = (safe_text(market), safe_text(item.topic), item.topic_date)
+            if key in existing:
+                continue
             record = {
                 "generated_at": timestamp,
                 "market": safe_text(market),
@@ -477,6 +538,10 @@ def append_history_row(
                 "topic_date": item.topic_date,
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            existing.add(key)
+            written += 1
+    if written == 0:
+        logger.debug("append_history_row: 全部 %d 组已存在, 无新增", len(existing))
     return target
 
 
@@ -520,7 +585,12 @@ def write_constituents_history(
     market: str,
     generated_at: str | None = None,
 ) -> Path:
-    """把成分股追加到 constituents.jsonl,每行含 market+topic+stock 一行。
+    """把成分股**幂等**追加到 constituents.jsonl,每行含 market+topic+stock 一行。
+
+    幂等语义 (2026-09-22 数据卫生批): constituents 记录实测**没有 topic_date
+    字段**, 日期键退而用 ``generated_at[:10]`` (天级), 业务键为
+    ``(market, topic, code, generated_at[:10])`` —— 同一成分股同一天只保留
+    最新一次写入, 重复落盘不再产生新行。文件保持 append-only 语义。
 
     ``market`` 必填, 理由同 ``append_history_row``: 成分股只按 topic 名分文件,
     而港美产出的是行业名、A 股是概念名, 撞名概率不低, 缺了 market 无法区分。
@@ -529,8 +599,19 @@ def write_constituents_history(
     base.mkdir(parents=True, exist_ok=True)
     target = base / "constituents.jsonl"
     timestamp = generated_at or datetime.now(UTC).isoformat()
+    # 键 = (market, topic, code, 日期) — generated_at 全记录不可作键(精确到微秒,
+    # 永不重复), [:10] 取到天级才是"同一快照重复落盘"的判别粒度。
+    existing = _existing_history_keys(
+        target, key_fields=("market", "topic", "code", "generated_at"),
+        day_field="generated_at",
+    )
+    gen_day = timestamp[:10]
     with target.open("a", encoding="utf-8") as handle:
         for stock in stocks:
+            code = safe_text(stock.code)
+            key = (safe_text(market), safe_text(topic), code, gen_day)
+            if key in existing:
+                continue
             record = {
                 "generated_at": timestamp,
                 "market": safe_text(market),
@@ -538,6 +619,7 @@ def write_constituents_history(
                 **_stock_to_dict(stock),
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            existing.add(key)
     return target
 
 
