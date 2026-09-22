@@ -749,10 +749,21 @@ def _compute_mainline_step(*, repo, emit, skipped: list, stage_errors: list) -> 
     mainline_rows = 0
     try:
         emit("compute_mainline", 93, "计算市场主线…")
+        from app.markets import registry as _registry
         from app.services import market_mainline
+
+        # 补齐上界 = 跨市场最大当日 (与 run_now 的 today 同源), 而非服务层缺省的
+        # 宿主机 date.today(): 管道若在北京 00:00-08:00 段运行 (UTC 前一日
+        # 16:00-24:00), 本地日期比中国日期落后一天, `d <= today` 会漏补中国当日
+        # 主线。放大上界是安全方向 —— missing 集合只会多查不存在的日期 (无数据,
+        # 自然跳过), 不会截断任何市场的真实当日。不改服务层缺省值: 那会改变
+        # "手动触发传 None"场景的契约。
+        # 注意: 以模块属性方式调用 (_registry.cross_market_today()), 顶层
+        # from-import 会让测试哨兵 patch 打不进去。
+        _today = _registry.cross_market_today()
         for _kind in ("concept", "industry"):
             rows = market_mainline.compute_mainline_incremental(
-                repo, repo.store.data_dir, kind=_kind
+                repo, repo.store.data_dir, today=_today, kind=_kind
             )
             mainline_rows += rows.height if not rows.is_empty() else 0
         if mainline_rows:

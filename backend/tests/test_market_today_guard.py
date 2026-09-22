@@ -929,3 +929,60 @@ def test_mainline_recompute_must_not_use_cross_market_today(pinned_registry, mon
         f"us 右端必须停在美股当天 {US_PIN}; 出现 {sorted(set(captured))} —— "
         f"若含 {CN_PIN} 即退化成 cross_market_today()"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 第四批 (mkt-clock-incremental): #18 市场时钟改造收官 — 盘后主线补齐上界
+#
+# _compute_mainline_step 此前调用 compute_mainline_incremental 时不传 today,
+# 走服务层缺省的宿主机 date.today() (market_mainline.py:288, 判 B 类未动)。
+# 管道若在北京 00:00-08:00 段运行 (UTC 前一日 16:00-24:00), 本地日期比中国
+# 日期落后一天 ⇒ `d <= today` 漏补中国当日主线。
+#
+# 改法: 调用方显式传 today=registry.cross_market_today() (超集口径, 与
+# run_now 的 today 同源); 服务层缺省值不动 (保持"手动触发传 None"的契约)。
+#
+# 沿用两条硬约束: 维度 A(四市场互异哨兵, JP 领先) + 维度 B(跑真实调用点
+# _compute_mainline_step, 不测 compute_mainline_incremental 这个 helper)。
+# 变异验证: 把 :763-766 改回不传 today 后, 下列用例必须变红。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_mainline_incremental_step_today_is_cross_market_max(pinned_registry, monkeypatch, tmp_path):
+    """盘后主线补齐: _compute_mainline_step 传入的 today 必须是跨市场最大值。
+
+    【四市场全钉死 + JP 领先】注册 UTC+9 的 JP 且 JP_PIN > CN_PIN, 期望值取
+    JP_PIN —— 一次排除三种退化:
+      - 退回 date.today() / 服务层缺省: 捕获到真实日期 != JP_PIN ⇒ 红;
+      - 改用单市场 profile.today() (CN/HK/US 任一): 最大也只能取到 CN_PIN
+        < JP_PIN ⇒ 红;
+      - 只遍历部分市场 (硬编码三市场清单): JP_PIN 同样取不到 ⇒ 红。
+    """
+    monkeypatch.setitem(registry._PROFILES, "JP", _PinnedProfile(market="JP", pinned=JP_PIN))
+    assert JP_PIN > CN_PIN > HK_PIN > US_PIN, "四市场哨兵必须互异且 JP 领先"
+    assert date.today() != JP_PIN
+
+    captured: list[object] = []
+
+    def _fake_incremental(repo, data_dir, *, today=None, kind="concept", **kwargs):
+        captured.append(today)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(market_mainline, "compute_mainline_incremental", _fake_incremental)
+
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    daily_pipeline._compute_mainline_step(
+        repo=repo, emit=lambda *a, **k: None, skipped=[], stage_errors=[],
+    )
+
+    assert len(captured) == 2, (
+        f"应跑 concept+industry 两轮增量补齐, 实际 {len(captured)} 轮 —— "
+        f"若为 0, 说明调用点未走到主线分支, 用例失去意义"
+    )
+    assert all(t == JP_PIN for t in captured), (
+        f"补齐上界必须是跨市场最大值 {JP_PIN} (UTC+8 以东 JP 当日), "
+        f"实际 {sorted(set(map(str, captured)))}"
+    )
+    assert not any(t is None for t in captured), (
+        "捕获到 today=None: 调用点没有显式传值, 走了服务层缺省 date.today()"
+    )
