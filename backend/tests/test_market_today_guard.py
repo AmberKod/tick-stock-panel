@@ -35,6 +35,7 @@ import pytest
 from app.api import indices as indices_api
 from app.api import kline as kline_api
 from app.jobs import daily_pipeline
+from app.market_time import cn_today
 from app.markets import registry
 from app.services import data_integrity, instrument_sync, kline_sync
 
@@ -49,6 +50,13 @@ def _pinned_clocks() -> tuple[date, date, date, date]:
     23:00 起 JP 日期领先 CN), 用于覆盖"UTC+8 以东"市场。
     四个值都刻意避开本机 date.today() —— 万一撞上就整体后移一年, 保证断言
     始终有鉴别力。
+
+    【为什么必须同时避开 cn_today()】可分性判据要防的泄漏源不止一个: 除了
+    date.today(), 还有**未被 patch、真实调用的 cn_today()** (北京日期)。
+    UTC 容器上两者在一天里约 1/3 的时间不相等, 只查 date.today() 会漏掉
+    "实现退回 cn_today()"这一路。漏判的后果是**静默绿**: 若某个钉值恰好等于
+    真实的 cn_today(), 实现退回 cn_today() 时捕获值仍然 == CN_PIN, 护栏失效
+    且没有任何人看得出来 —— 这正是本批用例从头到尾在消灭的失败模式。
     """
     anchor = date(2026, 3, 2)
     candidates = (
@@ -57,7 +65,7 @@ def _pinned_clocks() -> tuple[date, date, date, date]:
         anchor - timedelta(days=1),   # HK
         anchor - timedelta(days=2),   # US
     )
-    if any(c == date.today() for c in candidates):
+    if any(c in {date.today(), cn_today()} for c in candidates):
         anchor = anchor.replace(year=anchor.year + 1)
     return (
         anchor,                       # CN
@@ -172,6 +180,13 @@ def _pin_registry(monkeypatch, pins: dict[str, date]) -> dict[str, _PinnedProfil
         market: _PinnedProfile(market=market, pinned=pinned)
         for market, pinned in pins.items()
     }
+    # 未钉哨兵自检: 漏钉的市场会走真实 profile, max()/min() 取到真实当日 ⇒
+    # 断言必然不等 ⇒ 仍然会红。本条不补覆盖缺口, 只把失败信息从
+    # "assert 2026-03-02 == 2026-09-22" 变成自解释, 让加市场的人一眼看懂。
+    unpinned = set(registry._PROFILES) - set(pins)
+    assert not unpinned, (
+        f"以下已注册市场未钉哨兵, max()/min() 会取到真实当日而退化: {sorted(unpinned)}"
+    )
     for market, profile in profiles.items():
         monkeypatch.setitem(registry._PROFILES, market, profile)
     return profiles
