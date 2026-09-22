@@ -6,6 +6,8 @@ profile_for_symbol 对未注册市场显式 KeyError,
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app.markets.cn import CN_PROFILE
 from app.markets.hk import HK_PROFILE
 from app.markets.profile import MarketProfile
@@ -58,3 +60,29 @@ def profile_for_symbol(symbol: str) -> MarketProfile:
     M1 起 HK 已注册; US 仍抛 KeyError (M2 落地前保留护栏)。
     """
     return get_profile(resolve_market(symbol))
+
+
+def cross_market_today() -> date:
+    """跨市场「今日」= 所有已注册市场当日日期的**最大值**。
+
+    用途: 需要一次性覆盖多个市场、又没有单一 symbol 上下文的地方
+    (典型: 盘后管道的窗口右端)。取最大值即"最靠前"的那个市场, 作为窗口
+    右端只会多覆盖, 绝不会截断任一市场的当日数据。
+
+    必须遍历 _PROFILES 的 key 并逐个 get_profile(m).today(), **不得**退化成
+    CN_PROFILE.today() / cn_today() 之类的常量引用: 那样等于隐含假设
+    "北京 (UTC+8) 是全部已注册市场里日期最靠前的", 一旦注册 UTC+9 以东市场
+    (JP/AU/NZ) 该假设失效, 这些市场的当日K会被静默漏掉。
+    """
+    return max(get_profile(m).today() for m in _PROFILES)
+
+
+def cross_market_window(span_days: int) -> tuple[date, date]:
+    """跨市场窗口 = (最落后市场的 today - span_days, 最靠前市场的 today)。
+
+    左端取最小值以保证连最落后的市场也覆盖到 span_days 天; 右端取最大值以
+    保证最靠前的市场当日数据不被截断。与 cross_market_today() 同源: 遍历
+    _PROFILES, 不引用任何单一市场常量。
+    """
+    todays = [get_profile(m).today() for m in _PROFILES]
+    return min(todays) - timedelta(days=span_days), max(todays)
