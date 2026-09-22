@@ -216,7 +216,6 @@ def run_market_daily_sync(
     errors: dict[str, str] = {}
     enriched_written = 0
     outcomes: dict[str, dict] = {}
-    len(requested)
     chunk_size = max(1, int(batch_size or (1 if market == "HK" else 50)))
     chunks = _chunks(requested, chunk_size)
     provider_name = preferences.get_daily_data_provider()

@@ -520,6 +520,13 @@ def fetch_us_daily_akshare(symbol: str) -> pl.DataFrame:
     兜底 (新浪对 class share/次新股/低流动性标的覆盖不全)。两者都失败时返回
     空 df, 不抛错。
 
+    ⚠️ 调用方只在 **backend/scripts/** 侧, 不在 app 运行时链路上:
+        - scripts/sync_us_daily.py   日常美股日 K 同步
+        - scripts/retry_us_daily.py  失败 / class share 标的重试
+        - scripts/resync_us_daily.py 全量重同步 (2026-09-20 用它补了 6071 只)
+    grep 只扫 app/ 会误判成"零调用方死代码" —— 删它等于废掉美股补数工具,
+    必须先连 scripts/ 一起扫。
+
     Args:
         symbol: 裸 ticker (如 "AAPL" / "BRK.A") 或 "AAPL.US" 内部格式
     """

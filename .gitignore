@@ -69,6 +69,10 @@ backend/user_prompts/
 
 # ===== TypeScript build cache =====
 frontend/tsconfig*.tsbuildinfo
+# tsc -b 产物: tsconfig.node.json 是 emitDeclarationOnly 且 include vite.config.ts,
+# 所以每次 tsc 都会改写 frontend/vite.config.d.ts。它属于构建产物, 入库会导致
+# 每次类型检查后工作区都变脏 (见 2026-09-22 体检报告 5.1 组第 4 条)。
+frontend/vite.config.d.ts
 
 # ===== Data files =====
 *.xlsx
