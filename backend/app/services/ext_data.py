@@ -211,7 +211,11 @@ class ExtConfig:
 
 # load_all 进程内缓存: kline/screener/watchlist 等热路径每请求调用, 每次都
 # iterdir + 逐 config.json read_text+parse 纯重复; 以配置目录的
-# (目录名, mtime_ns, size) 签名失效 (新增/编辑/删除配置都会改变签名)。
+# (目录名, mtime_ns, size) 签名失效。
+#
+# 注意: 签名**不足以**覆盖"编辑" —— 同字节数覆写(如只改 label 但长度不变)落在
+# 同一 mtime 刻度内时签名完全不变, 读到的仍是旧配置。所以 upsert/delete 这些
+# 写路径必须显式调用 _invalidate_load_all_cache, 不能只依赖签名。
 _load_all_cache: dict[str, tuple[tuple, list[ExtConfig]]] = {}
 
 
@@ -227,6 +231,11 @@ def _ext_config_dir_signature(base: Path) -> tuple | None:
         return tuple(sig)
     except Exception:
         return None
+
+
+def _invalidate_load_all_cache(base: Path) -> None:
+    """写路径专用失效入口 —— 签名可能不变(见上方注释), 写完必须显式调一次。"""
+    _load_all_cache.pop(str(base), None)
 
 
 class ExtConfigStore:
@@ -294,6 +303,8 @@ class ExtConfigStore:
             json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # 同字节数覆写不改变目录签名 → 不显式失效就会一直读到旧配置
+        _invalidate_load_all_cache(self._base)
 
     def delete(self, config_id: str) -> bool:
         import shutil
@@ -304,6 +315,7 @@ class ExtConfigStore:
         if not cp.exists():
             return False
         shutil.rmtree(cp.parent, ignore_errors=True)
+        _invalidate_load_all_cache(self._base)
         return True
 
     def _migrate_legacy(self, old_path: Path) -> None:
