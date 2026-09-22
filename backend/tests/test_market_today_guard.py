@@ -14,6 +14,11 @@
 
 接缝耦合声明（纪律: 改接缝必须与改实现在同一个 commit）:
 - 端点用例的接缝 = 模块级 `profile_for_symbol`。
+- **管道侧（本次迁移后）的接缝 = `registry._PROFILES` 的 key**: 把各市场哨兵
+  档案 setitem 进注册表, 由 `cross_market_today()` 逐个 `get_profile(m).today()`
+  读出。注入在 registry 层、**不 stub 被测函数本身** —— 把 `max()` 整段 stub 掉
+  会让断言退化成 plumbing 检查（只证明"调用了", 不证明"取了最大值"）。
+  哨兵互异 (CN > HK > US), 断言取最大值。
 - 第 5 条用例的接缝 = `app.services.data_integrity.scan_recent_integrity`
   （在 `today` 计算完成后被调用, 用它做"记录并抛哨兵异常"的收网点）。
   若日后 run_now 不再调用它, 该用例会**响亮变红**（pytest.raises 未触发）, 不是静默失效。
@@ -30,24 +35,42 @@ import pytest
 from app.api import indices as indices_api
 from app.api import kline as kline_api
 from app.jobs import daily_pipeline
+from app.markets import registry
 from app.services import data_integrity, instrument_sync, kline_sync
 
 _DAYS = 120
 
 
-def _pinned_clocks() -> tuple[date, date]:
-    """返回 (北京日期钉, 市场日期钉)。
+def _pinned_clocks() -> tuple[date, date, date, date]:
+    """返回 (CN, HK, US, JP) 四个互异的市场日期钉。
 
-    两者恒相差 1 天(互不相同, 用于证明两个时钟不会串味); 且都刻意避开本机
-    date.today() —— 万一撞上就整体后移一年, 保证断言始终有鉴别力。
+    CN > HK > US 依次递减 1 天 —— 互不相同才能判定"取到了哪个市场"、也才能
+    让"取最大值"成为一条有鉴别力的断言; JP 比 CN 再领先 1 天 (UTC+9: 北京
+    23:00 起 JP 日期领先 CN), 用于覆盖"UTC+8 以东"市场。
+    四个值都刻意避开本机 date.today() —— 万一撞上就整体后移一年, 保证断言
+    始终有鉴别力。
     """
     anchor = date(2026, 3, 2)
-    if anchor == date.today() or anchor - timedelta(days=1) == date.today():
+    candidates = (
+        anchor + timedelta(days=1),   # JP
+        anchor,                       # CN
+        anchor - timedelta(days=1),   # HK
+        anchor - timedelta(days=2),   # US
+    )
+    if any(c == date.today() for c in candidates):
         anchor = anchor.replace(year=anchor.year + 1)
-    return anchor, anchor - timedelta(days=1)
+    return (
+        anchor,                       # CN
+        anchor - timedelta(days=1),   # HK
+        anchor - timedelta(days=2),   # US
+        anchor + timedelta(days=1),   # JP
+    )
 
 
-CN_PIN, MARKET_PIN = _pinned_clocks()
+CN_PIN, HK_PIN, US_PIN, JP_PIN = _pinned_clocks()
+
+# 端点用例沿用旧名 MARKET_PIN (= 美股市场钉), 保持既有断言不受本次迁移影响。
+MARKET_PIN = US_PIN
 
 
 @dataclass
@@ -138,6 +161,28 @@ def pinned_market_clock(monkeypatch) -> _ClockStub:
     return stub
 
 
+def _pin_registry(monkeypatch, pins: dict[str, date]) -> dict[str, _PinnedProfile]:
+    """在 registry 层钉住各市场时钟 —— 注入点是 `registry._PROFILES` 的 key。
+
+    cross_market_today() / cross_market_window() 逐个 get_profile(m).today()
+    遍历这张表, 所以哨兵能穿过 helper 直达断言; 不 stub 被测函数本身,
+    max()/min() 的真实性仍在覆盖范围内。
+    """
+    profiles = {
+        market: _PinnedProfile(market=market, pinned=pinned)
+        for market, pinned in pins.items()
+    }
+    for market, profile in profiles.items():
+        monkeypatch.setitem(registry._PROFILES, market, profile)
+    return profiles
+
+
+@pytest.fixture
+def pinned_registry(monkeypatch) -> dict[str, _PinnedProfile]:
+    """CN / HK / US 三市场哨兵: 互异且递减 (CN > HK > US), 断言取最大值。"""
+    return _pin_registry(monkeypatch, {"CN": CN_PIN, "HK": HK_PIN, "US": US_PIN})
+
+
 def test_kline_daily_default_end_uses_market_profile_today(pinned_market_clock):
     """kline: 不传 end_date 时, end 必须是标的所属市场的今天, 而非本机日期。"""
     # 前置护栏: 钉住值不能等于本机日期, 否则本用例失去鉴别力。
@@ -184,22 +229,45 @@ def test_index_daily_default_end_uses_market_profile_today(pinned_market_clock):
     assert pinned_market_clock.seen == ["000001.SH"]
 
 
-def test_daily_pipeline_window_end_uses_cn_today(monkeypatch):
-    """pipeline: 窗口右端取值函数必须返回北京日期 (cn_today)。
+def test_daily_pipeline_window_end_uses_cross_market_today(pinned_registry):
+    """pipeline: 窗口右端必须返回**跨市场最大**当日日期, 而不是北京日期。
+
+    哨兵互异 (CN > HK > US), 期望值 = 三者最大值 CN_PIN。若实现退回
+    cn_today() / 宿主机 date.today(), 取到的是真实日期 != CN_PIN ⇒ 红;
+    若实现只遍历了部分市场(如硬编码 CN_PROFILE), 同样取不到 CN_PIN。
 
     注意: 这条只钉住 helper 本身, **不足以证明调用点用了它** ——
-    调用点由 test_run_now_window_end_comes_from_cn_today 守。
+    调用点由 test_run_now_window_end_comes_from_cross_market_today 守。
     """
     assert date.today() != CN_PIN
-    monkeypatch.setattr(daily_pipeline, "cn_today", lambda: CN_PIN)
+    assert CN_PIN > HK_PIN > US_PIN, "哨兵必须互异, 否则 max() 断言退化成空断言"
 
     assert daily_pipeline.pipeline_window_end() == CN_PIN
 
 
-def test_market_clock_and_cn_clock_do_not_cross_contaminate(pinned_market_clock, monkeypatch):
-    """两个时钟钉成不同值时, 各自必须取到自己那个值 (互不串味)。"""
-    assert MARKET_PIN != CN_PIN
-    monkeypatch.setattr(daily_pipeline, "cn_today", lambda: CN_PIN)
+def test_endpoint_end_must_not_degrade_to_cross_market_today(pinned_registry, monkeypatch):
+    """反向护栏: 端点默认截止日期**不得**改用 cross_market_today()。
+
+    【旧语义 — 已随本次迁移有计划地废除】迁移前 pipeline 用 cn_today()、端点
+    用市场档案, 是两个独立时钟; 本用例原名
+    test_market_clock_and_cn_clock_do_not_cross_contaminate, 守的是"两个时钟
+    钉成不同值时互不串味"。迁移后 pipeline 不再有独立第二时钟 (它现在也读
+    registry), 该语义已不存在, 因此**必须反向重写**而不是换个 patch 目标。
+
+    【新语义 — 守反向风险】cross_market_today() 一旦存在且"看起来更统一",
+    下一个动 kline.py get_daily / indices.py get_index_daily 的人很可能顺手把
+    `profile_for_symbol(symbol).today()` 换成它。后果: 美股窗口右端被抬到跨
+    市场最大值 (本例 CN_PIN), 而美东当天可能尚未翻篇 —— 等于把"日K默认截止
+    日期用错时钟"这批刚修好的 bug **反向改回去**。
+
+    判据: US 哨兵严格落后于跨市场最大值, 于是"端点值 == 跨市场最大值" 就是
+    退化的充要信号 (现有端点用例钉的是"等于市场档案的 today", 拦不住这种改法)。
+    """
+    assert US_PIN < HK_PIN < CN_PIN, "US 哨兵必须严格落后, 否则本用例无法识别退化"
+    monkeypatch.setattr(kline_sync, "sync_daily_batch", lambda *args, **kwargs: pl.DataFrame())
+
+    cross_market = registry.cross_market_today()
+    assert cross_market == CN_PIN, "registry 层哨兵未生效, 本用例失去鉴别力"
 
     repo = _RecordingRepo()
     kline_api.get_daily(
@@ -210,14 +278,24 @@ def test_market_clock_and_cn_clock_do_not_cross_contaminate(pinned_market_clock,
         end_date=None,
         ext_columns=None,
     )
-    assert repo.window is not None
+    assert repo.window is not None, "kline 端点未走到日 K 窗口查询分支, 用例失去意义"
     kline_end = repo.window[1]
-    pipeline_end = daily_pipeline.pipeline_window_end()
 
-    assert kline_end == MARKET_PIN
-    assert kline_end != CN_PIN
-    assert pipeline_end == CN_PIN
-    assert pipeline_end != MARKET_PIN
+    index_repo = _RecordingRepo()
+    indices_api.get_index_daily(
+        _request(index_repo),
+        symbol="^GSPC.US",
+        days=_DAYS,
+        start_date=None,
+        end_date=None,
+    )
+    assert index_repo.window is not None, "indices 端点未走到指数日 K 窗口查询分支"
+    index_end = index_repo.window[1]
+
+    assert kline_end == US_PIN, f"kline 端点必须取美股市场当日 {US_PIN}, 实际 {kline_end}"
+    assert index_end == US_PIN, f"indices 端点必须取美股市场当日 {US_PIN}, 实际 {index_end}"
+    assert kline_end != cross_market, "kline 端点退化成 cross_market_today(): bug 反向回归"
+    assert index_end != cross_market, "indices 端点退化成 cross_market_today(): bug 反向回归"
 
 
 class _StopAfterToday(BaseException):
@@ -230,12 +308,13 @@ class _StopAfterToday(BaseException):
     """
 
 
-def test_run_now_window_end_comes_from_cn_today(monkeypatch, tmp_path):
+def test_run_now_window_end_comes_from_cross_market_today(pinned_registry, monkeypatch, tmp_path):
     """G2 调用点护栏: run_now 里的 today 必须真的来自 pipeline_window_end()。
 
     不经 helper、直接跑真实 run_now: 把紧随 today 之后的 data_integrity 扫描
     换成"记下 today 再抛哨兵异常", 从而在调用点捕获取值。把实现改回
-    _date.today() 时, 捕获到的是本机日期 != CN_PIN ⇒ 本条立刻变红。
+    _date.today() 或 cn_today() 时, 捕获到的是真实日期 != CN_PIN ⇒ 本条立刻
+    变红 (报错形如 "捕获=某真实日期 vs 期望=哨兵")。
     """
     assert date.today() != CN_PIN
     captured: dict[str, date] = {}
@@ -245,7 +324,6 @@ def test_run_now_window_end_comes_from_cn_today(monkeypatch, tmp_path):
         raise _StopAfterToday()
 
     monkeypatch.setattr(data_integrity, "scan_recent_integrity", _capture_today)
-    monkeypatch.setattr(daily_pipeline, "cn_today", lambda: CN_PIN)
     monkeypatch.setattr(daily_pipeline, "_invalidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(daily_pipeline, "_resolve_universe", lambda *args, **kwargs: [])
     monkeypatch.setattr(instrument_sync, "sync_instruments", lambda *args, **kwargs: 0)
@@ -263,3 +341,69 @@ def test_run_now_window_end_comes_from_cn_today(monkeypatch, tmp_path):
         daily_pipeline.run_now(_Repo(), None)
 
     assert captured["today"] == CN_PIN
+
+
+def test_cross_market_today_and_window_are_max_min_over_registry(pinned_registry, monkeypatch):
+    """cross_market_today / cross_market_window 纯 helper 单测: 哨兵互异 + 等值断言。
+
+    额外钉一条"新市场自动纳入": 注册 UTC+9 的 JP (领先 CN 一天) 后, 最大值必须
+    立刻变成 JP_PIN —— 这正是本次迁移要消除的隐含前提; 若实现走了 CN_PROFILE
+    这类常量引用, 这里会红。
+    """
+    assert CN_PIN > HK_PIN > US_PIN, "哨兵必须互异, 否则 max()/min() 断言退化成空断言"
+
+    assert registry.cross_market_today() == CN_PIN
+    assert registry.cross_market_today() == max(p.pinned for p in pinned_registry.values())
+
+    start, end = registry.cross_market_window(_DAYS)
+    assert end == CN_PIN
+    assert start == US_PIN - timedelta(days=_DAYS), "窗口左端必须按最落后的市场回退"
+
+    monkeypatch.setitem(registry._PROFILES, "JP", _PinnedProfile(market="JP", pinned=JP_PIN))
+    assert JP_PIN > CN_PIN
+    assert registry.cross_market_today() == JP_PIN, "新注册的 UTC+9 以东市场必须自动纳入最大值"
+
+
+def test_pipeline_window_must_cover_markets_east_of_cn(monkeypatch, tmp_path):
+    """盘后管道窗口右端必须覆盖「UTC+8 以东」市场的当日 —— 与真实系统日期无关。
+
+    【CI 定时炸弹已随本次迁移拆除】同名用例最早在 qa_recovery_kit 里带
+    `@pytest.mark.xfail(strict=True)`, 其 xfail 理由原文就是"修复方式: registry
+    增加 max_market_today() 之类 helper, 管道改用它" —— 正是本次迁移。迁移一
+    落地它必然转 XPASS, 而 strict=True 把 XPASS 当 CI 错误 ⇒ 合并那一刻 CI 就
+    红, 而且红得让人误以为是迁移写错了。**必须进同一个 commit 去掉 xfail**,
+    所以本条落地时**不带**任何 xfail 标记。
+
+    【为什么四市场必须全钉死】旧版只钉 JP, CN/HK/US 用真实 profile ⇒ 真实日期
+    恒 >= JP 钉值 ⇒ 断言 `>= JP` 恒真 (假绿, 拦不住任何东西)。现在
+    CN/HK/US/JP 全部钉死且 JP 领先 CN 一天, 断言改成**等值** == JP_PIN。
+    """
+    _pin_registry(monkeypatch, {"CN": CN_PIN, "HK": HK_PIN, "US": US_PIN, "JP": JP_PIN})
+    assert JP_PIN > CN_PIN > HK_PIN > US_PIN, "四市场哨兵必须互异且 JP 领先"
+
+    captured: list[date] = []
+
+    def fake_batch(*args, **kwargs):
+        end_date = kwargs.get("end_date")
+        captured.append(end_date.date() if hasattr(end_date, "date") else end_date)
+        raise _StopAfterToday()
+
+    monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_a_share", lambda: True)
+    monkeypatch.setattr(instrument_sync, "sync_instruments", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(daily_pipeline, "_resolve_universe", lambda *args, **kwargs: ["600000.SH"])
+    monkeypatch.setattr(daily_pipeline, "_invalidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "sync_and_persist_daily_batch", fake_batch)
+
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=tmp_path),
+        latest_daily_date=lambda: None,
+    )
+    capset = SimpleNamespace(has=lambda key: False)
+
+    with pytest.raises(_StopAfterToday):
+        daily_pipeline.run_now(repo, capset, override_start_date=CN_PIN)
+
+    assert captured, "应发起日K范围拉取"
+    assert captured[0] == JP_PIN, (
+        f"窗口右端必须是跨市场最大值 (UTC+8 以东 JP 当日) {JP_PIN}, 实际 {captured[0]}"
+    )

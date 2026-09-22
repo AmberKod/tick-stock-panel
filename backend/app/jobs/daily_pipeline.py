@@ -23,7 +23,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import run_pipeline
-from app.market_time import cn_today
+from app.markets.registry import cross_market_today
 from app.services import index_sync, instrument_sync, kline_sync
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -59,19 +59,34 @@ def _invalidate(table: str | None = None) -> None:
 
 
 def pipeline_window_end() -> date:
-    """管道拉取窗口的右端日期 = 北京日期 (Asia/Shanghai)。
+    """管道拉取窗口的右端日期 = 已注册市场当日日期的**最大值**。
 
     本管道一次跑 A 股 / 港股 / 美股, 没有单一 symbol 上下文, 因此不能套用
-    profile_for_symbol(symbol).today()。取北京日期的理由:
-      北京 (UTC+8) 与香港 (Asia/Hong_Kong, 同为 UTC+8) 日期恒等;
-      美东 (America/New_York, UTC-5/-4) 比北京慢 12~13 小时, 任一时刻
-      北京日期 >= 美东日期。故北京日期恒为三市场日期的最大值 —— 作为窗口
-      右端只会多覆盖、绝不会截断任一市场的当日数据, 是安全的上界。
-    同时必须用 cn_today() 而非宿主机 date.today(): 容器/美西主机本地时区
-    多为 UTC, 北京 15:30 盘后跑管道时 UTC 还是当天凌晨, 本地日期会落后一天,
-    导致当日日K永远拉不到 (或窗口右端偏早)。
+    profile_for_symbol(symbol).today()。取跨市场最大值的理由:
+      窗口右端必须是不低于"任一已注册市场当日"的上界, 才不会截断任何市场的
+      当日K。cross_market_today() 逐个 get_profile(m).today() 遍历
+      registry._PROFILES 取 max, 所以新注册市场会自动纳入 —— 本处无需改动,
+      也不存在"某个市场被漏掉"的前提需要后人维护。
+
+    为什么**不能**再用 cn_today() (北京日期):
+      旧实现取北京日期, 其安全性依赖一个没有被断言保护的隐含前提 ——
+      "北京 (UTC+8) 是全部已注册市场里日期最靠前的"。当前只注册了
+      CN(UTC+8) / HK(UTC+8) / US(UTC-5~-4), 该前提恰好成立; 但它是
+      **注册表的偶然性质, 不是时区规律**。一旦注册 UTC+9 以东市场, 在北京
+      20:00–24:00 这段窗口内它立刻失效:
+        JP(+9)  北京 23:00-24:00
+        AU(+10) 北京 22:00-24:00
+        NZ(+12) 北京 20:00-24:00
+      这些时段内 cn_today() 比那些市场的当日**整整少一天**, 窗口右端落在过去
+      ⇒ 它们的当日K被静默漏掉: 不报错, 只是少数据; 而且 registry.get_profile
+      对未注册市场是显式 raise KeyError, 对"已注册却被漏掉"的市场连个提示
+      都没有, 故障排查成本极高。
+
+    同时也**不能**退回宿主机 date.today(): 容器/美西主机本地时区多为 UTC,
+    北京 15:30 盘后跑管道时 UTC 还是当天凌晨, 本地日期会落后一天, 导致当日
+    日K永远拉不到 (或窗口右端偏早)。
     """
-    return cn_today()
+    return cross_market_today()
 
 
 def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
@@ -166,8 +181,9 @@ def run_now(
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     latest_daily = repo.latest_daily_date()
-    # 跨市场管道窗口右端: 北京日期 (理由见 pipeline_window_end 的 docstring,
-    # 勿改回宿主机 date.today())
+    # 跨市场管道窗口右端: 已注册市场当日日期的最大值 (理由见
+    # pipeline_window_end 的 docstring; 勿改回宿主机 date.today(), 也不要
+    # 退回 cn_today() —— 后者在注册 UTC+9 以东市场后会静默漏掉当日K)
     today = pipeline_window_end()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
