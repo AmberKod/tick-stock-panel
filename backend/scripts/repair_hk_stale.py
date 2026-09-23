@@ -13,6 +13,21 @@
 50/50 全失败)。放宽窗口**不增加网络请求** (新浪一次请求返回全历史再在内存
 过滤; 腾讯兜底窗口恒为 end-120 天)。详见 ``_maintenance_start``。
 
+第三层守卫: 旧仓 raw 分区两代口径并存 (104 只带 5 列身份声明 / 1425 只只有
+老 8 列)。8 列标的首拉时, incoming 的 ``currency`` 全 null (新浪源不带币种,
+唯一来源是腾讯 ``quote[75]``, 腾讯熔断即全空), 而 publish 的"从旧已核实分区
+继承"旁路要求旧分区本身已核实 —— 8 列老分区没有 currency 可继承 → 守卫
+"币种、量单位或价格口径未核实" 拒。修法见 ``_ensure_currency_identity``:
+currency 从**证据链**取 (腾讯报价 → 旧分区 → HKEX 证券清单), 其余 4 列
+声明 provider 恒产 (``_validated_rows``), 一列都不凭空造, 守卫一行不动。
+
+第四层守卫 (归类, 不修): 口径未核实的旧分区在 enriched 算不出来时
+(:1041 "维护窗口尚未具备完整原始价与复权因子"), publish 拒绝替换原文件。
+触发链: 近 90 天真缺口 (长期停牌如 00167, 新浪对停牌段无行) →
+coverage_ok=False → enriched 空 → repair → 拒。这是**正确的 fail-closed**
+(坏了不如不动), 源侧缺口修管道修不出来 → 归入 ``repair_blocked`` 单独上报,
+不混 failures。
+
 stale 基准**不用全市场 as_of** (2026-09-23 实证暴露的移动靶): as_of 是所有
 标的最新日期的最大值, 补拉把它推到今天后, 停在"服务停摆日"的标的
 (1187 只停在 09-18) 会一夜之间全被算成 stale —— 补得越多 stale 越多
@@ -286,6 +301,95 @@ def _market_today(market: str) -> date:
     return market_registry.get_profile(market).today()
 
 
+_CURRENCY_EVIDENCE_ORDER = ("quote", "partition", "hkex")
+_HK_CURRENCIES = frozenset({"HKD", "CNY", "USD"})
+
+
+def _hkex_currency(root: Path, symbol: str) -> str | None:
+    """HKEX 证券清单的 Trading Currency (权威第三方, 只读)。
+
+    ``instruments/hk_instruments.parquet`` 由现役 ``sync_hk_lot_sizes`` 维护
+    (``hkex_instruments.py:51-53``: RMB→CNY 归一, 白名单 {HKD,CNY,USD})。
+    读取失败/清单缺失返回 None —— 币种查不到走"跳过并报因", 绝不默认 HKD。
+    """
+    path = root / "instruments" / "hk_instruments.parquet"
+    if not path.exists():
+        return None
+    try:
+        frame = pl.read_parquet(path, columns=["symbol", "currency"])
+    except Exception as exc:
+        logger.warning("HKEX 证券清单读取失败 %s: %s", symbol, exc)
+        return None
+    if frame.is_empty():
+        return None
+    hit = frame.filter(pl.col("symbol") == symbol)
+    if hit.is_empty():
+        return None
+    values = [str(v).strip().upper() for v in hit["currency"].drop_nulls().to_list()
+              if v is not None]
+    unique = sorted(set(values))
+    if len(unique) != 1 or unique[0] not in _HK_CURRENCIES:
+        return None
+    return unique[0]
+
+
+def _partition_currency(old: pl.DataFrame) -> str | None:
+    """旧分区已核实的 currency (唯一值才可信, 冲突/缺失返回 None)。"""
+    if old.is_empty() or "currency" not in old.columns:
+        return None
+    unique = sorted({str(v).strip().upper() for v in old["currency"].drop_nulls().to_list()
+                     if v is not None})
+    if len(unique) != 1 or unique[0] not in _HK_CURRENCIES:
+        return None
+    return unique[0]
+
+
+def _ensure_currency_identity(
+    frame: pl.DataFrame, root: Path, symbol: str, old: pl.DataFrame, item: dict,
+) -> tuple[pl.DataFrame, str | None]:
+    """给本次 publish 的 incoming frame 补 currency 身份列 (只补 currency!)。
+
+    为什么只有 currency 需要补: ``_validated_rows`` (hk_daily_provider.py:258-261)
+    给新浪/腾讯/东财三条链路的**每一行**都恒产 ``price_adjustment="unadjusted"`` /
+    ``volume_unit="share"`` / ``price_schema_version=1`` / ``raw_price_verified=True``;
+    唯独 ``currency`` 初始为 None (:260), 全链路只有腾讯报价 ``quote[75]``
+    (:466-475) 能填 —— 腾讯 WAF 熔断时 currency 整列 null, publish 的
+    "从旧已核实分区继承"旁路 (:991-1000) 又只救"旧分区本身已核实"的标的。
+    8 列老分区 (1425/1529 只) 两头都空 → 守卫 (:1001) 拒。
+
+    currency 取值**证据链** (先强后弱, 任何一步拿到即止, 拿不到返回原 frame):
+      1. 本次腾讯报价 (``item["currency"]``) —— 与 OHLCV 同次请求、最强;
+      2. 旧分区已核实的 currency —— 上市主体币种不变 (与 publish 旁路同理);
+      3. HKEX 证券清单 Trading Currency —— 官方权威, 只读不写。
+    三层全空 → 返回 None, 由调用方计入 no_identity 单独归类, **绝不默认 HKD**
+    (24 只 CNY / 1 只 USD, 默认 HKD 会写错 25 只)。
+
+    只影响本脚本的补拉路径: publish_hk_daily_snapshot 的公共语义不变
+    (它自己那份 currency 全 null 旁路原样保留), 其他调用方零感知。
+    """
+    if frame.is_empty() or "currency" not in frame.columns:
+        return frame, None
+    if frame.get_column("currency").null_count() == 0:
+        return frame, frame["currency"][0]
+    source = "none"
+    currency: str | None = None
+    quote = str(item.get("currency") or "").strip().upper()
+    if quote in _HK_CURRENCIES:
+        currency, source = quote, _CURRENCY_EVIDENCE_ORDER[0]
+    if currency is None:
+        inherited = _partition_currency(old)
+        if inherited is not None:
+            currency, source = inherited, _CURRENCY_EVIDENCE_ORDER[1]
+    if currency is None:
+        official = _hkex_currency(root, symbol)
+        if official is not None:
+            currency, source = official, _CURRENCY_EVIDENCE_ORDER[2]
+    if currency is None:
+        return frame, None
+    logger.info("hk %s: currency=%s (来源: %s)", symbol, currency, source)
+    return frame.with_columns(pl.lit(currency, dtype=pl.String).alias("currency")), currency
+
+
 def repair_stale(
     data_dir: Path,
     market: str = "HK",
@@ -314,7 +418,9 @@ def repair_stale(
     report: dict[str, Any] = {
         **plan, "dry_run": dry_run, "limit": limit or 0,
         "attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0,
-        "no_data": 0, "no_data_symbols": [], "failures": [], "elapsed_seconds": 0.0,
+        "no_data": 0, "no_data_symbols": [], "no_identity": 0, "no_identity_symbols": [],
+        "repair_blocked": 0, "repair_blocked_symbols": [],
+        "failures": [], "elapsed_seconds": 0.0,
     }
     targets = plan["targets"]
     if dry_run or not targets:
@@ -367,6 +473,26 @@ def repair_stale(
                        if not fetched.adjustments.is_empty() else pl.DataFrame())
             items = {row["symbol"]: dict(row) for row in fetched.items}
             item = items.get(symbol, {"symbol": symbol})
+            # 第三层守卫的前置修复: 8 列老分区 + 腾讯熔断时 currency 全 null,
+            # publish 会以"口径未核实"拒。这里从证据链补 currency (其余 4 列
+            # provider 恒产), 三层证据全空则单独归类跳过, 绝不默认 HKD。
+            old_identity = None
+            if market.upper() == "HK":
+                try:
+                    from app.tickflow.market_daily import read_market_daily_symbol
+                    old_identity = read_market_daily_symbol(root, symbol, legacy=legacy)
+                except Exception as exc:
+                    logger.warning("旧分区读取失败 %s (币种继承跳过): %s", symbol, exc)
+                frame, currency = _ensure_currency_identity(
+                    frame, root, symbol, old_identity, item)
+                if currency is None:
+                    report["no_identity"] += 1
+                    report["no_identity_symbols"].append(symbol)
+                    logger.warning(
+                        "跳过 %s: currency 三层证据 (腾讯报价/旧分区/HKEX 清单) 全空, "
+                        "不肯默认 HKD 落盘; 请先同步标的池 (sync_hk_lot_sizes)", symbol)
+                    continue
+                item = {**item, "currency": currency}
             published = publish(
                 root, symbol, frame, factors=factors, item=item, legacy=legacy,
                 verification_archives=[a for a in getattr(fetched, "verification_archives", ())
@@ -381,9 +507,21 @@ def repair_stale(
                     "reason": published.get("reason") or f"发布状态 {published.get('status')}",
                 })
         except Exception as exc:  # 单只失败记录后继续, 不中断整批
-            report["failed"] += 1
-            report["failures"].append({"symbol": symbol, "reason": str(exc)})
-            logger.warning("补拉失败 %s: %s", symbol, exc)
+            if "旧价格口径维护窗口尚未具备完整原始价与复权因子" in str(exc):
+                # 第四层守卫 (:1041): repair 分区 (口径未核实的旧分区) 在 enriched
+                # 算不出来时 raise 拒绝替换原文件 —— 这是**对的** fail-closed
+                # (坏了不如不动)。触发链: 近 90 天真缺口 (长期停牌如 00167,
+                # 新浪对停牌段无行) → coverage_ok=False → enriched 空 → repair → 拒。
+                # 源侧缺口修管道修不出来 → 单独归类, 不混 failures。
+                report["repair_blocked"] += 1
+                report["repair_blocked_symbols"].append(symbol)
+                logger.info(
+                    "%s: 近期覆盖不全, 维护窗口不具备完整原始价+复权因子, "
+                    "publish 保留原文件 (源侧缺口, 非管道故障)", symbol)
+            else:
+                report["failed"] += 1
+                report["failures"].append({"symbol": symbol, "reason": str(exc)})
+                logger.warning("补拉失败 %s: %s", symbol, exc)
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
     report["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -460,6 +598,19 @@ def print_report(report: dict[str, Any]) -> None:
         print(f"源无数据        : {report['no_data']} (停牌/退市/源缺, 非管道故障)")
         print(f"  {', '.join(report['no_data_symbols'][:20])}"
               + (f" ... 另有 {report['no_data'] - 20} 只" if report['no_data'] > 20 else ""))
+    if report.get("no_identity"):
+        # currency 三层证据全空: 落盘会触发 publish 的口径守卫 (或不肯默认 HKD)。
+        # 不是失败, 是"身份证据不足" —— 同步标的池后重跑即可补上。
+        print(f"币种证据不足    : {report['no_identity']} (跳过不落盘; 同步标的池后重跑)")
+        print(f"  {', '.join(report['no_identity_symbols'][:20])}"
+              + (f" ... 另有 {report['no_identity'] - 20} 只" if report['no_identity'] > 20 else ""))
+    if report.get("repair_blocked"):
+        # 第四层守卫: 近期覆盖不全, publish 拒绝替换口径未核实的旧分区 (fail-closed
+        # 保住了原文件)。这批标的源侧真没有完整的近期数据 (多为长期停牌), 等
+        # 源补齐后重跑即可, 修管道修不出来。
+        print(f"维护窗口不全    : {report['repair_blocked']} (近期覆盖缺口, publish 保留原文件)")
+        print(f"  {', '.join(report['repair_blocked_symbols'][:20])}"
+              + (f" ... 另有 {report['repair_blocked'] - 20} 只" if report['repair_blocked'] > 20 else ""))
     print(f"耗时(秒)        : {report['elapsed_seconds']}")
 
 

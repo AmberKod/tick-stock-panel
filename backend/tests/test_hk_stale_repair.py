@@ -13,7 +13,10 @@
 4. ``no_data`` 合并进 failures → "源无数据单独归类" 用例红;
 5. stale 基准退回全市场 ``as_of`` (移动靶) → 移动靶/边界/容差/估算 6 条红;
 6. 容差不生效 (基准 = 市场当天) → 容差与移动靶 2 条红;
-7. 估算恒用经验值 (不吃实测) → "实测估算" 用例红。
+7. 估算恒用经验值 (不吃实测) → "实测估算" 用例红;
+8. 去掉 currency 证据链 (恒 None) → "8 列老分区发布成功" 红;
+9. 证据链顺序反转 (HKEX 优先于旧分区) → "继承 CNY" 红;
+10. repair_window_incomplete 并进 failures → "维护窗口不全单独归类" 红。
 """
 from __future__ import annotations
 
@@ -25,6 +28,8 @@ from typing import Any
 
 import polars as pl
 import pytest
+
+_SENTINEL_CURRENCY = object()   # "不动 frame 的 currency" 与 None (腾讯熔断) 可分
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "repair_hk_stale.py"
 _spec = importlib.util.spec_from_file_location("repair_hk_stale", _SCRIPT_PATH)
@@ -109,6 +114,46 @@ def _unverified_raw(symbol: str, days: list[date]) -> pl.DataFrame:
     })
 
 
+def _eight_column_partition(symbol: str, days: list[date], *, currency: str | None = None) -> pl.DataFrame:
+    """第三层守卫的真实形态: 旧仓两代口径并存里的"老 8 列"分区。
+
+    只有 amount/close/date/high/low/open/symbol/volume —— 5 个身份声明列全缺
+    (2026-09-24 实测 1425/1529 只 stale 标的是这种)。腾讯熔断时 provider 回的
+    currency 也是 null, 两头都空 → publish 守卫"口径未核实"拒。
+    """
+    count = len(days)
+    return pl.DataFrame({
+        "symbol": [symbol] * count,
+        "date": days,
+        "open": [1.0] * count,
+        "high": [1.0] * count,
+        "low": [1.0] * count,
+        "close": [1.0] * count,
+        "volume": [100.0] * count,
+        "amount": [100.0] * count,
+    })
+
+
+def _null_currency_frame(symbol: str, days: list[date]) -> pl.DataFrame:
+    """腾讯熔断时 provider 实际回的形态: 4 列声明在, currency 整列 null。
+
+    对应 hk_daily_provider.py:260 (currency=None) + :709 (腾讯缺席时 lit(None))。
+    """
+    return _verified_raw(symbol, days).with_columns(
+        pl.lit(None, dtype=pl.String).alias("currency"),
+    )
+
+
+def _write_hkex_instruments(root: Path, rows: list[tuple[str, str | None]]) -> None:
+    """造 instruments/hk_instruments.parquet (sync_hk_lot_sizes 的落盘形态)。"""
+    path = root / "instruments" / "hk_instruments.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": [symbol for symbol, _ in rows],
+        "currency": [currency for _, currency in rows],
+    }).write_parquet(path)
+
+
 def _business_days(start: date, end: date) -> list[date]:
     """周一~周五的日期序列 (造"数千天历史"用, 不需要真实交易日历)。"""
     days: list[date] = []
@@ -126,16 +171,20 @@ class _FakeProvider:
     ``synth=True`` 时按请求的 [start, end] 现场生成"源返回了整个窗口"的日线
     (真实形态: 新浪一次请求返回全历史再在内存过滤), 用于覆盖"旧分区有数千天
     历史、incoming 必须覆盖它们"的场景。
+
+    ``currency=None`` (默认) 模拟腾讯熔断: item 不带 currency、frame 的
+    currency 列全 null —— 第三层守卫的触发条件。
     """
 
     def __init__(self, frames: dict[str, pl.DataFrame] | None = None,
                  adjustments: dict[str, pl.DataFrame] | None = None,
                  raise_for: set[str] | None = None,
-                 synth: bool = False) -> None:
+                 synth: bool = False, currency: str | None = _SENTINEL_CURRENCY) -> None:
         self.frames = frames or {}
         self.adjustments = adjustments or {}
         self.raise_for = raise_for or set()
         self.synth = synth
+        self.currency = currency
         self.calls: list[dict[str, Any]] = []
 
     def get_daily_with_report(self, symbols, start_time=None, end_time=None,
@@ -162,7 +211,15 @@ class _FakeProvider:
             factors = _factors(symbol, days)
         else:
             frame, factors = pl.DataFrame(), pl.DataFrame()
-        item = {"symbol": symbol, "status": "ok", "coverage_complete": True}
+        if self.currency is _SENTINEL_CURRENCY:
+            pass  # frame 原样返回 (调用方可能已把 currency 造好)
+        elif self.currency is None:
+            frame = frame.with_columns(pl.lit(None, dtype=pl.String).alias("currency"))
+        else:
+            frame = frame.with_columns(pl.lit(self.currency, dtype=pl.String).alias("currency"))
+        item_currency = None if self.currency is _SENTINEL_CURRENCY else self.currency
+        item = {"symbol": symbol, "status": "ok", "coverage_complete": True,
+                "currency": item_currency}
         return DailyFetchResult(frame, (item,), factors, ())
 
 
@@ -542,3 +599,201 @@ def test_print_report_shows_baseline_and_estimate(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["basis"] == "market-today-7d"
     assert payload["estimate_all_seconds"] == round(3 * payload["seconds_per_symbol"], 1)
+
+
+# ---------------------------------------------------------------- 第三层守卫
+# 2026-09-24 全量实跑: 00050/00051 成功后从 00167.HK 起 100% 失败, 同一报错
+# "港股原始日线的币种、量单位或价格口径未核实"。旧仓 raw 两代口径并存:
+# 104 只带 5 列声明 / 1425 只只有老 8 列。8 列标的首拉时 provider 的 currency
+# 全 null (腾讯熔断), publish 的继承旁路又要求旧分区已核实 → 拒。
+
+_EIGHT_COL_DAYS = _business_days(date(2015, 1, 1), GAP_DAY)
+
+
+def test_eight_column_partition_publishes_with_identity(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """真实形态: 老 8 列分区 + 腾讯熔断 (currency null) → 修复前守卫红, 修复后绿。
+
+    修复路径: HKEX 证券清单补 currency, 4 列声明 provider 恒产;
+    落盘分区必须带完整 5 列声明且值正确 (守卫一行没动, 数据配得上守卫了)。
+    """
+    symbol = "00167.HK"
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    _eight_column_partition(symbol, _EIGHT_COL_DAYS).write_parquet(raw_dir / "part.parquet")
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])     # as_of 存在但 < 基准
+    _write_hkex_instruments(tmp_path, [("00167.HK", "HKD")])
+    fake_provider.synth = True
+    fake_provider.currency = None                          # 腾讯熔断: currency 全 null
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+    )
+
+    assert report["succeeded"] == 1, f"8 列老分区必须发布成功: {report['failures']}"
+    merged = pl.read_parquet(raw_dir / "part.parquet")
+    # 落盘分区带完整 5 列声明且值正确 —— 这正是守卫要的"配得上守卫的数据"
+    assert merged["currency"].unique().to_list() == ["HKD"]
+    assert merged["volume_unit"].unique().to_list() == ["share"]
+    assert merged["price_adjustment"].unique().to_list() == ["unadjusted"]
+    assert merged["price_schema_version"].unique().to_list() == [1]
+    assert merged["raw_price_verified"].unique().to_list() == [True]
+    # 历史不丢 + 推进
+    assert merged["date"].min() == _EIGHT_COL_DAYS[0]
+    assert merged["date"].max() == TODAY
+
+
+def test_currency_inherited_from_partition_beats_default(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """currency 继承: 旧分区 (人民柜台) CNY 必须继承 CNY, 不许默认 HKD。"""
+    symbol = "80016.HK"
+    old_days = _business_days(date(2018, 1, 1), GAP_DAY)
+    partition = _eight_column_partition(symbol, old_days).with_columns(
+        pl.lit("CNY", dtype=pl.String).alias("currency"),     # 只带 currency 一列的旧分区
+    )
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    partition.write_parquet(raw_dir / "part.parquet")
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])
+    _write_hkex_instruments(tmp_path, [(symbol, "HKD")])       # HKEX 层与旧分区冲突 → 旧分区赢
+    fake_provider.synth = True
+    fake_provider.currency = None
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+    )
+
+    assert report["succeeded"] == 1, report["failures"]
+    merged = pl.read_parquet(raw_dir / "part.parquet")
+    assert merged["currency"].unique().to_list() == ["CNY"], (
+        "旧分区已核实的币种必须优先于 HKEX 清单, 更不许默认 HKD")
+
+
+def test_quote_currency_wins_over_partition(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """证据链最强层: 本次腾讯报价 (USD) 优先于旧分区 (HKD)。"""
+    symbol = "00770.HK"
+    old_days = _business_days(date(2018, 1, 1), GAP_DAY)
+    partition = _eight_column_partition(symbol, old_days).with_columns(
+        pl.lit("HKD", dtype=pl.String).alias("currency"),
+    )
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    partition.write_parquet(raw_dir / "part.parquet")
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])
+    fake_provider.synth = True
+    fake_provider.currency = "USD"                            # 腾讯报价活着
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+    )
+
+    assert report["succeeded"] == 1, report["failures"]
+    merged = pl.read_parquet(raw_dir / "part.parquet")
+    assert merged["currency"].unique().to_list() == ["USD"], "同次请求的报价币种必须最优先"
+
+
+def test_no_currency_evidence_skips_without_defaulting(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """三层证据全空 → 单独归类跳过, 绝不默认 HKD 落盘 (有 24 CNY/1 USD 在清单里)。"""
+    symbol = "00167.HK"
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    _eight_column_partition(symbol, _EIGHT_COL_DAYS).write_parquet(raw_dir / "part.parquet")
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])
+    # 不造 instruments (HKEX 层缺失), 腾讯熔断, 旧分区无 currency
+    fake_provider.synth = True
+    fake_provider.currency = None
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+    )
+
+    assert report["no_identity"] == 1 and report["no_identity_symbols"] == [symbol]
+    assert report["failed"] == 0 and report["succeeded"] == 0, (
+        f"证据不足是'跳过'不是'失败': {report['failures']}")
+    merged = pl.read_parquet(raw_dir / "part.parquet")
+    assert "currency" not in merged.columns, "不许给老分区凭空写默认币种"
+
+
+def test_verified_partition_identity_untouched(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """已带 5 列声明的分区 (00050 型, 104 只): 不进证据链、行为不变。"""
+    symbol = "00050.HK"
+    old_days = _business_days(date(2018, 1, 1), GAP_DAY)
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    _verified_raw(symbol, old_days).write_parquet(raw_dir / "part.parquet")   # 已核实口径
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])
+    fake_provider.synth = True
+    fake_provider.currency = None    # 腾讯熔断 —— 但 frame 的 currency 已由 publish 旁路继承
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+    )
+
+    # 已核实分区 currency null 由 publish 自带的继承旁路处理, 脚本证据链不干预
+    assert report["no_identity"] == 0
+    assert report["succeeded"] == 1, report["failures"]
+    merged = pl.read_parquet(raw_dir / "part.parquet")
+    assert merged["currency"].unique().to_list() == ["HKD"]
+
+
+def test_identity_report_block_printed(tmp_path: Path, capsys) -> None:
+    """报告必须单列'币种证据不足'块 (与失败/源无数据分开, 别让用户误判)。"""
+    report = {
+        "market": "HK", "scanned": 0, "as_of": None, "stale": 0, "buckets": [],
+        "targets": [], "stale_before": "2026-09-16", "basis": "market-today-7d",
+        "tolerance_days": 7, "market_today": "2026-09-23", "dry_run": False, "limit": 0,
+        "attempted": 1, "succeeded": 0, "failed": 0, "skipped": 0,
+        "no_data": 0, "no_data_symbols": [],
+        "no_identity": 2, "no_identity_symbols": ["00167.HK", "80016.HK"],
+        "repair_blocked": 1, "repair_blocked_symbols": ["00167.HK"],
+        "failures": [], "elapsed_seconds": 1.0,
+        "seconds_per_symbol": 8.2, "seconds_per_symbol_measured": True,
+        "estimate_remaining_seconds": 0.0, "estimate_all_seconds": 16.4,
+    }
+    repair_hk_stale.print_report(report)
+    text = capsys.readouterr().out
+    assert "币种证据不足" in text and "00167.HK" in text, text
+    assert "维护窗口不全" in text, f"第四层守卫归类必须单列: {text}"
+
+
+def test_repair_window_incomplete_classified_separately(tmp_path: Path, fake_provider: _FakeProvider) -> None:
+    """第四层守卫 (00167 型): 近期覆盖缺口 → publish partial + repair_window_incomplete。
+
+    正确语义: **归类, 不修** —— 守卫保住原文件是对的 (源侧真没有近期数据,
+    修管道修不出来); 归入 repair_blocked, 不计入 failed, 且原分区一个字节不动。
+    """
+    symbol = "00167.HK"
+    old_days = _business_days(date(2015, 1, 1), GAP_DAY)
+    raw_dir = tmp_path / "kline_daily" / f"symbol={symbol}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    partition = _eight_column_partition(symbol, old_days)     # 口径未核实 → repair=True
+    partition.write_parquet(raw_dir / "part.parquet")
+    _write_enriched(tmp_path, symbol, [GAP_DAY])
+    _write_enriched(tmp_path, "00001.HK", [STOP_DAY])
+    _write_hkex_instruments(tmp_path, [(symbol, "HKD")])
+    fake_provider.synth = True
+    fake_provider.currency = None
+    before_bytes = (raw_dir / "part.parquet").read_bytes()
+
+    def _blocked_publisher(root, sym, frame, **kwargs):
+        # publish 对第四层守卫是 raise 而非返回 partial (:1041)
+        raise ValueError("旧价格口径维护窗口尚未具备完整原始价与复权因子, 已保留原文件")
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1), publisher=_blocked_publisher,
+    )
+
+    assert report["repair_blocked"] == 1 and report["repair_blocked_symbols"] == [symbol]
+    assert report["failed"] == 0 and report["succeeded"] == 0, (
+        f"维护窗口不全不是管道失败: {report['failures']}")
+    assert (raw_dir / "part.parquet").read_bytes() == before_bytes, (
+        "publish 保留原文件的语义必须在脚本侧兑现 (零写盘)")
