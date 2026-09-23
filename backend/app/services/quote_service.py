@@ -1083,20 +1083,21 @@ class QuoteService:
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
-            # ── 按市场分别门控 (2026-09-22 数据地基批 #6) ──
-            # 旧实现是"非 A 股连续竞价时段 → 整个 return", 把排在后面的港美
-            # 异动段一起挡死 (从未执行过)。现在拆开: A 股各轮维持原语义;
-            # 港美异动段每市场各自判定 (HK 开市而 US 未开时只跑 HK)。
-            # ⚠️ 禁止改成"任一市场开市就评估全部" —— 那会让 A 股监控在
+            # ── 门控 (2026-09-22 数据地基批 #6, 2026-09-23 B3 修订) ──
+            # 历史: 旧实现是"非 A 股连续竞价时段 → 整个 return", 把排在后面的
+            # 港美异动段一起挡死 (从未执行过); 上一批拆成按市场分别门控, 但
+            # **判据选错了** —— 港美异动快照只读 enriched parquet, 不消费轮询
+            # 拉回的实时行情, 而港美 parquet 一天只写一次 (日线同步 HK 18:00 /
+            # US 08:00), 于是"按港美各自交易时段门控"在美股时段依然只会拿到
+            # 上一交易日的快照。故港美段整体摘出本方法 (见
+            # evaluate_hk_us_monitors), 由各市场日线同步后的独立 job 触发。
+            # 本方法退回纯 A 股口径: 闭市时各轮全部跳过。
+            # ⚠️ 禁止再改成"任一市场开市就评估全部" —— 那会让 A 股监控在
             # 竞价/收盘后基于非连续竞价价格误告警。
             from app.markets import registry as _registry
 
             cn_continuous = _registry.is_continuous_trading("CN")
-            hk_continuous = _registry.is_continuous_trading("HK")
-            us_continuous = _registry.is_continuous_trading("US")
-            # A 股闭市 (含竞价/午休/收盘缓冲/周末) 时, 股票/ETF/指数/板块各轮
-            # 全部跳过 —— 与旧行为一致, 只是不再连坐港美段。
-            if not cn_continuous and not (hk_continuous or us_continuous):
+            if not cn_continuous:
                 return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
@@ -1159,28 +1160,10 @@ class QuoteService:
                                     min_closeness=engine.min_abnormal_closeness(),
                                     limit=1000,
                                 )
+                                # 港美动量快照已摘出: 口径是日线收盘 (parquet 一天
+                                # 只写一次), 不再由 A 股轮询驱动 —— 见
+                                # evaluate_hk_us_monitors / app/jobs/hk_us_monitor.py。
                                 _rows = list(_overview.get("rows") or [])
-                                # 港美动量快照: 独立 try — 任一市场失败不丢弃 A股事件。
-                                # 按市场分别门控 (#6): 仅当该市场处于连续竞价时段才构建其
-                                # 快照 (HK 开市而 US 未开 → 只跑 HK); A 股部分 (上面
-                                # _overview) 由 cn_continuous 门控, 闭市时段不基于陈旧价告警。
-                                from app.config import settings as _settings
-                                from app.services.hk_us_abnormal import (
-                                    build_hk_us_abnormal_overview,
-                                )
-                                _mkt_gates = {"HK": hk_continuous, "US": us_continuous}
-                                for _mkt in ("HK", "US"):
-                                    if not _mkt_gates[_mkt]:
-                                        continue
-                                    try:
-                                        _hk_us = build_hk_us_abnormal_overview(
-                                            _settings.data_dir, _mkt,
-                                            min_closeness=engine.min_abnormal_closeness(),
-                                            limit=1000,
-                                        )
-                                        _rows.extend(_hk_us.get("rows") or [])
-                                    except Exception as e:
-                                        logger.warning("港美异动快照构建失败 (%s, 不影响 A股): %s", _mkt, e)
                                 rule_events += engine.evaluate_abnormal(_rows)
                             except Exception as e:
                                 logger.warning("异动监控规则评估失败 (不影响其他告警): %s", e)
@@ -1214,44 +1197,7 @@ class QuoteService:
                                 )
                         except Exception as e:
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
-                    if rule_events:
-                        rule_events = self._format_extension_notifications(rule_events)
-                        # 落盘到 alerts.jsonl
-                        try:
-                            from app.services import alert_store
-                            alert_store.append_many(
-                                self._app_state.repo.store.data_dir, rule_events,
-                            )
-                        except Exception as e:
-                            logger.warning("告警落盘失败: %s", e)
-                        # 转为 SSE 推送格式 (兼容旧 alert schema)
-                        for ev in rule_events:
-                            alert = {
-                                "source": ev["source"],
-                                "type": ev["type"],
-                                "rule_id": ev.get("rule_id"),
-                                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
-                                "symbol": ev["symbol"],
-                                "name": ev["name"],
-                                "message": ev["message"],
-                                "price": ev["price"],
-                                "change_pct": ev["change_pct"],
-                                "signals": ev["signals"],
-                                "severity": ev.get("severity", "info"),
-                                "conditions": ev.get("conditions") or [],
-                                "logic": ev.get("logic") or "and",
-                            }
-                            for key in (
-                                "sector_kind", "sector_key", "sector_name",
-                                "sector_source_field", "sector_value", "sector_level",
-                                "window_change_pct", "coverage_ratio", "valid_count",
-                                "total_count", "up_count", "down_count", "leader",
-                                "abnormal_window", "abnormal_value", "abnormal_threshold",
-                                "abnormal_closeness",
-                            ):
-                                if key in ev:
-                                    alert[key] = ev[key]
-                            all_alerts.append(alert)
+                    all_alerts.extend(self._dispatch_rule_events(rule_events, engine))
 
             # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
             # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
@@ -1268,13 +1214,147 @@ class QuoteService:
                 # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
                 self._maybe_send_system_notifications(all_alerts)
 
-            # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
-            # 紧随系统通知, 同样静默降级不阻断主流程。
-            if rule_events:
-                self._maybe_send_webhook(rule_events, engine)
-
         except Exception as e:
             logger.warning("监控评估失败: %s", e)
+
+    def _dispatch_rule_events(self, rule_events: list[dict], engine) -> list[dict]:
+        """告警下发链: 落盘 alerts.jsonl + 转 SSE 格式 + Webhook。
+
+        从 ``_evaluate_monitors`` 尾部抽出来, 让港美独立 job
+        (``evaluate_hk_us_monitors``) 复用**同一条**下发链 —— 避免同一类告警
+        出现"两种通道"的分裂。返回 SSE 格式的 alert 列表 (广播由调用方决定
+        时机: A 股轮询在多轮评估合并后统一广播)。
+        """
+        if not rule_events:
+            return []
+        rule_events = self._format_extension_notifications(rule_events)
+        # 落盘到 alerts.jsonl
+        try:
+            from app.services import alert_store
+            alert_store.append_many(
+                self._app_state.repo.store.data_dir, rule_events,
+            )
+        except Exception as e:
+            logger.warning("告警落盘失败: %s", e)
+        # 转为 SSE 推送格式 (兼容旧 alert schema)
+        alerts: list[dict] = []
+        for ev in rule_events:
+            alert = {
+                "source": ev["source"],
+                "type": ev["type"],
+                "rule_id": ev.get("rule_id"),
+                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
+                "symbol": ev["symbol"],
+                "name": ev["name"],
+                "message": ev["message"],
+                "price": ev["price"],
+                "change_pct": ev["change_pct"],
+                "signals": ev["signals"],
+                "severity": ev.get("severity", "info"),
+                "conditions": ev.get("conditions") or [],
+                "logic": ev.get("logic") or "and",
+            }
+            for key in (
+                "sector_kind", "sector_key", "sector_name",
+                "sector_source_field", "sector_value", "sector_level",
+                "window_change_pct", "coverage_ratio", "valid_count",
+                "total_count", "up_count", "down_count", "leader",
+                "abnormal_window", "abnormal_value", "abnormal_threshold",
+                "abnormal_closeness",
+            ):
+                if key in ev:
+                    alert[key] = ev[key]
+            alerts.append(alert)
+        # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
+        # 紧随落盘, 同样静默降级不阻断主流程。
+        self._maybe_send_webhook(rule_events, engine)
+        return alerts
+
+    # ── 港美异动监控 (日线收盘口径) ────────────────────────────────────────
+    # 由 app/jobs/hk_us_monitor.py 在各市场日线同步之后独立触发, **不挂在 A 股
+    # 轮询上** —— 理由见 _evaluate_monitors 门控处的注释与本方法 docstring。
+
+    def _hk_us_monitor_gate(self, market: str, data_dir) -> tuple[bool, str | None]:
+        """该市场此刻能否按"日线收盘口径"评估异动 (两道 fail-closed 门控)。
+
+        1. **不在连续竞价时段**: 盘中当日会话未收盘, enriched parquet 最新日恒为
+           上一交易日, 此时评估等于拿 T-1 冒充当日收盘 —— 这正是上一批门控的
+           病根 (美股时段照跑, 但拿的是昨天的快照)。
+        2. **最新收盘日距该市场当天 ≤ 容差** (``_MARKET_DAILY_STALENESS_DAYS``):
+           同步失败/停更时不基于陈旧快照告警。
+           ⚠️ **不用"日期相等"判据**: US job 在北京 08:35 触发 = 美东前一日
+           20:35, 周一跑时 ``get_profile("US").today()`` 是周日, 而刚同步写入的
+           是上周五的会话 ⇒ 等值判据会让周五那一场**永远不被评估** (每 5 场
+           丢 1 场)。容差判据天然覆盖这个时差。
+        """
+        from app.jobs.daily_pipeline import _MARKET_DAILY_STALENESS_DAYS
+        from app.markets import registry as _registry
+        from app.tickflow.market_daily import market_enriched_as_of
+
+        if _registry.is_continuous_trading(market):
+            return (
+                False,
+                f"{market} 处于连续竞价时段, 当日会话未收盘 (parquet 仍为上一交易日)",
+            )
+        as_of = market_enriched_as_of(data_dir, market)
+        if as_of is None:
+            return False, f"{market} enriched 快照不可用 (无该市场分区或读取失败)"
+        staleness = (_registry.get_profile(market).today() - as_of).days
+        limit = _MARKET_DAILY_STALENESS_DAYS.get(market, 3)
+        if staleness > limit:
+            return False, f"{market} 最新收盘日 {as_of} 已落后 {staleness} 天 (> {limit})"
+        return True, None
+
+    def evaluate_hk_us_monitors(self, market: str) -> dict:
+        """按日线收盘口径评估**单个市场**的港美异动监控 (外部 job 入口)。
+
+        返回 ``{"market", "status", "events", "alerts", "reason"}``;
+        status ∈ ok / skipped / failed。任何异常都在这里收敛 —— job 侧只记录。
+
+        为什么独立成入口: 港美异动快照 (``build_hk_us_abnormal_overview``) 只读
+        enriched parquet, 不消费轮询拉回的实时行情 (A 股侧 ``build_overview`` 才
+        传 quote_service 做实时叠加), 而港美 parquet 一天只写一次 (日线同步
+        HK 18:00 / US 08:00 Asia/Shanghai)。所以它本质就是日线收盘口径, 挂在各
+        市场同步之后, 而不是跟着 A 股轮询走。
+        """
+        result: dict = {"market": market, "status": "skipped", "events": 0,
+                        "alerts": 0, "reason": None}
+        try:
+            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+            if engine is None or engine.rule_count == 0:
+                result["reason"] = "监控引擎未就绪"
+                return result
+            if self._repo is None or not engine.has_rule_type("abnormal"):
+                result["reason"] = "未启用异动规则或无 repo"
+                return result
+            from app.config import settings as _settings
+
+            # 优先用本服务绑定的数据目录 (生产与 settings 同源; 测试可注入 tmp_path)
+            data_dir = getattr(getattr(self._repo, "store", None), "data_dir", None) or _settings.data_dir
+            allowed, reason = self._hk_us_monitor_gate(market, data_dir)
+            if not allowed:
+                result["reason"] = reason
+                return result
+            from app.services.hk_us_abnormal import build_hk_us_abnormal_overview
+
+            snapshot = build_hk_us_abnormal_overview(
+                data_dir, market,
+                min_closeness=engine.min_abnormal_closeness(),
+                limit=1000,
+            )
+            rule_events = engine.evaluate_abnormal(list(snapshot.get("rows") or []))
+            alerts = self._dispatch_rule_events(rule_events, engine)
+            if alerts:
+                self._enrich_alerts_ext(alerts)
+                self._broadcast_alerts(alerts)
+                logger.info("港美异动监控完成 (%s): %d 条通知", market, len(alerts))
+                self._maybe_send_system_notifications(alerts)
+            result.update(status="ok", events=len(rule_events), alerts=len(alerts))
+            return result
+        except Exception as e:
+            logger.warning("港美异动监控评估失败 (%s): %s", market, e)
+            result.update(status="failed", reason=str(e))
+            return result
 
     def _format_extension_notifications(self, events: list[dict]) -> list[dict]:
         """Apply optional copy formatters after evaluation and before every output channel."""

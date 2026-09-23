@@ -218,7 +218,18 @@ def _make_service(tmp_path: Path, engine: _GateEngine) -> Any:
     svc._inject_sealed_vol = lambda df, d: df
     svc._format_extension_notifications = lambda events: events
     svc.notify_strategy_results_updated = lambda: None
+    # 下发链 (港美独立入口也走同一条): 桩掉外发通道, 只验证是否到达
+    svc._broadcast_alerts = lambda alerts: None
+    svc._maybe_send_system_notifications = lambda alerts: None
+    svc._maybe_send_webhook = lambda events, engine: None
     return svc
+
+
+def _write_enriched(tmp_path: Path, symbol: str, days: list[date]) -> None:
+    """造 enriched 分区 (港美门控只扫 symbol/date 两列)。"""
+    path = tmp_path / "kline_hk_us_enriched" / f"symbol={symbol}" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": [symbol] * len(days), "date": days}).write_parquet(path)
 
 
 def _pin_hk_us_snapshots(monkeypatch, applied: list[str]) -> None:
@@ -242,46 +253,183 @@ def _pin_hk_us_snapshots(monkeypatch, applied: list[str]) -> None:
 MON = date(2026, 9, 21)  # 周一
 
 
-def test_us_market_hours_hk_us_evaluated_cn_skipped(monkeypatch, tmp_path):
-    """核心断言: 美东 10:00 (A 股闭市) 时港美异动段执行、A 股段不执行。
+def test_a_share_polling_no_longer_builds_hk_us_snapshots(monkeypatch, tmp_path):
+    """B3 迁移: 港美异动段已从 A 股轮询摘出 —— 任何时钟下都不再由它构建。
 
-    变异锚: 把港美门控改回 A 股口径 (cn_continuous) → 本条红。
+    原两条时段断言 ("美东 10:00 → 构建 US"、"HK 盘中 → 只构建 HK") 随判据
+    作废: 港美是日线收盘口径, 由独立 job 触发 (见下列 evaluate_hk_us_monitors
+    用例)。本条守住"摘干净"这件事本身 —— 变异锚: 把港美段塞回
+    _evaluate_monitors → 本条红。
     """
-    # 美东周一 10:00 = 北京 22:00 (夏令时 EDT=UTC-4) —— A 股闭市、美股盘中
+    # 场景 1: 美东 10:00 (美股盘中) —— 旧门控会放行 US
     _pin_market_clocks(
         monkeypatch,
-        cn=datetime(2026, 9, 21, 22, 0),   # 北京 22:00 → CN 闭市
-        hk=datetime(2026, 9, 21, 22, 0),   # 香港 22:00 → HK 闭市
-        us=datetime(2026, 9, 21, 10, 0),   # 美东 10:00 → US 盘中
+        cn=datetime(2026, 9, 21, 22, 0),
+        hk=datetime(2026, 9, 21, 22, 0),
+        us=datetime(2026, 9, 21, 10, 0),
+    )
+    applied: list[str] = []
+    _pin_hk_us_snapshots(monkeypatch, applied)
+    svc = _make_service(tmp_path, _GateEngine())
+    svc._evaluate_monitors(pl.DataFrame(), None)
+    assert applied == [], f"A 股轮询不得再构建港美快照; 实际 {applied}"
+
+    # 场景 2: HK 盘中 + US 闭市 —— 旧门控会放行 HK
+    _pin_market_clocks(
+        monkeypatch,
+        cn=datetime(2026, 9, 21, 10, 0),
+        hk=datetime(2026, 9, 21, 10, 0),
+        us=datetime(2026, 9, 21, 22, 0),
+    )
+    applied.clear()
+    svc = _make_service(tmp_path, _GateEngine())
+    svc._evaluate_monitors(pl.DataFrame(), None)
+    assert applied == [], f"A 股轮询不得再构建港美快照; 实际 {applied}"
+
+
+# ── 港美独立入口 (日线收盘口径) ────────────────────────────────────────────
+# 时钟口径: 北京 08:35 (US job) = 美东前一日 20:35; 北京 18:35 (HK job)。
+# 周一 08:35 北京 ⇒ 美东周日 20:35, profile.today() = 周日, 而刚同步写入的是
+# **上周五**的会话 ⇒ 门控用"落后天数 ≤ 容差"而非日期相等 (等值判据会每 5 场丢 1 场)。
+MON = date(2026, 9, 21)      # 周一
+FRI = date(2026, 9, 18)      # 上周五 (本批同步写入的会话)
+SUN = date(2026, 9, 20)      # 周日 (周一 08:35 北京对应的美东日历日)
+
+
+def test_hk_us_monitor_allows_after_session_close(monkeypatch, tmp_path):
+    """核心可分性 A: 美股**已收盘** + as_of 在容差内 → 新门控放行。
+
+    同时断言 is_continuous_trading("US") is False —— 即**旧门控在此刻必然拒绝**,
+    两条判据在此场景上正交可分 (不是同一个条件的两种写法)。
+    """
+    _write_enriched(tmp_path, "AAPL.US", [FRI])
+    _pin_market_clocks(
+        monkeypatch,
+        cn=datetime(2026, 9, 21, 8, 35),    # 北京 08:35 (A 股闭市)
+        hk=datetime(2026, 9, 21, 8, 35),
+        us=datetime(2026, 9, 20, 20, 35),   # 美东周日 20:35 → 非盘中
+    )
+    assert registry.is_continuous_trading("US") is False, "场景前提: 旧门控此刻会拒绝"
+    applied: list[str] = []
+    _pin_hk_us_snapshots(monkeypatch, applied)
+
+    svc = _make_service(tmp_path, _GateEngine())
+    result = svc.evaluate_hk_us_monitors("US")
+
+    assert result["status"] == "ok", result
+    assert applied == ["US"], f"同步后 (会话已收盘) 必须评估 US; 实际 {applied}"
+
+
+def test_hk_us_monitor_rejects_intraday_session(monkeypatch, tmp_path):
+    """核心可分性 B: 美股**盘中** (as_of 恒为 T-1) → 新门控必须拒绝。
+
+    这条是防退回旧设计的关键: 旧门控在美股盘中会放行 (is_continuous_trading
+    = True), 但 parquet 里根本没有当日会话, 评估等于拿 T-1 冒充当日收盘。
+    """
+    _write_enriched(tmp_path, "AAPL.US", [FRI])   # 盘中 parquet 仍是上周五
+    _pin_market_clocks(
+        monkeypatch,
+        cn=datetime(2026, 9, 21, 22, 0),
+        hk=datetime(2026, 9, 21, 22, 0),
+        us=datetime(2026, 9, 21, 10, 0),   # 美东周一 10:00 → 盘中
+    )
+    assert registry.is_continuous_trading("US") is True, "场景前提: 旧门控此刻会放行"
+    applied: list[str] = []
+    _pin_hk_us_snapshots(monkeypatch, applied)
+
+    svc = _make_service(tmp_path, _GateEngine())
+    result = svc.evaluate_hk_us_monitors("US")
+
+    assert result["status"] == "skipped", result
+    assert applied == [], f"美股盘中 (parquet=T-1) 不得评估; 实际 {applied}"
+    assert "连续竞价时段" in (result["reason"] or ""), result
+
+
+def test_hk_us_monitor_rejects_stale_snapshot(monkeypatch, tmp_path):
+    """守卫生效性: 会话已收盘但快照落后超过容差 (US=3 天) → 拒绝, 不基于陈旧数据告警。"""
+    _write_enriched(tmp_path, "AAPL.US", [date(2026, 9, 14)])   # 落后 6 天
+    _pin_market_clocks(
+        monkeypatch,
+        cn=datetime(2026, 9, 21, 8, 35),
+        hk=datetime(2026, 9, 21, 8, 35),
+        us=datetime(2026, 9, 20, 20, 35),
     )
     applied: list[str] = []
     _pin_hk_us_snapshots(monkeypatch, applied)
 
-    engine = _GateEngine()
-    svc = _make_service(tmp_path, engine)
-    svc._evaluate_monitors(pl.DataFrame(), None)
+    svc = _make_service(tmp_path, _GateEngine())
+    result = svc.evaluate_hk_us_monitors("US")
 
-    assert applied == ["US"], (
-        f"美股盘中必须构建 US 异动快照且跳过闭市的 HK; 实际 {applied}"
-    )
+    assert result["status"] == "skipped", result
+    assert applied == [], f"陈旧快照不得评估; 实际 {applied}"
+    assert "落后" in (result["reason"] or ""), result
 
 
-def test_cn_hours_only_cn_abnormal_no_hk_us_leak(monkeypatch, tmp_path):
-    """防串味: A 股开市/港美闭市时钟下, 港美段不执行 (防'全局 or'反向错误)。"""
+def test_hk_us_monitor_hk_runs_after_close(monkeypatch, tmp_path):
+    """HK job 时刻 (18:35, 已收盘 + as_of 为当日) → 放行; 另一市场不串味。"""
+    _write_enriched(tmp_path, "00700.HK", [MON])
     _pin_market_clocks(
         monkeypatch,
-        cn=datetime(2026, 9, 21, 10, 0),   # 北京 10:00 → CN 盘中
-        hk=datetime(2026, 9, 21, 10, 0),   # 香港 10:00 → HK 也盘中 (重叠区)
-        us=datetime(2026, 9, 21, 22, 0),   # 美东 22:00 → US 闭市
+        cn=datetime(2026, 9, 21, 18, 35),
+        hk=datetime(2026, 9, 21, 18, 35),   # 18:35 ∉ 9:30-16:00 → 已收盘
+        us=datetime(2026, 9, 21, 6, 35),
     )
     applied: list[str] = []
     _pin_hk_us_snapshots(monkeypatch, applied)
 
-    engine = _GateEngine()
-    svc = _make_service(tmp_path, engine)
-    svc._evaluate_monitors(pl.DataFrame(), None)
+    svc = _make_service(tmp_path, _GateEngine())
+    result = svc.evaluate_hk_us_monitors("HK")
 
-    assert applied == ["HK"], f"HK 盘中只跑 HK, 闭市的 US 不得评估; 实际 {applied}"
+    assert result["status"] == "ok", result
+    assert applied == ["HK"], f"只评估请求的市场; 实际 {applied}"
+
+
+def test_run_hk_us_monitor_job_dispatches_to_service(monkeypatch):
+    """job → service 真实调用点: run_hk_us_monitor 必须把 market 透传给入口方法。"""
+    from app.jobs import hk_us_monitor as job
+
+    seen: list[str] = []
+
+    class _FakeService:
+        def evaluate_hk_us_monitors(self, market: str) -> dict:
+            seen.append(market)
+            return {"market": market, "status": "ok", "events": 0, "alerts": 0}
+
+    monkeypatch.setattr(job, "_quote_service", lambda: _FakeService())
+    result = job.run_hk_us_monitor("US")
+
+    assert seen == ["US"], f"job 必须把 market 透传给 quote_service; 实际 {seen}"
+    assert result["status"] == "ok"
+
+
+def test_register_hk_us_monitor_jobs_uses_sync_aligned_cron():
+    """调度注册: HK 18:35 / US 08:35 mon-fri Asia/Shanghai (对齐日线同步 + 缓冲)。"""
+    from apscheduler.triggers.cron import CronTrigger
+
+    from app.jobs import hk_us_monitor as job
+
+    class _StubScheduler:
+        def __init__(self) -> None:
+            self.jobs: dict[str, dict] = {}
+
+        def add_job(self, func, trigger, id, misfire_grace_time, replace_existing):
+            self.jobs[id] = {"trigger": trigger, "func": func}
+
+    scheduler = _StubScheduler()
+    job.register_hk_us_monitor_jobs(scheduler)
+
+    assert set(scheduler.jobs) == {job.HK_US_MONITOR_JOB_ID_HK, job.HK_US_MONITOR_JOB_ID_US}
+    assert isinstance(scheduler.jobs[job.HK_US_MONITOR_JOB_ID_HK]["trigger"], CronTrigger)
+    fields = {
+        job_id: {field.name: str(field) for field in payload["trigger"].fields}
+        for job_id, payload in scheduler.jobs.items()
+    }
+    assert fields[job.HK_US_MONITOR_JOB_ID_HK]["hour"] == "18"
+    assert fields[job.HK_US_MONITOR_JOB_ID_HK]["minute"] == "35"
+    assert fields[job.HK_US_MONITOR_JOB_ID_US]["hour"] == "8"
+    assert fields[job.HK_US_MONITOR_JOB_ID_US]["minute"] == "35"
+    # 与港美日线同步同一日历 + 同一时区 (Asia/Shanghai)
+    assert str(scheduler.jobs[job.HK_US_MONITOR_JOB_ID_US]["trigger"].timezone) == "Asia/Shanghai"
 
 
 def test_all_closed_nothing_evaluated(monkeypatch, tmp_path):

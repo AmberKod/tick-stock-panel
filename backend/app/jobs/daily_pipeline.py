@@ -1636,6 +1636,16 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     except Exception as e:
         logger.warning("hotspot sync job registration failed (soft): %s", e)
 
+    # 港美异动监控 (日线收盘口径): 挂在各市场日线同步之后 (HK 18:35 / US 08:35),
+    # 不跟 A 股轮询 —— 港美异动快照只读 enriched parquet, 一天只写一次。
+    # 注册失败只 warning: 监控是旁路, 不得阻断启动。
+    try:
+        from app.jobs.hk_us_monitor import register_hk_us_monitor_jobs
+
+        register_hk_us_monitor_jobs(scheduler)
+    except Exception as e:
+        logger.warning("hk_us monitor job registration failed (soft): %s", e)
+
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
                 inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],

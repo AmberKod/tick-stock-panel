@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -290,6 +290,43 @@ def adapt_enriched_for_write(frame: pl.DataFrame, root: Path, symbol: str) -> pl
     if legacy_cols is None:
         return frame
     return downgrade_enriched(frame, legacy_cols)
+
+
+def market_enriched_as_of(data_dir: Path, market: str) -> date | None:
+    """该市场 enriched 分区的最新交易日 (全市场 max), 无数据/读失败返回 None。
+
+    legacy 分区的 ``date`` 是 Datetime('us'), 统一 cast 成 Date 后取 max, 与
+    ``hk_us_overview_builder`` 的 as_of 同口径。**不可用不计入**: 读不到就返回
+    None 让调用方 fail-closed, 不拿别的日期冒充"该市场最新收盘日"。
+
+    用途: 港美异动监控的 staleness 门控 (日线收盘口径, 见
+    ``quote_service.evaluate_hk_us_monitors``)。
+    """
+    root = Path(data_dir) / HK_US_ENRICHED_DIR
+    if not root.exists():
+        return None
+    suffix = f".{str(market).strip().upper()}"
+    try:
+        frame = (
+            pl.scan_parquet(
+                str(root / "symbol=*" / "part.parquet"),
+                # 跨分区 schema 可能由不同源写入 (volume Int64/Float64), 同
+                # overview 侧一样允许整型向浮点兼容提升
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            .filter(pl.col("symbol").cast(pl.String).str.ends_with(suffix))
+            .select(pl.col("date").cast(pl.Date, strict=False).max().alias("latest"))
+            .collect()
+        )
+    except Exception as exc:
+        logger.warning("enriched as_of 扫描失败 (%s, %s): %s", root, market, exc)
+        return None
+    if frame.is_empty():
+        return None
+    value = frame["latest"][0]
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
 
 
 def write_market_daily_symbol(data_dir: Path, symbol: str, frame: pl.DataFrame) -> Path | None:
