@@ -729,3 +729,77 @@ class TestScheduledFullHistorySwitch:
         assert result["status"] == "ok"
         assert captured["mode"] == "full"
         assert captured["start_date"].date() == date(1998, 6, 1)
+
+
+class TestH6FullScanDoesNotCrash:
+    """H6 侧真有分区时, 全量口径 (sample=None) 不得崩。
+
+    回归场景 (2026-09-24 实测): 补拉首次把港股写进 ``kline_daily`` 后,
+    H6 侧从 0 分区变成 1393 个, ``_partition_latest_distribution`` 走到
+    ``len(parts) // sample`` —— 而 ``_h6_latest_distribution`` 默认传
+    ``sample=None`` ⇒ ``TypeError: unsupported operand type(s) for //:
+    'int' and 'NoneType'``。
+
+    灾前测试全绿是因为测试里 H6 侧恒为 **0 分区**, 在崩溃那行之前就早返回了
+    —— 又一次「单元假数据测不出真实形态」。本类必须用**非空的** H6 目录。
+    """
+
+    def test_full_scan_counts_every_partition(self, tmp_path: Path) -> None:
+        """sample=None 应扫全部 120 个分区, 而不是抽样后的 30 个."""
+        for index in range(120):
+            _write_h6_partition(
+                tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)]
+            )
+        counts = daily_pipeline._partition_latest_distribution(
+            tmp_path / "kline_daily", "HK", sample=None
+        )
+        assert sum(counts.values()) == 120
+
+    def test_sampling_still_honours_sample_size(self, tmp_path: Path) -> None:
+        """sample=30 的历史语义不能被破坏."""
+        for index in range(120):
+            _write_h6_partition(
+                tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)]
+            )
+        counts = daily_pipeline._partition_latest_distribution(
+            tmp_path / "kline_daily", "HK", sample=30
+        )
+        assert sum(counts.values()) == 30
+
+    def test_partial_sync_with_populated_h6_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """真实形态: H6 侧有分区时 _market_partial_sync_pending 不得抛异常.
+
+        这是本次崩溃的**直接**复现路径 —— 灾前只要 H6 目录非空必炸。
+        """
+        for index in range(40):
+            _write_h6_partition(tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)])
+        for index in range(40):
+            _write_enriched_partition(
+                tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)]
+            )
+        # 不抛异常即为通过; 同时断言它给出了确定的布尔结论
+        assert daily_pipeline._market_partial_sync_pending(tmp_path, "HK") is False
+
+    def test_catchup_decision_with_populated_h6_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """上层 decision 同理: H6 侧有分区时不得炸, 且给出明确 reason."""
+        for index in range(40):
+            _write_h6_partition(tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)])
+        for index in range(40):
+            _write_enriched_partition(
+                tmp_path, f"00{index:03d}.HK", [date(2026, 9, 24)]
+            )
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", datetime(2026, 9, 24, 20, 0, 0)
+        )
+        assert decision.reason in {
+            daily_pipeline._CATCHUP_REASON_FRESH,
+            daily_pipeline._CATCHUP_REASON_STALE,
+            daily_pipeline._CATCHUP_REASON_PARTIAL_SYNC,
+            daily_pipeline._CATCHUP_REASON_BULK_LAG,
+            daily_pipeline._CATCHUP_REASON_BEFORE_WINDOW,
+            daily_pipeline._CATCHUP_REASON_NO_DATA,
+        }

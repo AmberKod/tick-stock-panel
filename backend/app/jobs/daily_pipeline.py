@@ -1273,9 +1273,12 @@ def _partition_date_norm(value: object) -> date | None:
 
 
 def _partition_latest_distribution(
-    base: Path, market: str, sample: int = 30
+    base: Path, market: str, sample: int | None = 30
 ) -> Counter[date]:
     """扫 {base}/symbol=*.<HK|US>/part.parquet, 统计各分区 max(date) 的分布。
+
+    ``sample`` 为 ``None`` 时**全量**扫描 (判据口径); 为正整数时按步长抽样
+    (仅给 ``_h6_latest_by_sampling`` 保留历史语义)。
 
     返回 {日期: 该日期作为分区最新日的分区数}; 空 Counter 表示目录不存在或
     全部读取失败 (如全新部署)。逐文件只读 footer 级 max(date), 成本可控。
@@ -1286,8 +1289,11 @@ def _partition_latest_distribution(
     parts = sorted(base.glob(f"symbol=*{suffix}/part.parquet"))
     if not parts:
         return Counter()
-    step = max(1, len(parts) // sample)
-    picked = parts[::step][:sample]
+    if sample is None:
+        picked = parts
+    else:
+        step = max(1, len(parts) // sample)
+        picked = parts[::step][:sample]
 
     counts: Counter[date] = Counter()
     for path in picked:
