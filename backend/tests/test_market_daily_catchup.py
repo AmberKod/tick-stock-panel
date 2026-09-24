@@ -268,6 +268,145 @@ class TestRunCatchup:
         assert results == {}
 
 
+def _repo_for(data_dir: Path):
+    """构造只带 data_dir 的假仓储 (store.data_dir 是 catch-up 唯一用到的字段)。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
+
+
+def _never_run(monkeypatch) -> None:
+    """把补跑入口替换成"被调用即失败", 用于证明某情形下确实没触发补跑。"""
+
+    def _boom(repo, capset, market):  # pragma: no cover - 不应被调到
+        raise AssertionError(f"不应触发补跑: {market}")
+
+    monkeypatch.setattr(daily_pipeline, "_run_market_daily_scheduled", _boom)
+
+
+class TestNoDataNotDisguisedAsFresh:
+    """「无 H6 数据」与「已确认最新」必须走不同分支 (09-24 实测 fail-open 回归)。
+
+    缺陷原形: _market_daily_catchup_needed 在 _h6_latest_by_sampling 返回 None
+    时直接 return False, 与"数据确实最新"共用同一分支; run_market_daily_catchup
+    的 `if not results:` 随后打印 "港美 H6 均为最新, 无需补跑"。而当天真实场景
+    是 kline_daily 下一个 symbol=*.HK/.US 分区都没有 —— 等于把"压根没数据"
+    伪装成"均为最新", 直接违反 fail-closed 纪律。
+    """
+
+    # 与 TestRunCatchup 同口径: HK(18:30)/US(08:30) 窗口均已过, 与真实时钟解耦
+    _EVENING = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
+
+    # ① 数据目录不存在 (09-24 真实场景的等价最小复现)
+    def test_missing_data_dir_is_no_data_not_fresh(self, tmp_path: Path, caplog) -> None:
+        missing = tmp_path / "never_created"
+        decision = daily_pipeline._market_daily_catchup_decision(missing, "HK", self._EVENING)
+        assert decision.needed is False
+        assert decision.reason == "no_data"
+        assert decision.latest is None
+        # 裸 bool 口径仍保持 False (既有调用语义不变), 原因码由 decision 承载
+        assert daily_pipeline._market_daily_catchup_needed(missing, "HK", self._EVENING) is False
+
+    def test_missing_data_dir_warns_and_records_skip(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        _never_run(monkeypatch)
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path / "never_created"), None, now=self._EVENING
+            )
+        assert results == {
+            "HK": {"status": "skipped", "market": "HK", "reason": "no_data"},
+            "US": {"status": "skipped", "market": "US", "reason": "no_data"},
+        }
+        # 无数据不得再打印"均为最新" (那条日志正是缺陷本体)
+        assert "均为最新" not in caplog.text
+        assert "新鲜度不可判定" in caplog.text
+
+    # ② 有数据且最新 → 才允许"均为最新"措辞
+    def test_fresh_data_still_reported_as_fresh(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        today = date.today()
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=1)])
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=1)])
+        _never_run(monkeypatch)
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.reason == "fresh"
+        assert decision.latest == today - timedelta(days=1)
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path), None, now=self._EVENING
+            )
+        assert results == {}
+        assert "均为最新" in caplog.text
+        assert "新鲜度不可判定" not in caplog.text
+
+    # ③ 有数据且落后 → 照旧触发补跑 (不受本次改动影响)
+    def test_stale_data_still_triggers(self, tmp_path: Path, monkeypatch) -> None:
+        today = date.today()
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+
+        called: list[str] = []
+
+        def _fake_scheduled(repo, capset, market):
+            called.append(market)
+            return {"status": "ok", "market": market}
+
+        monkeypatch.setattr(daily_pipeline, "_run_market_daily_scheduled", _fake_scheduled)
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.needed is True
+        assert decision.reason == "stale"
+        results = daily_pipeline.run_market_daily_catchup(
+            _repo_for(tmp_path), None, now=self._EVENING
+        )
+        assert called == ["HK", "US"]
+        assert results["HK"]["status"] == "ok"
+        assert results["US"]["status"] == "ok"
+
+    # ④ universe 缺失 → 同样只告警不补跑
+    def test_universe_missing_only_warns(self, tmp_path: Path, monkeypatch, caplog) -> None:
+        """instruments/{hk,us}_instruments.parquet 都不存在时也不补跑。
+
+        依据: universe 不可得时补跑入口直接报错 (见下一条用例), 只会产出失败
+        job 与噪声, 拿不到数据。故 no_data 一律只告警, 并把该市场显式剔除出
+        "已确认最新"的分母。
+        """
+        import logging
+
+        instruments = tmp_path / "instruments"
+        instruments.mkdir(parents=True, exist_ok=True)  # 目录在, 快照文件缺失
+        assert not (instruments / "hk_instruments.parquet").exists()
+        assert not (instruments / "us_instruments.parquet").exists()
+        _never_run(monkeypatch)
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path), None, now=self._EVENING
+            )
+        assert results["HK"]["reason"] == "no_data"
+        assert results["US"]["reason"] == "no_data"
+        assert "均为最新" not in caplog.text
+
+    def test_scheduled_fails_when_universe_unavailable(self, tmp_path: Path, monkeypatch) -> None:
+        """无 universe 时补跑入口报错而非空转 —— "只告警不补跑"的实测依据。"""
+        from app.tickflow.policy import CapabilitySet
+
+        def _boom(data_dir, *, allow_demo=False, **_kwargs):
+            raise RuntimeError("港股全量 instruments 获取失败，拒绝写入 demo 快照")
+
+        monkeypatch.setattr("app.services.hk_data_adapter.sync_hk_instruments", _boom)
+        result = daily_pipeline._run_market_daily_scheduled(
+            _repo_for(tmp_path), CapabilitySet(), "HK",
+        )
+        assert result["status"] == "failed"
+        assert "instruments" in result["error"]
+
+
 class TestScheduledFullHistorySwitch:
     """full_history 参数映射: 默认 incremental/365d, 显式 full/1998-06-01。
 

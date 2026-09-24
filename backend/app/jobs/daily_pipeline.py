@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
 
@@ -1367,21 +1368,76 @@ _MARKET_DAILY_CATCHUP_AFTER = {"HK": (18, 30), "US": (8, 30)}
 # 超长假期 (如春节) 会多触发一次 incremental 空转, 框架幂等无害。
 _MARKET_DAILY_STALENESS_DAYS = {"HK": 4, "US": 3}
 
+# 补跑判定结论的原因码。needed=False 时必须能区分两种截然不同的状态:
+#   fresh    —— 已确认新鲜 (有数据且未落后), 可安全地"无需补跑"
+#   no_data  —— 新鲜度不可判定 (抽样不到任何 H6 分区), 绝不能混同 fresh
+# 09-24 实测: 两者曾共用 return False + 同一句 INFO "港美 H6 均为最新",
+# 而当时 kline_daily 下根本没有 symbol=*.HK/.US 分区 —— "压根没数据"被
+# 打印成"均为最新", 违反 fail-closed 纪律。故判定必须携带原因码。
+_CATCHUP_REASON_BEFORE_WINDOW = "before_window"
+_CATCHUP_REASON_NO_DATA = "no_data"
+_CATCHUP_REASON_FRESH = "fresh"
+_CATCHUP_REASON_STALE = "stale"
+_CATCHUP_REASON_PARTIAL_SYNC = "partial_sync"
 
-def _market_daily_catchup_needed(data_dir: Path, market: str, now: datetime) -> bool:
-    """判定某市场是否需要启动补跑: 调度窗口已过 + (日期落后超容差 或 部分同步)。"""
+
+@dataclass(frozen=True)
+class MarketCatchupDecision:
+    """港美启动补跑判定结果 (needed + 原因码 + 采样到的最新日)。
+
+    ``latest is None`` 表示新鲜度不可判定 (无 H6 分区或全部读取失败),
+    此时 reason 必须是 no_data —— 不可用状态要显式声明并剔除出"已确认最新"
+    的分母, 不能被静默当成"数据 OK"。
+    """
+
+    needed: bool = False
+    reason: str = _CATCHUP_REASON_FRESH
+    latest: date | None = None
+
+
+def _market_daily_catchup_decision(
+    data_dir: Path, market: str, now: datetime
+) -> MarketCatchupDecision:
+    """判定某市场补跑结论: 调度窗口已过 + (日期落后超容差 或 部分同步)。
+
+    返回结构而非裸 bool: "不需要补跑"必须可区分「已确认新鲜」与「新鲜度
+    不可判定」。后者不触发补跑 (见 run_market_daily_catchup 的权衡注释),
+    但必须由调用方显式告警, 不得计入"均为最新"。
+    """
     hour, minute = _MARKET_DAILY_CATCHUP_AFTER.get(market, (99, 0))
     if (now.hour, now.minute) < (hour, minute):
-        return False
+        return MarketCatchupDecision(
+            needed=False, reason=_CATCHUP_REASON_BEFORE_WINDOW, latest=None
+        )
     latest = _h6_latest_by_sampling(data_dir, market)
     if latest is None:
-        return False
+        # 无 H6 分区 = 新鲜度不可判定 (全新部署 / 该市场日 K 未落 kline_daily)。
+        # 不可用 ≠ 最新: 单独走 no_data 分支, 由调用方告警并剔除出分母。
+        return MarketCatchupDecision(
+            needed=False, reason=_CATCHUP_REASON_NO_DATA, latest=None
+        )
     staleness = (now.date() - latest).days
     if staleness > _MARKET_DAILY_STALENESS_DAYS[market]:
-        return True
+        return MarketCatchupDecision(
+            needed=True, reason=_CATCHUP_REASON_STALE, latest=latest
+        )
     # 日期不落后 ≠ 同步完整: 最新日可能只有零散标的到位 (服务错开调度窗口时
     # 的典型残留)。此时同样要补跑, 否则该市场长期停在"少数标的撑起来的日期"。
-    return _market_partial_sync_pending(data_dir, market)
+    if _market_partial_sync_pending(data_dir, market):
+        return MarketCatchupDecision(
+            needed=True, reason=_CATCHUP_REASON_PARTIAL_SYNC, latest=latest
+        )
+    return MarketCatchupDecision(
+        needed=False, reason=_CATCHUP_REASON_FRESH, latest=latest
+    )
+
+
+def _market_daily_catchup_needed(data_dir: Path, market: str, now: datetime) -> bool:
+    """判定某市场是否需要启动补跑 (裸 bool 口径, 保留给既有调用/测试)。
+
+    原因码见 _market_daily_catchup_decision; 需要区分 no_data 时请直接用它。
+    """
+    return _market_daily_catchup_decision(data_dir, market, now).needed
 
 
 def _provider_cooling_down(market: str) -> bool:
@@ -1415,11 +1471,32 @@ def run_market_daily_catchup(
     from zoneinfo import ZoneInfo
 
     results: dict = {}
+    skip_reasons: dict[str, str] = {}
     if now is None:
         now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     for market in ("HK", "US"):
         try:
-            if not _market_daily_catchup_needed(repo.store.data_dir, market, now):
+            decision = _market_daily_catchup_decision(repo.store.data_dir, market, now)
+            if decision.reason == _CATCHUP_REASON_NO_DATA:
+                # 不触发补跑的权衡 (有实测依据): ① 港美日 K 落盘目录是
+                # kline_hk_us_enriched (hk_data_adapter.sync_hk_daily_to_enriched),
+                # 从来不写 kline_daily/symbol=*.HK|.US —— 09-24 实测该部署
+                # kline_daily 下 HK/US 分区数为 0 (enriched 侧却有 2798 个),
+                # 即一旦对 no_data 触发补跑, 判据永远不会转绿, 每次启动都会
+                # 全量刷 universe + 365 天增量。② universe 缺失时补跑直接报错:
+                # US 实测 load_market_universe 抛 UniverseUnavailableError
+                # ("US instruments 快照不存在"), 只会产生失败的 job。
+                # 故只告警、不补跑, 但必须显式声明为不可用, 绝不写成"最新"。
+                logger.warning(
+                    "market_daily catchup: %s 无 H6 数据 (kline_daily/symbol=*.%s 无分区), "
+                    "新鲜度不可判定 —— 未启动补跑, 该市场不计入'已确认最新'",
+                    market, market,
+                )
+                results[market] = {"status": "skipped", "market": market,
+                                   "reason": _CATCHUP_REASON_NO_DATA}
+                continue
+            if not decision.needed:
+                skip_reasons[market] = decision.reason
                 continue
             if _provider_cooling_down(market):
                 logger.info(
@@ -1429,12 +1506,26 @@ def run_market_daily_catchup(
                 results[market] = {"status": "deferred", "market": market,
                                    "reason": "provider_cooling_down"}
                 continue
-            logger.info("market_daily catchup: %s H6 数据落后, 启动补跑", market)
+            logger.info(
+                "market_daily catchup: %s 判定需补跑 (%s), 启动补跑",
+                market, decision.reason,
+            )
             results[market] = _run_market_daily_scheduled(repo, capset, market)
         except Exception:
             logger.exception("market_daily catchup failed for %s", market)
     if not results:
-        logger.info("market_daily catchup: 港美 H6 均为最新, 无需补跑")
+        # 只有全部市场都被判定为"已确认新鲜"时才允许用"均为最新"措辞;
+        # 混有 before_window 等其他原因时如实列出, 避免再次伪装。
+        if skip_reasons and all(
+            reason == _CATCHUP_REASON_FRESH for reason in skip_reasons.values()
+        ):
+            logger.info("market_daily catchup: 港美 H6 均为最新, 无需补跑")
+        else:
+            logger.info(
+                "market_daily catchup: 港美 H6 无需补跑 (%s)",
+                ", ".join(f"{name}={reason}" for name, reason in skip_reasons.items())
+                or "无市场",
+            )
     return results
 
 
@@ -1490,6 +1581,15 @@ def run_daily_pipeline_catchup(
         now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     try:
         if not _cn_catchup_needed(repo.store.data_dir, now):
+            # _cn_catchup_needed 对"无数据"是 return True (fail-closed, 交给管道
+            # 自己建基线), 不存在港美那种 None→False 伪装; 但周末/窗口未过时
+            # 会在"压根没数据"的情况下同样落到这里, 此时如实告警, 不写成"无需补跑"。
+            if _cn_latest_daily_date(repo.store.data_dir) is None:
+                logger.warning(
+                    "daily_pipeline catchup: A 股日 K 无 date= 分区, 新鲜度不可判定 "
+                    "(周末或管道窗口未过, 本次不补跑)"
+                )
+                return {"status": "skipped", "reason": "no_data"}
             logger.info("daily_pipeline catchup: A 股日 K 无需补跑")
             return {"status": "skipped"}
         logger.info("daily_pipeline catchup: A 股日 K 落后, 启动补跑")

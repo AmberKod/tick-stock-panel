@@ -89,6 +89,25 @@ def test_catchup_runs_without_any_daily_data(tmp_path, cn_repo):
     assert "pipeline" in calls
 
 
+def test_catchup_weekend_without_data_warns_instead_of_ok(tmp_path, cn_repo, caplog):
+    """周末 + 完全无日 K: 不补跑, 但必须告警 (不得写成"无需补跑")。
+
+    与港美同源的伪装风险: _cn_catchup_needed 对无数据是 return True
+    (fail-closed, 交给管道建基线), 周末分支却先于数据检查返回 False,
+    于是"压根没数据"也会打印"A 股日 K 无需补跑"。这里锁定告警口径。
+    """
+    import logging
+
+    repo, calls = cn_repo
+    with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+        result = daily_pipeline.run_daily_pipeline_catchup(repo, None, now=datetime(2026, 9, 19, 18, 0))  # 周六
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no_data"
+    assert not calls
+    assert "无需补跑" not in caplog.text
+    assert "新鲜度不可判定" in caplog.text
+
+
 def test_catchup_failure_is_silent(tmp_path, cn_repo, monkeypatch):
     repo, _ = cn_repo
     _write_day(repo.store.data_dir, date(2026, 9, 11))
