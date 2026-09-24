@@ -1322,14 +1322,88 @@ def _enriched_latest_distribution(
 
 
 def _h6_latest_by_sampling(data_dir: Path, market: str, sample: int = 30) -> date | None:
-    """抽样港美 H6 分区取 max(date) 的众数, 作为该市场新鲜度的轻量判定。
+    """抽样港美 H6 分区取 max(date) 的众数, 作为该市场新鲜度的判据之一。
 
-    返回 None 表示无分区或全部读取失败 (如全新部署), 不触发 catch-up。
+    返回 None 表示该侧无分区或全部读取失败 (如全新部署) —— 单侧不可用不等于
+    "无数据": 完整判据见 _market_daily_latest_date (H6 ∪ enriched 双路),
+    只有双侧都取不到才落 no_data。
     """
     counts = _h6_latest_distribution(data_dir, market, sample=sample)
     if not counts:
         return None
     return counts.most_common(1)[0][0]
+
+
+def _enriched_latest_by_scan(data_dir: Path, market: str) -> date | None:
+    """扫 enriched 全量分区取 per-symbol 最新日的众数, 作为该市场新鲜度判据。
+
+    直接复用 ``scripts.repair_hk_stale.scan_latest_dates`` (生产已验证):
+    它用 ``pl.ScanCastOptions(integer_cast="allow-float")`` 处理跨分区混 schema
+    (新浪 volume=Float64 / 兜底源 Int64), 按 ``_market_suffix`` 过滤 .HK/.US,
+    且遵循「不可用不计入分母」—— 目录不存在/读失败一律返回空表, 不拿空结果
+    冒充"没有 stale"或"已最新"。
+
+    返回 None = 该侧不可用 (不可用 ≠ 最新, 由双路判据决定是否落 no_data)。
+    """
+    try:
+        from scripts.repair_hk_stale import scan_latest_dates
+    except Exception:
+        logger.warning("enriched 扫描不可用: scripts.repair_hk_stale 导入失败", exc_info=True)
+        return None
+    try:
+        frame = scan_latest_dates(data_dir, market)
+    except Exception:
+        logger.warning("enriched 扫描失败 (market=%s)", market, exc_info=True)
+        return None
+    if frame.is_empty():
+        return None
+    counts: Counter[date] = Counter(frame.get_column("latest_date").to_list())
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
+def _market_daily_latest_date(data_dir: Path, market: str) -> tuple[date | None, str]:
+    """H6 ∪ enriched 双路取新: 返回 (众数最新日, 来源)。
+
+    设计意图见 ``_market_partial_sync_pending`` 的 docstring —— 两侧都看是
+    因为覆盖会不一致; 但 09-24 实测判据只落地了 H6 单侧, 而港美日 K 落盘在
+    ``kline_hk_us_enriched`` (hk_data_adapter.sync_hk_daily_to_enriched),
+    ``kline_daily/symbol=*.HK|.US`` 恒为 0 分区 ⇒ 判据恒 None ⇒ 迁移完成后
+    补跑照样永不触发。这里把设计注释兑现: 任一侧可用即采用, 两侧都可用时
+    取较新的一日 (避免被落后的一侧拖成误报)。
+
+    来源取值: "h6" / "enriched" / "h6+enriched" / "none"。
+    """
+    h6_latest = _h6_latest_by_sampling(data_dir, market)
+    enriched_latest = _enriched_latest_by_scan(data_dir, market)
+    if h6_latest is not None and enriched_latest is not None:
+        return max(h6_latest, enriched_latest), "h6+enriched"
+    if h6_latest is not None:
+        return h6_latest, "h6"
+    if enriched_latest is not None:
+        return enriched_latest, "enriched"
+    return None, "none"
+
+
+def _market_universe_available(data_dir: Path, market: str) -> bool:
+    """该市场 universe 快照是否可用于全量同步 (复用 market_daily_sync 的严格门槛)。
+
+    快照缺失/过小/纯 demo 都会抛 ``UniverseUnavailableError``; 此时
+    ``_run_market_daily_scheduled`` 必然失败, 与其每次启动引爆一个失败 job,
+    不如在判定层先挡一道并显式声明原因。
+    """
+    try:
+        from app.services.market_daily_sync import load_market_universe
+    except Exception:
+        logger.warning("universe 可用性检查不可用: market_daily_sync 导入失败", exc_info=True)
+        return False
+    try:
+        load_market_universe(data_dir, market)
+    except Exception as exc:
+        logger.info("market_daily catchup: %s universe 不可用: %s", market, exc)
+        return False
+    return True
 
 
 def _market_partial_sync_pending(
@@ -1368,17 +1442,21 @@ _MARKET_DAILY_CATCHUP_AFTER = {"HK": (18, 30), "US": (8, 30)}
 # 超长假期 (如春节) 会多触发一次 incremental 空转, 框架幂等无害。
 _MARKET_DAILY_STALENESS_DAYS = {"HK": 4, "US": 3}
 
-# 补跑判定结论的原因码。needed=False 时必须能区分两种截然不同的状态:
-#   fresh    —— 已确认新鲜 (有数据且未落后), 可安全地"无需补跑"
-#   no_data  —— 新鲜度不可判定 (抽样不到任何 H6 分区), 绝不能混同 fresh
-# 09-24 实测: 两者曾共用 return False + 同一句 INFO "港美 H6 均为最新",
-# 而当时 kline_daily 下根本没有 symbol=*.HK/.US 分区 —— "压根没数据"被
-# 打印成"均为最新", 违反 fail-closed 纪律。故判定必须携带原因码。
+# 补跑判定结论的原因码。needed=False 时必须能区分几种截然不同的状态:
+#   fresh                —— 已确认新鲜 (有数据且未落后), 可安全地"无需补跑"
+#   no_data              —— 新鲜度不可判定 (H6 与 enriched 双侧都取不到),
+#                           绝不能混同 fresh
+#   universe_unavailable —— 判据说该补, 但 universe 快照不可用, 补跑必然失败;
+#                           既不冒充 fresh, 也不硬跑 (US 09-24 实测场景)
+# 09-24 实测: fresh 与 no_data 曾共用 return False + 同一句 INFO "港美 H6
+# 均为最新", 而当时 kline_daily 下根本没有 symbol=*.HK/.US 分区 —— "压根没
+# 数据"被打印成"均为最新", 违反 fail-closed 纪律。故判定必须携带原因码。
 _CATCHUP_REASON_BEFORE_WINDOW = "before_window"
 _CATCHUP_REASON_NO_DATA = "no_data"
 _CATCHUP_REASON_FRESH = "fresh"
 _CATCHUP_REASON_STALE = "stale"
 _CATCHUP_REASON_PARTIAL_SYNC = "partial_sync"
+_CATCHUP_REASON_UNIVERSE_UNAVAILABLE = "universe_unavailable"
 
 
 @dataclass(frozen=True)
@@ -1403,15 +1481,23 @@ def _market_daily_catchup_decision(
     返回结构而非裸 bool: "不需要补跑"必须可区分「已确认新鲜」与「新鲜度
     不可判定」。后者不触发补跑 (见 run_market_daily_catchup 的权衡注释),
     但必须由调用方显式告警, 不得计入"均为最新"。
+
+    最新日取 H6 ∪ enriched 双路 (见 _market_daily_latest_date): no_data
+    **严格**只在双侧都取不到时成立, 不允许把"单侧不可用"放宽成 no_data,
+    也不允许把"单侧不可用"当成"数据 OK"。
+
+    注: "判据说该补但补不了" (universe 不可用 / provider 冷却) 不在这里降级
+    成 fresh —— 那是可执行性守卫, 由 run_market_daily_catchup 显式记录,
+    与本判据的"数据是否落后"事实分开, 避免又一次把不可用伪装成最新。
     """
     hour, minute = _MARKET_DAILY_CATCHUP_AFTER.get(market, (99, 0))
     if (now.hour, now.minute) < (hour, minute):
         return MarketCatchupDecision(
             needed=False, reason=_CATCHUP_REASON_BEFORE_WINDOW, latest=None
         )
-    latest = _h6_latest_by_sampling(data_dir, market)
+    latest, _source = _market_daily_latest_date(data_dir, market)
     if latest is None:
-        # 无 H6 分区 = 新鲜度不可判定 (全新部署 / 该市场日 K 未落 kline_daily)。
+        # H6 与 enriched 双侧都取不到 = 新鲜度不可判定 (全新部署等)。
         # 不可用 ≠ 最新: 单独走 no_data 分支, 由调用方告警并剔除出分母。
         return MarketCatchupDecision(
             needed=False, reason=_CATCHUP_REASON_NO_DATA, latest=None
@@ -1460,8 +1546,11 @@ def _provider_cooling_down(market: str) -> bool:
 def run_market_daily_catchup(
     repo: KlineRepository, capset: CapabilitySet, *, now: datetime | None = None
 ) -> dict:
-    """服务启动后的兜底补跑: 港美 H6 因调度窗口(18:00/08:00)与服务在线时段
+    """服务启动后的兜底补跑: 港美日 K 因调度窗口(18:00/08:00)与服务在线时段
     错配而停更时, 启动时检测并补齐。
+
+    新鲜度判据取 H6 (kline_daily/symbol=*) ∪ enriched (kline_hk_us_enriched)
+    双路, 见 _market_daily_latest_date —— 只看单侧会在迁移后恒判 no_data。
 
     仅在"窗口已过 + 数据落后"时触发, 复用 _run_market_daily_scheduled 的
     严格 universe 刷新 + incremental 同步 (job_store 占坑防止与正常调度并发)。
@@ -1478,25 +1567,34 @@ def run_market_daily_catchup(
         try:
             decision = _market_daily_catchup_decision(repo.store.data_dir, market, now)
             if decision.reason == _CATCHUP_REASON_NO_DATA:
-                # 不触发补跑的权衡 (有实测依据): ① 港美日 K 落盘目录是
-                # kline_hk_us_enriched (hk_data_adapter.sync_hk_daily_to_enriched),
-                # 从来不写 kline_daily/symbol=*.HK|.US —— 09-24 实测该部署
-                # kline_daily 下 HK/US 分区数为 0 (enriched 侧却有 2798 个),
-                # 即一旦对 no_data 触发补跑, 判据永远不会转绿, 每次启动都会
-                # 全量刷 universe + 365 天增量。② universe 缺失时补跑直接报错:
-                # US 实测 load_market_universe 抛 UniverseUnavailableError
-                # ("US instruments 快照不存在"), 只会产生失败的 job。
-                # 故只告警、不补跑, 但必须显式声明为不可用, 绝不写成"最新"。
+                # H6 与 enriched 双侧都取不到最新日 = 新鲜度不可判定。
+                # 不触发补跑的权衡: 判据都无从计算, 补跑没有可判定的目标;
+                # 但必须显式声明为不可用, 绝不写成"最新" (09-24 缺陷本体)。
                 logger.warning(
-                    "market_daily catchup: %s 无 H6 数据 (kline_daily/symbol=*.%s 无分区), "
-                    "新鲜度不可判定 —— 未启动补跑, 该市场不计入'已确认最新'",
-                    market, market,
+                    "market_daily catchup: %s 双侧均无数据 (kline_daily/symbol=*.%s 与 "
+                    "kline_hk_us_enriched/symbol=*.%s 都取不到最新日), 新鲜度不可判定 "
+                    "—— 未启动补跑, 该市场不计入'已确认最新'",
+                    market, market, market,
                 )
                 results[market] = {"status": "skipped", "market": market,
                                    "reason": _CATCHUP_REASON_NO_DATA}
                 continue
             if not decision.needed:
                 skip_reasons[market] = decision.reason
+                continue
+            if not _market_universe_available(repo.store.data_dir, market):
+                # 判据说该补, 但 universe 快照不可用: 此时
+                # _run_market_daily_scheduled 必然抛 UniverseUnavailableError
+                # (US 09-24 实测: us_instruments.parquet 不存在), 硬跑只会
+                # 每次启动引爆一个失败 job。既不降级成 fresh, 也不硬跑。
+                logger.warning(
+                    "market_daily catchup: %s 判定需补跑 (%s, 最新 %s) 但 universe 快照"
+                    "不可用, 不硬跑 —— 请先同步标的池, 该市场不计入'已确认最新'",
+                    market, decision.reason, decision.latest,
+                )
+                results[market] = {"status": "skipped", "market": market,
+                                   "reason": _CATCHUP_REASON_UNIVERSE_UNAVAILABLE,
+                                   "decision": decision.reason}
                 continue
             if _provider_cooling_down(market):
                 logger.info(
@@ -1519,10 +1617,10 @@ def run_market_daily_catchup(
         if skip_reasons and all(
             reason == _CATCHUP_REASON_FRESH for reason in skip_reasons.values()
         ):
-            logger.info("market_daily catchup: 港美 H6 均为最新, 无需补跑")
+            logger.info("market_daily catchup: 港美日 K 均为最新, 无需补跑")
         else:
             logger.info(
-                "market_daily catchup: 港美 H6 无需补跑 (%s)",
+                "market_daily catchup: 港美日 K 无需补跑 (%s)",
                 ", ".join(f"{name}={reason}" for name, reason in skip_reasons.items())
                 or "无市场",
             )

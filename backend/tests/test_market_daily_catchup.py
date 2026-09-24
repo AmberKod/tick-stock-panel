@@ -180,6 +180,7 @@ class TestRunCatchup:
         # HK 落后 10 天, US 新鲜
         _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
         _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=1)])
+        _write_universe(tmp_path, "HK")  # universe 可用才谈得上"真跑"
 
         called: list[str] = []
 
@@ -199,6 +200,8 @@ class TestRunCatchup:
         today = date.today()
         _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
         _write_h6_partition(tmp_path, "00002.US", [today - timedelta(days=10)])
+        _write_universe(tmp_path, "HK")
+        _write_universe(tmp_path, "US", count=600)
 
         def _boom(repo, capset, market):
             raise RuntimeError("network down")
@@ -218,6 +221,7 @@ class TestRunCatchup:
         """
         today = date.today()
         _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+        _write_universe(tmp_path, "US", count=600)
         monkeypatch.setattr(
             daily_pipeline, "_provider_cooling_down", lambda market: market.upper() == "US"
         )
@@ -266,6 +270,22 @@ class TestRunCatchup:
             self._fake_repo(tmp_path), None, now=self._EVENING
         )
         assert results == {}
+
+
+def _write_universe(root: Path, market: str, count: int = 150) -> None:
+    """写一份能通过 market_daily_sync 严格门槛的 universe 快照 (symbol + source)。
+
+    缺失该快照时 _run_market_daily_scheduled 必然抛 UniverseUnavailableError,
+    补跑会被判定层 (universe_unavailable) 挡掉, 因此"应该真跑"的用例必须先
+    备好 universe (门槛下限见 MIN_AUTO_UNIVERSE_SIZE: HK=100, US=500)。
+    """
+    if market.upper() == "HK":
+        symbols = [f"{i:05d}.HK" for i in range(count)]
+    else:
+        symbols = [f"T{i:04d}.US" for i in range(count)]
+    path = root / "instruments" / f"{market.lower()}_instruments.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": symbols, "source": ["akshare"] * len(symbols)}).write_parquet(path)
 
 
 def _repo_for(data_dir: Path):
@@ -351,6 +371,8 @@ class TestNoDataNotDisguisedAsFresh:
         today = date.today()
         _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
         _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+        _write_universe(tmp_path, "HK")
+        _write_universe(tmp_path, "US", count=600)
 
         called: list[str] = []
 
@@ -405,6 +427,104 @@ class TestNoDataNotDisguisedAsFresh:
         )
         assert result["status"] == "failed"
         assert "instruments" in result["error"]
+
+
+class TestDualPathFreshness:
+    """新鲜度判据必须为 H6 ∪ enriched 双路 (09-24 第二层缺陷回归)。
+
+    迁移完成后 kline_daily/symbol=*.HK|.US 恒为 0 分区, 而港美日 K 实际落盘
+    在 kline_hk_us_enriched (hk_data_adapter.sync_hk_daily_to_enriched)。
+    只按 H6 单侧判定 ⇒ latest 恒 None ⇒ 判据恒 no_data ⇒ 数据迁过来了补跑
+    照样永不触发。_market_partial_sync_pending 的 docstring 早已写明"两侧都
+    看", 实现却只落地单侧 —— 本组用例把设计注释兑现。
+    """
+
+    _EVENING = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
+
+    # 单侧 enriched 有数据 (迁移后真实形态): 不再落 no_data
+    def test_enriched_only_latest_is_used(self, tmp_path: Path) -> None:
+        today = date.today()
+        stale_day = today - timedelta(days=6)  # > HK 容差 4
+        for i in range(10):
+            _write_enriched_partition(tmp_path, f"{i:05d}.HK", [stale_day])
+        assert daily_pipeline._h6_latest_by_sampling(tmp_path, "HK") is None  # H6 侧为空
+        latest, source = daily_pipeline._market_daily_latest_date(tmp_path, "HK")
+        assert source == "enriched"
+        assert latest == stale_day
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.reason != "no_data"
+        assert decision.reason == "stale"
+        assert decision.latest == stale_day
+
+    # 双路取新: 两侧都可用时取较新的一日, 不被落后的一侧拖成误报
+    def test_dual_path_takes_newer_side(self, tmp_path: Path) -> None:
+        today = date.today()
+        older = today - timedelta(days=6)
+        newer = today - timedelta(days=1)
+        _write_h6_partition(tmp_path, "00001.HK", [older])
+        _write_enriched_partition(tmp_path, "00001.HK", [newer])
+        latest, source = daily_pipeline._market_daily_latest_date(tmp_path, "HK")
+        assert source == "h6+enriched"
+        assert latest == newer  # 取新, 不是取旧
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.reason == "fresh"
+
+    # 双侧都取不到才允许 no_data (严格, 不放宽)
+    def test_no_data_requires_both_sides_empty(self, tmp_path: Path) -> None:
+        latest, source = daily_pipeline._market_daily_latest_date(tmp_path, "HK")
+        assert (latest, source) == (None, "none")
+        assert daily_pipeline._enriched_latest_by_scan(tmp_path, "HK") is None
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.reason == "no_data"
+
+    # 落后 + universe 可用 ⇒ 真实触发补跑
+    def test_stale_via_enriched_triggers_catchup(self, tmp_path: Path, monkeypatch) -> None:
+        today = date.today()
+        stale_day = today - timedelta(days=6)
+        for i in range(10):
+            _write_enriched_partition(tmp_path, f"{i:05d}.HK", [stale_day])
+        _write_universe(tmp_path, "HK")
+
+        called: list[str] = []
+
+        def _fake_scheduled(repo, capset, market):
+            called.append(market)
+            return {"status": "ok", "market": market}
+
+        monkeypatch.setattr(daily_pipeline, "_run_market_daily_scheduled", _fake_scheduled)
+        results = daily_pipeline.run_market_daily_catchup(
+            _repo_for(tmp_path), None, now=self._EVENING
+        )
+        assert called == ["HK"]
+        assert results["HK"]["status"] == "ok"
+
+    # 落后 + universe 缺失 ⇒ 显式原因, 既不报 fresh 也不硬跑
+    def test_universe_missing_skips_with_explicit_reason(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        """US 09-24 实测: us_instruments.parquet 不存在, 补跑必然抛
+        UniverseUnavailableError。不得把 US 变成每次启动都引爆的失败 job。"""
+        import logging
+
+        today = date.today()
+        stale_day = today - timedelta(days=6)  # > US 容差 3
+        _write_enriched_partition(tmp_path, "AAPL.US", [stale_day])
+        _never_run(monkeypatch)  # 被调用即失败
+        (tmp_path / "instruments").mkdir(parents=True, exist_ok=True)  # 目录在, 快照缺失
+
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path), None, now=self._EVENING
+            )
+        assert results["US"] == {
+            "status": "skipped",
+            "market": "US",
+            "reason": "universe_unavailable",
+            "decision": "stale",
+        }
+        assert daily_pipeline._market_universe_available(tmp_path, "US") is False
+        assert "均为最新" not in caplog.text
+        assert "universe 快照不可用" in caplog.text
 
 
 class TestScheduledFullHistorySwitch:
