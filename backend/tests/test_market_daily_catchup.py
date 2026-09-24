@@ -6,10 +6,12 @@
 """
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.jobs import daily_pipeline
 
@@ -525,6 +527,115 @@ class TestDualPathFreshness:
         assert daily_pipeline._market_universe_available(tmp_path, "US") is False
         assert "均为最新" not in caplog.text
         assert "universe 快照不可用" in caplog.text
+
+
+class TestFullScanAndBulkLag:
+    """判据转全量口径 + 接住"众数新鲜但大批落后" (09-24 第三轮缺陷)。
+
+    背景: 香港全量分布 09-24:1303 / 09-18:1187 / 09-23:79 / 09-17:40 /
+    09-03:38 (总 2798)。改成全量口径后 partial_sync 不再成立
+    (1303 < 1303*0.5 为假), 若不补"大批落后"判据, HK 会从不触发退化成
+    "众数带到今天就算健康" —— 而 1416 只 (50.61%) 落后超容差 4 天。
+    """
+
+    _EVENING = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
+
+    @staticmethod
+    def _write_many_enriched(root: Path, market: str, plan: dict[int, date]) -> None:
+        """按 {下标: 日期} 批量写 enriched 分区 (下标决定 symbol 排序位置)。"""
+        for index, day in plan.items():
+            suffix = ".HK" if market.upper() == "HK" else ".US"
+            _write_enriched_partition(root, f"{index:05d}{suffix}", [day])
+
+    # ① 全量口径: 30 步长抽样会误判"部分同步", 全量扫描不会
+    def test_partial_sync_uses_full_scan_not_step_sample(self, tmp_path: Path) -> None:
+        """120 个分区: 全量看最新日就是众数日 (同步完整), 但 30 步长抽样
+        (step=4, 取下标 0,4,...,116) 恰好抽到 28 个旧日 + 2 个新日 ⇒ 误判。"""
+        today = date.today()
+        newer = today - timedelta(days=1)
+        older = today - timedelta(days=2)
+        plan: dict[int, date] = {}
+        for i in range(120):
+            # 下标能被 4 整除的是抽样命中位: 除 0/4 外全给旧日
+            plan[i] = newer if (i % 4 != 0 or i in (0, 4)) else older
+        self._write_many_enriched(tmp_path, "HK", plan)
+
+        counts = daily_pipeline._enriched_latest_distribution_by_scan(tmp_path, "HK")
+        assert sum(counts.values()) == 120  # 全量, 不是 30 抽样
+        assert daily_pipeline._market_partial_sync_pending(tmp_path, "HK") is False
+
+    # ② 大批落后: 众数新鲜但大批停在旧日 ⇒ 判定需补跑
+    def test_bulk_lag_ratio_uses_modal_date_and_tolerance(self) -> None:
+        """落后占比口径: 以众数日为基准, 落后"超过"容差才计入 (与 staleness 同口径)。"""
+        today = date.today()
+        counts = Counter(
+            {
+                today: 1303,
+                today - timedelta(days=6): 1187,
+                today - timedelta(days=1): 79,
+                today - timedelta(days=7): 40,
+                today - timedelta(days=21): 38,
+            }
+        )
+        # HK 容差 4 天: 09-18(6d)/09-17(7d)/09-03(21d) 计入, 落后 1 天的不计
+        expected = (1187 + 40 + 38) / (1303 + 1187 + 79 + 40 + 38)
+        assert daily_pipeline._distribution_bulk_lag_ratio(counts, 4) == pytest.approx(expected)
+
+    def test_bulk_lag_triggers_catchup(self, tmp_path: Path, monkeypatch) -> None:
+        today = date.today()
+        stale_day = today - timedelta(days=6)  # 落后 6 天 > HK 容差 4
+        plan = {i: today for i in range(6)}
+        plan.update({i: stale_day for i in range(6, 10)})  # 4/10 = 40% > 阈值 0.25
+        self._write_many_enriched(tmp_path, "HK", plan)
+        _write_universe(tmp_path, "HK")
+
+        # 众数是今天 ⇒ 不落后; 最新日就是众数日 ⇒ 不算部分同步; 靠 bulk_lag 触发
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.latest == today
+        assert decision.reason == "bulk_lag"
+        assert decision.needed is True
+
+        called: list[str] = []
+
+        def _fake_scheduled(repo, capset, market):
+            called.append(market)
+            return {"status": "ok", "market": market}
+
+        monkeypatch.setattr(daily_pipeline, "_run_market_daily_scheduled", _fake_scheduled)
+        results = daily_pipeline.run_market_daily_catchup(
+            _repo_for(tmp_path), None, now=self._EVENING
+        )
+        assert called == ["HK"]
+        assert results["HK"]["status"] == "ok"
+
+    # ③ 自愈: 同步完成后落后占比归零 ⇒ 不再触发 (不会退化成每天全量重刷)
+    def test_bulk_lag_self_heals_after_sync(self, tmp_path: Path, monkeypatch) -> None:
+        today = date.today()
+        self._write_many_enriched(tmp_path, "HK", {i: today for i in range(10)})
+        _write_universe(tmp_path, "HK")
+
+        counts = daily_pipeline._enriched_latest_distribution_by_scan(tmp_path, "HK")
+        assert daily_pipeline._distribution_bulk_lag_ratio(counts, 4) == 0.0
+        assert daily_pipeline._market_bulk_lag_pending(tmp_path, "HK") is False
+
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", self._EVENING)
+        assert decision.reason == "fresh"
+        assert decision.needed is False
+
+        _never_run(monkeypatch)  # 被调用即失败
+        results = daily_pipeline.run_market_daily_catchup(
+            _repo_for(tmp_path), None, now=self._EVENING
+        )
+        # HK 已同步完整 ⇒ 不触发补跑 (US 在该目录无任何数据, 走 no_data, 与本例无关)
+        assert "HK" not in results
+
+    # ④ 容差内的短暂停顿不算落后 (周末/短假不该触发)
+    def test_short_gap_within_tolerance_is_not_bulk_lag(self, tmp_path: Path) -> None:
+        today = date.today()
+        plan = {i: today for i in range(8)}
+        plan.update({i: today - timedelta(days=3) for i in range(8, 10)})  # 3 天 ≤ 容差 4
+        self._write_many_enriched(tmp_path, "HK", plan)
+        assert daily_pipeline._market_bulk_lag_pending(tmp_path, "HK") is False
 
 
 class TestScheduledFullHistorySwitch:

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
+from time import monotonic
 
 import polars as pl
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -1301,24 +1302,47 @@ def _partition_latest_distribution(
 
 
 def _h6_latest_distribution(
-    data_dir: Path, market: str, sample: int = 30
+    data_dir: Path, market: str, sample: int | None = None
 ) -> Counter[date]:
-    """抽样港美 H6 (kline_daily/symbol=*.HK|.US) 分区, 统计各分区 max(date) 的分布。"""
+    """扫港美 H6 (kline_daily/symbol=*.HK|.US) 分区, 统计各分区 max(date) 分布。
+
+    默认全量 (判据口径); ``sample`` 传正整数则抽样, 只给 ``_h6_latest_by_sampling``
+    保留历史语义用。
+    """
     return _partition_latest_distribution(data_dir / "kline_daily", market, sample=sample)
 
 
-def _enriched_latest_distribution(
-    data_dir: Path, market: str, sample: int = 30
-) -> Counter[date]:
-    """抽样港美 enriched (kline_hk_us_enriched/symbol=*.HK|.US) 的 max(date) 分布。
+def _enriched_latest_distribution(data_dir: Path, market: str) -> Counter[date]:
+    """全量扫港美 enriched (kline_hk_us_enriched/symbol=*.HK|.US) 的 per-symbol 最新日分布。
 
     与 H6 判据互补: 两侧覆盖会不一致 —— 09-18 实测港股 H6 最新停在 09-16
     (压根没有 09-17), 而 enriched 侧有 72/2812 只被零散标的带到 09-17。
     只看 H6 会漏判这种"enriched 被推到更新的残缺日"的情况。
+
+    直接复用 ``scripts.repair_hk_stale.scan_latest_dates`` (生产已验证):
+    它用 ``pl.ScanCastOptions(integer_cast="allow-float")`` 处理跨分区混 schema
+    (新浪 volume=Float64 / 兜底源 Int64), 按后缀过滤 .HK/.US, 且遵循「不可用
+    不计入分母」—— 目录不存在/读失败一律返回空 Counter, 不拿空结果冒充"没有
+    落后"或"已最新"。
     """
-    return _partition_latest_distribution(
-        data_dir / "kline_hk_us_enriched", market, sample=sample
-    )
+    try:
+        from scripts.repair_hk_stale import scan_latest_dates
+    except Exception:
+        logger.warning("enriched 扫描不可用: scripts.repair_hk_stale 导入失败", exc_info=True)
+        return Counter()
+    try:
+        frame = scan_latest_dates(data_dir, market)
+    except Exception:
+        logger.warning("enriched 扫描失败 (market=%s)", market, exc_info=True)
+        return Counter()
+    if frame.is_empty():
+        return Counter()
+    counts: Counter[date] = Counter()
+    for value in frame.get_column("latest_date").to_list():
+        normalized = _partition_date_norm(value)
+        if normalized is not None:
+            counts[normalized] += 1
+    return counts
 
 
 def _h6_latest_by_sampling(data_dir: Path, market: str, sample: int = 30) -> date | None:
@@ -1334,30 +1358,57 @@ def _h6_latest_by_sampling(data_dir: Path, market: str, sample: int = 30) -> dat
     return counts.most_common(1)[0][0]
 
 
-def _enriched_latest_by_scan(data_dir: Path, market: str) -> date | None:
-    """扫 enriched 全量分区取 per-symbol 最新日的众数, 作为该市场新鲜度判据。
+# enriched 全量扫描实测 ~4s/市场 (09-24: HK 2798 / US 6071 分区), 而一次启动
+# 判定要用到该分布三次 (latest / partial_sync / bulk_lag)。加 5 分钟进程内缓存,
+# 保证每市场每次启动只真扫一次 —— 判定是启动时刻的瞬时快照, 不需要实时。
+_ENRICHED_SCAN_CACHE_TTL_SECONDS = 300.0
+_ENRICHED_SCAN_CACHE: dict[tuple[str, str], tuple[float, Counter[date]]] = {}
+
+
+def _scan_enriched_latest_distribution(data_dir: Path, market: str) -> Counter[date]:
+    """真扫 enriched 全量分区, 返回 {per-symbol 最新日: 该日标的数}。
 
     直接复用 ``scripts.repair_hk_stale.scan_latest_dates`` (生产已验证):
     它用 ``pl.ScanCastOptions(integer_cast="allow-float")`` 处理跨分区混 schema
     (新浪 volume=Float64 / 兜底源 Int64), 按 ``_market_suffix`` 过滤 .HK/.US,
     且遵循「不可用不计入分母」—— 目录不存在/读失败一律返回空表, 不拿空结果
-    冒充"没有 stale"或"已最新"。
-
-    返回 None = 该侧不可用 (不可用 ≠ 最新, 由双路判据决定是否落 no_data)。
+    冒充"没有 stale"或"已最新"。空 Counter = 该侧不可用。
     """
     try:
         from scripts.repair_hk_stale import scan_latest_dates
     except Exception:
         logger.warning("enriched 扫描不可用: scripts.repair_hk_stale 导入失败", exc_info=True)
-        return None
+        return Counter()
     try:
         frame = scan_latest_dates(data_dir, market)
     except Exception:
         logger.warning("enriched 扫描失败 (market=%s)", market, exc_info=True)
-        return None
+        return Counter()
     if frame.is_empty():
-        return None
-    counts: Counter[date] = Counter(frame.get_column("latest_date").to_list())
+        return Counter()
+    return Counter(
+        value for value in frame.get_column("latest_date").to_list() if value is not None
+    )
+
+
+def _enriched_latest_distribution_by_scan(data_dir: Path, market: str) -> Counter[date]:
+    """带进程内 TTL 缓存的全量 enriched 分布 (见 _ENRICHED_SCAN_CACHE_TTL_SECONDS)。"""
+    key = (str(data_dir), str(market).upper())
+    cached = _ENRICHED_SCAN_CACHE.get(key)
+    stamp = monotonic()
+    if cached is not None and stamp - cached[0] < _ENRICHED_SCAN_CACHE_TTL_SECONDS:
+        return cached[1]
+    counts = _scan_enriched_latest_distribution(data_dir, market)
+    _ENRICHED_SCAN_CACHE[key] = (stamp, counts)
+    return counts
+
+
+def _enriched_latest_by_scan(data_dir: Path, market: str) -> date | None:
+    """enriched 侧众数最新日 (全量口径)。
+
+    返回 None = 该侧不可用 (不可用 ≠ 最新, 由双路判据决定是否落 no_data)。
+    """
+    counts = _enriched_latest_distribution_by_scan(data_dir, market)
     if not counts:
         return None
     return counts.most_common(1)[0][0]
@@ -1418,10 +1469,16 @@ def _market_partial_sync_pending(
     判据: H6 与 enriched 两侧任一满足「最新日期的分区数 < 众数日期分区数 *
     threshold」即视为部分同步 (典型 09-17 港股 72/2812 只 ≈ 2.6%)。
     两侧都看是因为它们的覆盖会不一致, 只看一侧会漏判。
+
+    口径修正 (09-24): enriched 侧原本走 ``_enriched_latest_distribution`` 的
+    **30 步长抽样**, 实测有系统性偏差 —— 按 symbol 排序每隔 93 个取一个,
+    恰好偏向未更新的簇 (抽样给 09-18:19 / 09-24:8, 全量是 09-24:1303 /
+    09-18:1187), 结论完全相反。故 enriched 侧改全量扫描; H6 侧
+    (kline_daily/symbol=*) 无对应全量扫描器, 且本部署恒为 0 分区, 维持抽样。
     """
     for counts in (
         _h6_latest_distribution(data_dir, market),
-        _enriched_latest_distribution(data_dir, market),
+        _enriched_latest_distribution_by_scan(data_dir, market),
     ):
         if not counts:
             continue
@@ -1430,6 +1487,62 @@ def _market_partial_sync_pending(
         if newest <= modal_date:
             continue  # 该侧最新日就是完成度最高的那天, 同步完整
         if counts[newest] < modal_n * threshold:
+            return True
+    return False
+
+
+# 「大批落后」占比阈值: 落后于众数超过该市场容差的标的占比超过此值即判需补跑。
+# 取值 0.25 的依据 (09-24 真实数据实测, 见 _distribution_bulk_lag_ratio):
+#   ① 必须显著低于真实落后占比 —— HK 实测 1416/2798 = 50.61%, 留 2 倍余量;
+#   ② 必须显著高于"补也补不动"的结构性地板 —— HK 落后 >30 天的长停牌/退市
+#      标的实测 134/2798 = 4.79% (>90 天 3.93%), 25% 是地板的 5 倍以上,
+#      不会把"永远同步不上"的那批误判成需要每天全量重刷;
+#   ③ 低于 partial_sync 的 0.5, 两者形成梯度: partial_sync 抓"最新日只有
+#      零星标的", bulk_lag 抓"众数新鲜但大批落后"。
+_MARKET_BULK_LAG_RATIO = 0.25
+
+
+def _distribution_bulk_lag_ratio(counts: Counter[date], tolerance_days: int) -> float:
+    """众数日期之外, 落后超过容差天数 (自然日) 的标的占比。
+
+    只看众数日期会把"众数新鲜、大批仍停在旧日"误判成健康: 09-24 实测 HK 众数
+    已是当天 (1303 只), 但 1416 只 (50.61%) 落后超过容差 4 天, 停在 09-18
+    及更早。空分布返回 0.0 —— 不可用不计入, 既不凭空算出一个占比去触发补跑,
+    也不把"算不出"当成健康证据 (调用方按该侧不可用另行处理)。
+    """
+    if not counts:
+        return 0.0
+    modal_date, _modal_n = counts.most_common(1)[0]
+    total = sum(counts.values())
+    if total <= 0:
+        return 0.0
+    lagged = sum(
+        number
+        for symbol_date, number in counts.items()
+        if (modal_date - symbol_date).days > tolerance_days
+    )
+    return lagged / total
+
+
+def _market_bulk_lag_pending(
+    data_dir: Path, market: str, threshold: float = _MARKET_BULK_LAG_RATIO
+) -> bool:
+    """众数日期新鲜, 但落后超过容差的标的占比超阈值 ⇒ 仍需补跑 (自愈型)。
+
+    与 _market_partial_sync_pending 互补: 后者抓"最新日只有零散标的",
+    本判据抓"众数已推进、大批标的没跟上"。两侧分布任一超阈值即成立
+    (与 partial_sync 同口径: 覆盖不一致, 只看一侧会漏判)。
+
+    自愈: 同步完成后落后占比归零 ⇒ 判据转 False ⇒ 不会退化成每天全量重刷。
+    """
+    tolerance_days = _MARKET_DAILY_STALENESS_DAYS[market]
+    for counts in (
+        _h6_latest_distribution(data_dir, market),
+        _enriched_latest_distribution_by_scan(data_dir, market),
+    ):
+        if not counts:
+            continue
+        if _distribution_bulk_lag_ratio(counts, tolerance_days) > threshold:
             return True
     return False
 
@@ -1457,6 +1570,8 @@ _CATCHUP_REASON_FRESH = "fresh"
 _CATCHUP_REASON_STALE = "stale"
 _CATCHUP_REASON_PARTIAL_SYNC = "partial_sync"
 _CATCHUP_REASON_UNIVERSE_UNAVAILABLE = "universe_unavailable"
+# 众数日期新鲜, 但落后超过容差的标的占比超阈值 (见 _market_bulk_lag_pending)
+_CATCHUP_REASON_BULK_LAG = "bulk_lag"
 
 
 @dataclass(frozen=True)
@@ -1512,6 +1627,13 @@ def _market_daily_catchup_decision(
     if _market_partial_sync_pending(data_dir, market):
         return MarketCatchupDecision(
             needed=True, reason=_CATCHUP_REASON_PARTIAL_SYNC, latest=latest
+        )
+    # 众数日期已推进 ≠ 全市场跟上: 大批标的仍停在旧日时同样要补跑, 否则
+    # "少数标的把众数带到今天" 就会把整个市场判定为健康 (09-24 HK: 众数
+    # 已是当天, 但 1416/2798 = 50.61% 落后超容差)。
+    if _market_bulk_lag_pending(data_dir, market):
+        return MarketCatchupDecision(
+            needed=True, reason=_CATCHUP_REASON_BULK_LAG, latest=latest
         )
     return MarketCatchupDecision(
         needed=False, reason=_CATCHUP_REASON_FRESH, latest=latest
