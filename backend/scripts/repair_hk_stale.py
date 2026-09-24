@@ -28,6 +28,17 @@ coverage_ok=False → enriched 空 → repair → 拒。这是**正确的 fail-c
 (坏了不如不动), 源侧缺口修管道修不出来 → 归入 ``repair_blocked`` 单独上报,
 不混 failures。
 
+第五层 (2026-09-24 判定: 批跑自己打死了腾讯兜底源, 非 A 假行非 B 源死):
+腾讯 WAF 连续 5 次拦截开进程级熔断 (15→30→60min)。批跑每只 ≥2 个腾讯请求
+(兜底日线 + 币种), 且日历缓存 key 按请求窗口起止 — 维护窗口起点逐标的各异
+(1998/2015/…), 每个新 key ≈28 个 hkHSI 日历请求 ⇒ 1526 只数千次必然熔断
+(实证第 80 只处开闸, 此后 1344 只新浪单源跑)。三改造:
+1. ``_tencent_circuit_remaining`` 熔断感知: 每只前查冷却剩余, 暂停等待
+   (上限 65 分钟, 超时跳过该只), 不在封禁期空烧 (熔断期请求会刷新封禁);
+2. 日历校验窗口注入 ``_CALENDAR_WINDOW_DAYS``(120, 与腾讯兜底窗口同宽):
+   只校验近段, 深历史由 merge 三重护栏兜底 → hkHSI 请求量砍一个数量级;
+3. 默认限速 0.1→0.5s + ``--batch-size``(默认 100) 批间暂停打进度摘要。
+
 stale 基准**不用全市场 as_of** (2026-09-23 实证暴露的移动靶): as_of 是所有
 标的最新日期的最大值, 补拉把它推到今天后, 停在"服务停摆日"的标的
 (1187 只停在 09-18) 会一夜之间全被算成 stale —— 补得越多 stale 越多
@@ -45,7 +56,8 @@ stale 基准**不用全市场 as_of** (2026-09-23 实证暴露的移动靶): as_
 用法:
     python repair_hk_stale.py --data-dir <path> [--market HK] [--limit N]
                               [--stale-before YYYY-MM-DD] [--tolerance-days 7]
-                              [--dry-run | --yes] [--sleep-seconds 0.1]
+                              [--batch-size 100] [--sleep-seconds 0.5]
+                              [--dry-run | --yes]
 
 默认 dry-run (只出计划, 不写盘、不发请求); 只有 ``--yes`` 才真正补拉。
 手动触发, **不进 APScheduler**。可重跑幂等: 补完的标的回到 as_of, 下次计划
@@ -76,8 +88,18 @@ logger = logging.getLogger(__name__)
 _MARKET_SUFFIX = {"HK": ".HK", "US": ".US"}
 # 计划里展示的"峰值档"桶数上限
 _BUCKET_TOP_N = 5
-# 串行限速: 新浪连发 8 只无阻, 腾讯有 WAF 熔断; 默认给一点间隔别并发过猛
-_DEFAULT_SLEEP_SECONDS = 0.1
+# 串行限速: 腾讯兜底源有 WAF, 批跑时每只要打它 ≥2 次 (兜底日线 + 币种报价),
+# 2026-09-24 实证 0.1s 间隔下 80 只即熔断; 提到 0.5s 让腾讯侧 QPM 减 80%
+_DEFAULT_SLEEP_SECONDS = 0.5
+# 熔断等待上限 (秒): 现役熔断冷却 15→30→60 分钟封顶。等超过一档最大冷却
+# (60min) 还没解封说明源长时间不可用, 跳过该只继续批 (别死等), 幂等可续跑。
+_CIRCUIT_WAIT_MAX_SECONDS = 65 * 60
+# 日历校验窗口 (自然日, 与腾讯兜底窗口同宽): 补拉场景只需校验近段覆盖,
+# 深历史由 merge 护栏兜底 (详见 _resolve_fetch)
+_CALENDAR_WINDOW_DAYS = 120
+# 批间暂停 (秒): 每跑完一批 --batch-size 只, 暂停一下打进度摘要
+_BATCH_PAUSE_SECONDS = 2.0
+_DEFAULT_BATCH_SIZE = 100
 # stale 基准容差 (自然日): 覆盖周末 + 常规节假日/长假, 与 _MARKET_DAILY_STALENESS_DAYS
 # 同思路 —— "服务停了几天没同步"不该被判成源缺口 (2026-09-23: 1187 只停在 09-18)
 _DEFAULT_TOLERANCE_DAYS = 7
@@ -224,11 +246,19 @@ def compute_stale_plan(
     return plan
 
 
-def _resolve_fetch(market: str) -> tuple[Any, Callable[..., Any]]:
+def _resolve_fetch(market: str, *, calendar_window_days: int | None = None) -> tuple[Any, Callable[..., Any]]:
     """取现役 provider 的逐标的报告接口, 缺接口显式报错 (不降级成静默空跑)。
 
     必须走 ``get_daily_with_report``: 补拉要拿**本次的复权因子** (coverage_end
     = 本次 actual_end) 才能落 enriched, ``get_daily`` 只回 frame、丢因子。
+
+    ``calendar_window_days`` 给定时注入到现役 provider 实例 (日历校验只拉近段):
+    补拉的维护窗口起点逐标的各异 (1998/2015/2020…), 每个起点都是一组新的
+    hkHSI 日历请求 (365 天一段, 28 年历史 ≈28 个请求), 1526 只批跑必然把腾讯
+    打出 WAF 熔断 (2026-09-24 实证: 第 80 只处熔断, 此后 1344 只新浪单源)。
+    日历窗口与腾讯兜底窗口同宽 (120 天) —— 深历史覆盖缺口由 merge 侧
+    ``_legacy_gap_tolerable`` 三重护栏兜底, 不依赖日历。**注入现役实例而非
+    新建**: 注册表是单例语义, 新建会丢共享熔断状态。
     """
     from app.data_providers.registry import get_default_provider
 
@@ -239,7 +269,34 @@ def _resolve_fetch(market: str) -> tuple[Any, Callable[..., Any]]:
             f"{market} 默认日线源 {type(provider).__name__} 未提供逐标的报告接口 "
             f"get_daily_with_report; 本脚本当前只服务港股补拉"
         )
+    if calendar_window_days is not None and hasattr(provider, "calendar_window_days"):
+        try:
+            provider.calendar_window_days = max(1, int(calendar_window_days))
+        except Exception as exc:  # 属性只读等异常: 不阻断补拉, 只是回到全窗口校验
+            logger.warning("日历窗口注入失败 (%s), 保持默认全窗口校验", exc)
     return provider, fetch
+
+
+def _tencent_circuit_remaining(now: float | None = None) -> float:
+    """腾讯 WAF 熔断剩余秒数 (0 = 未熔断)。
+
+    直接读现役 provider 的模块级 ``_TENCENT_CIRCUIT`` dict —— 锁外读是安全的
+    (只读不写; dict 单键读取在 CPython 下原子)。批循环用它感知熔断, 避免在
+    冷却期内空烧: 现役熔断器的语义是"被拦期间继续请求既浪费配额又延长封禁"
+    (hk_daily_provider.py:107-110), 批跑必须在冷却期主动暂停。
+
+    ``now`` 参数化是为了让循环的时钟与判定同一域 (熔断的 blocked_until 本身
+    就是 ``time.monotonic()`` 域); 生产默认即 ``time.monotonic``。
+    """
+    try:
+        from app.data_providers.hk_daily_provider import _TENCENT_CIRCUIT
+    except Exception:  # provider 不在 (非港股市场): 无熔断可言
+        return 0.0
+    try:
+        blocked_until = float(_TENCENT_CIRCUIT.get("blocked_until") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, blocked_until - (time.monotonic() if now is None else now))
 
 
 def publish_hk_snapshot(
@@ -400,17 +457,26 @@ def repair_stale(
     today: date | None = None,
     stale_before: date | None = None,
     tolerance_days: int = _DEFAULT_TOLERANCE_DAYS,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
     publisher: Callable[..., dict] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    batch_pause: Callable[[int, int, dict[str, Any]], None] | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """补拉 stale 标的。dry_run=True 时只算计划, 不发请求、不写盘。
 
+    熔断感知: 每只开始前查腾讯 WAF 熔断状态, 冷却期内暂停等待 (上限
+    ``_CIRCUIT_WAIT_MAX_SECONDS``, 超时跳过该只), 不在封禁期空烧请求。
+
     Returns:
         报告 dict: scanned / as_of / stale / stale_before / basis / buckets /
-        attempted / succeeded / failed / failures / no_data / elapsed_seconds /
-        seconds_per_symbol / estimate_remaining_seconds / estimate_all_seconds。
+        attempted / succeeded / failed / failures / no_data / circuit_pauses /
+        elapsed_seconds / seconds_per_symbol / estimate_*。
     """
     started = time.monotonic()
+    now = clock or time.monotonic
+    do_sleep = sleeper or time.sleep
     plan = compute_stale_plan(
         data_dir, market, limit=limit, stale_before=stale_before,
         tolerance_days=tolerance_days, today=today,
@@ -420,6 +486,7 @@ def repair_stale(
         "attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0,
         "no_data": 0, "no_data_symbols": [], "no_identity": 0, "no_identity_symbols": [],
         "repair_blocked": 0, "repair_blocked_symbols": [],
+        "circuit_pauses": 0, "circuit_wait_seconds": 0.0,
         "failures": [], "elapsed_seconds": 0.0,
     }
     targets = plan["targets"]
@@ -429,7 +496,7 @@ def repair_stale(
         return report
 
     root = Path(data_dir)
-    _, fetch = _resolve_fetch(market)
+    _, fetch = _resolve_fetch(market, calendar_window_days=_CALENDAR_WINDOW_DAYS)
     from app.services.hk_data_adapter import load_hk_raw_verification_archives
     from app.tickflow.market_daily import read_legacy_market_daily
 
@@ -438,6 +505,7 @@ def repair_stale(
     archives = load_hk_raw_verification_archives(root, symbols)
     end_day = today or _market_today(market)
     publish = publisher or publish_hk_snapshot
+    batch = max(1, int(batch_size))
 
     for index, entry in enumerate(targets, start=1):
         symbol = entry["symbol"]
@@ -451,6 +519,24 @@ def repair_stale(
         if start_day > end_day:
             report["skipped"] += 1
             continue
+        # 熔断感知: 冷却期内不发请求 (发了也会被本地快速失败, 还会刷新封禁)。
+        # 等待有上限 —— 超过一档最大冷却还没解封 = 源长时间不可用, 跳过该只
+        # 继续批 (幂等可续跑, 源恢复后重跑同命令即补上)。
+        remaining = _tencent_circuit_remaining(now())
+        if remaining > 0:
+            wait = min(remaining, _CIRCUIT_WAIT_MAX_SECONDS)
+            report["circuit_pauses"] += 1
+            report["circuit_wait_seconds"] = round(
+                float(report["circuit_wait_seconds"]) + wait, 1)
+            logger.warning(
+                "腾讯 WAF 熔断冷却中 (剩余 %.0f 分钟), 暂停 %.0f 分钟后继续 (上限 %.0f 分钟)",
+                remaining / 60, wait / 60, _CIRCUIT_WAIT_MAX_SECONDS / 60)
+            do_sleep(wait)
+            if _tencent_circuit_remaining(now()) > 0:
+                logger.warning(
+                    "熔断等待超上限仍未解封, 跳过 %s (重跑可续补)", symbol)
+                report["skipped"] += 1
+                continue
         report["attempted"] += 1
         try:
             fetched = fetch(
@@ -523,7 +609,20 @@ def repair_stale(
                 report["failures"].append({"symbol": symbol, "reason": str(exc)})
                 logger.warning("补拉失败 %s: %s", symbol, exc)
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+            do_sleep(sleep_seconds)
+        # 批间暂停 + 进度摘要: 用户观察/中断点 (幂等可续跑, Ctrl-C 后重跑同命令,
+        # 已成功标的自动跳过)。最后一批结束不打 (print_report 已有完整摘要)。
+        if index % batch == 0 and index < len(targets):
+            logger.info(
+                "进度 %d/%d | 成功 %d | 失败 %d | 源无数据 %d | 币种缺证据 %d | "
+                "维护窗口不全 %d | 熔断暂停 %d 次",
+                index, len(targets), report["succeeded"], report["failed"],
+                report["no_data"], report["no_identity"], report["repair_blocked"],
+                report["circuit_pauses"])
+            if batch_pause is not None:
+                batch_pause(index, len(targets), report)
+            else:
+                do_sleep(_BATCH_PAUSE_SECONDS)
     report["elapsed_seconds"] = round(time.monotonic() - started, 3)
     _attach_estimate(report, measured=report["attempted"] > 0)
     return report
@@ -611,6 +710,8 @@ def print_report(report: dict[str, Any]) -> None:
         print(f"维护窗口不全    : {report['repair_blocked']} (近期覆盖缺口, publish 保留原文件)")
         print(f"  {', '.join(report['repair_blocked_symbols'][:20])}"
               + (f" ... 另有 {report['repair_blocked'] - 20} 只" if report['repair_blocked'] > 20 else ""))
+    if report.get("circuit_pauses"):
+        print(f"熔断暂停        : {report['circuit_pauses']} 次 (累计等待 {_format_duration(report.get('circuit_wait_seconds') or 0.0)})")
     print(f"耗时(秒)        : {report['elapsed_seconds']}")
 
 
@@ -627,7 +728,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="只出计划, 不写盘 (默认)")
     parser.add_argument("--yes", action="store_true", help="真正执行补拉")
     parser.add_argument("--sleep-seconds", type=float, default=_DEFAULT_SLEEP_SECONDS,
-                        help=f"每只之间的间隔秒数 (默认 {_DEFAULT_SLEEP_SECONDS}, 串行限速)")
+                        help=f"每只之间的间隔秒数 (默认 {_DEFAULT_SLEEP_SECONDS}, 腾讯 WAF 熔断防护)")
+    parser.add_argument("--batch-size", type=int, default=_DEFAULT_BATCH_SIZE,
+                        help=f"每批只数: 每批结束打进度摘要并暂停观察 (默认 {_DEFAULT_BATCH_SIZE})")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出报告")
     args = parser.parse_args(argv)
 
@@ -649,6 +752,7 @@ def main(argv: list[str] | None = None) -> int:
             data_dir, args.market, args.limit or None,
             dry_run=dry_run, sleep_seconds=max(0.0, args.sleep_seconds),
             stale_before=stale_before, tolerance_days=max(0, args.tolerance_days),
+            batch_size=max(1, args.batch_size),
         )
     except Exception as exc:
         print(f"补拉失败: {exc}", file=sys.stderr)

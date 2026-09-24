@@ -408,9 +408,19 @@ class HKDailyProvider:
     name = "hk_daily"
     capabilities = ProviderCapabilities(daily=True, adj_factor=True)
 
-    def __init__(self, transport: httpx.BaseTransport | None = None, timeout: float = 10.0) -> None:
+    def __init__(self, transport: httpx.BaseTransport | None = None, timeout: float = 10.0,
+                 calendar_window_days: int | None = None) -> None:
         self.transport = transport
         self.timeout = max(0.01, float(timeout))
+        # 交易日历校验窗口 (自然日, None=校验完整请求区间)。腾讯日历按 365 天一段
+        # 请求; 深历史窗口 (如 1998 起) 一次校验 ≈28 个 hkHSI 请求, 批跑逐标的
+        # 不同起点必然把腾讯打出 WAF 熔断 (2026-09-24 实证: 1526 只批跑在 80 只
+        # 处熔断, 此后 1344 只单源跑, 币种/交叉核验全失)。窄窗口模式只校验近段
+        # —— 深历史的覆盖缺口由 merge 侧 `_legacy_gap_tolerable` 三重护栏兜底,
+        # 不依赖日历。默认 None 保持现役行为不变 (kline_sync 等调用方零感知)。
+        self.calendar_window_days = (
+            max(1, int(calendar_window_days)) if calendar_window_days is not None else None
+        )
 
     def _sina(
         self, client: httpx.Client, symbol: str, observed_at: str,
@@ -678,9 +688,13 @@ class HKDailyProvider:
                             source_errors=source_errors)
                 coverage_ok = False
                 try:
-                    calendar_key = (expected_start, expected_end)
+                    # 窄窗口模式: 只校验近段 (fallback 窗口同宽), 深历史交护栏兜底
+                    calendar_start = expected_start
+                    if self.calendar_window_days is not None:
+                        calendar_start = max(expected_start, expected_end - timedelta(days=self.calendar_window_days))
+                    calendar_key = (calendar_start, expected_end)
                     if calendar_key not in calendars:
-                        calendars[calendar_key] = self._calendar(client, expected_start, expected_end)
+                        calendars[calendar_key] = self._calendar(client, calendar_start, expected_end)
                     expected = calendars[calendar_key]
                     missing = sorted(expected - set(frame["date"].to_list()))
                     item.update(calendar_source="tencent_hsi_sessions", missing_dates=[day.isoformat() for day in missing], missing_dates_count=len(missing))

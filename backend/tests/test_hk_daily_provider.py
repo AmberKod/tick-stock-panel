@@ -144,6 +144,80 @@ def test_source_missing_a_real_hsi_session_remains_partial(monkeypatch):
     assert result.items[0]["source_errors"]["sina_hk_daily"] == "HTTP 503"
 
 
+def test_calendar_window_days_limits_hsi_requests(monkeypatch):
+    """窄日历窗口: 深历史请求只校验近段 → hkHSI 请求数按窗口截断 (不随 28 年膨胀)。
+
+    背景 (2026-09-24): 批跑补拉逐标的维护窗口起点各异, 每个新日历 key ≈28 个
+    hkHSI 请求, 1526 只必然打出腾讯 WAF 熔断。calendar_window_days 让日历只
+    校验近段 (与兜底窗口同宽), 深历史由 merge 护栏兜底。
+    """
+    requests: list[str] = []
+
+    # 新浪返回 2015-01-02 起的历史 → expected_start 随 primary_first 定为 2015-01-02
+    monkeypatch.setattr(
+        "app.data_providers.hk_daily_provider._decode_sina_rows",
+        lambda encoded: [
+            {"date": "2015-01-02", "open": 100, "close": 101, "high": 102, "low": 99, "volume": 1000},
+            {"date": "2026-09-10", "open": 100, "close": 101, "high": 102, "low": 99, "volume": 1000},
+        ])
+
+    def strict_handler(request):
+        param = request.url.params.get("param", "")
+        requests.append(param)
+        if "klc2" in request.url.path:
+            return httpx.Response(200, text='var KLC_KL_hk00700="fixture";')
+        if "qfq.js" in request.url.path:
+            return httpx.Response(200, text='var hk00700qfq={"data":[{"d":"1900-01-01","f":"1"}]}')
+        if "hkHSI" in param:
+            # 日历是"应有会话"的权威来源: 近段两日都是交易日
+            return httpx.Response(200, json=_tencent("hkHSI", [
+                ["2026-09-10", "100", "101", "102", "99", "1000"],
+                ["2026-09-11", "101", "102", "103", "100", "2000"],
+            ]))
+        # 个股兜底源也只给到 09-10 → 09-11 是真缺口, 窄窗口也必须报出来
+        return httpx.Response(200, json=_tencent("hk00700", [["2026-09-10", "100", "101", "102", "99", "1000"]]))
+
+    provider = HKDailyProvider(transport=httpx.MockTransport(strict_handler), calendar_window_days=120)
+    result = provider.get_daily_with_report(["00700.HK"], datetime(2015, 1, 1), datetime(2026, 9, 11), "stock")
+
+    hsi = [param for param in requests if "hkHSI" in param]
+    assert len(hsi) == 1, f"120 天窗口只该有 1 段 hkHSI 请求: {hsi}"
+    assert hsi[0].startswith("hkHSI,day,2026-05-14,"), (
+        f"日历起点应为 end-120d=2026-05-14: {hsi[0]}")
+    # 窄窗口下 coverage 仍真实校验近段: 两源都缺 09-11 → partial (护栏没被绕过)
+    assert not result.items[0]["coverage_complete"]
+    assert result.items[0]["missing_dates"] == ["2026-09-11"]
+
+
+def test_calendar_default_checks_full_window(monkeypatch):
+    """默认 (calendar_window_days=None): 全窗口日历校验 —— 现役调用方行为不变。"""
+    requests: list[str] = []
+
+    def handler(request):
+        param = request.url.params.get("param", "")
+        requests.append(param)
+        if "klc2" in request.url.path:
+            return httpx.Response(200, text='var KLC_KL_hk00700="fixture";')
+        if "qfq.js" in request.url.path:
+            return httpx.Response(200, text='var hk00700qfq={"data":[{"d":"1900-01-01","f":"1"}]}')
+        symbol = "hkHSI" if "hkHSI" in param else "hk00700"
+        return httpx.Response(200, json=_tencent(symbol, [["2026-09-10", "100", "101", "102", "99", "1000"]]))
+
+    monkeypatch.setattr(
+        "app.data_providers.hk_daily_provider._decode_sina_rows",
+        lambda encoded: [
+            {"date": "2015-01-02", "open": 100, "close": 101, "high": 102, "low": 99, "volume": 1000},
+            {"date": "2026-09-10", "open": 100, "close": 101, "high": 102, "low": 99, "volume": 1000},
+        ])
+    provider = HKDailyProvider(transport=httpx.MockTransport(handler))
+    provider.get_daily_with_report(["00700.HK"], datetime(2015, 1, 1), datetime(2026, 9, 11), "stock")
+
+    hsi = [param for param in requests if "hkHSI" in param]
+    assert len(hsi) >= 2, f"2015→2026 窗口默认应分段拉全历史日历 (≈12 段): {hsi}"
+    assert hsi[0].startswith("hkHSI,day,2015-01-02,"), (
+        f"默认日历起点必须是请求起点: {hsi[0]}")
+
+
 def _verification_archive(*, entries=None, observed_at="2026-09-12T00:00:00+00:00"):
     body = json.dumps({"rc": 0, "data": {"code": "00700", "market": 116, "klines": entries or [
         "2026-09-10,100,101,102,99,1000", "2026-09-11,101,102,103,100,2000",

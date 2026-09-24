@@ -16,12 +16,17 @@
 7. 估算恒用经验值 (不吃实测) → "实测估算" 用例红;
 8. 去掉 currency 证据链 (恒 None) → "8 列老分区发布成功" 红;
 9. 证据链顺序反转 (HKEX 优先于旧分区) → "继承 CNY" 红;
-10. repair_window_incomplete 并进 failures → "维护窗口不全单独归类" 红。
+10. repair_window_incomplete 并进 failures → "维护窗口不全单独归类" 红;
+11. 去掉熔断感知 (循环不再查 blocked_until) → "暂停且零请求" 红 (请求数断言);
+12. 熔断等待无上限 (死等) → "超上限跳过" 红;
+13. 批间暂停删除 → "batch=2 跑 5 只两次回调" 红;
+14. 日历窗口不注入 (保持全窗口) → "注入断言" 红。
 """
 from __future__ import annotations
 
 import importlib.util
 import json
+import time as time_module
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -232,6 +237,12 @@ def fake_provider(monkeypatch) -> _FakeProvider:
     monkeypatch.setattr(provider_registry, "get_default_provider",
                         lambda market, dataset=None: provider)
     return provider
+
+
+def _fast_targets(root: Path, count: int, day: date = GAP_DAY) -> None:
+    """造 count 只停在 day 的 stale 标的 (熔断/批间用例的快捷布景)。"""
+    for index in range(count):
+        _write_enriched(root, f"{index + 2:05d}.HK", [day])
 
 
 def test_stale_plan_excludes_fresh_and_other_markets(tmp_path: Path) -> None:
@@ -797,3 +808,191 @@ def test_repair_window_incomplete_classified_separately(tmp_path: Path, fake_pro
         f"维护窗口不全不是管道失败: {report['failures']}")
     assert (raw_dir / "part.parquet").read_bytes() == before_bytes, (
         "publish 保留原文件的语义必须在脚本侧兑现 (零写盘)")
+
+
+# ---------------------------------------------------------------- 第五层
+# 2026-09-24 判定: 批跑自己打死了腾讯兜底源 (WAF 连续 5 拦 → 进程级熔断
+# 15→30→60min)。每只 ≥2 个腾讯请求 + 日历缓存 key 逐标的各异 (每个新 key
+# ≈28 个 hkHSI 请求) ⇒ 1526 只数千次必然熔断。实证第 80 只处开闸。
+
+
+class _FakeClock:
+    """假时钟: 计数 sleep 并推进, 不真等 (熔断等待 15 分钟级, 测试不能真睡)。"""
+
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _set_circuit(monkeypatch, *, blocked_until: float | None) -> None:
+    """把现役 provider 的进程级熔断状态钉成目标值 (blocked_until 是 monotonic 域)。"""
+    import app.data_providers.hk_daily_provider as provider_module
+
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 1, "blocked_until": blocked_until or 0.0})
+
+
+def test_circuit_break_pauses_and_skips_without_requests(
+    tmp_path: Path, monkeypatch, fake_provider: _FakeProvider,
+) -> None:
+    """熔断感知: 冷却期内暂停等待, 等待期内**零请求**; 超上限跳过该只不死等。"""
+    clock = _FakeClock()
+    # 熔断到期点在假时钟"未来" 66 分钟 (> 65 分钟上限):
+    # 第一只 → 等满上限 65min 仍未解封 → 跳过 (零请求);
+    # 第二只 → 还剩 1 分钟冷却, 再等 1 分钟 → 解封 → 正常补拉。
+    expiry = clock() + 66 * 60
+    import app.data_providers.hk_daily_provider as provider_module
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 1, "blocked_until": expiry})
+
+    _fast_targets(tmp_path, 2)
+    for index in range(2):
+        symbol = f"{index + 2:05d}.HK"
+        days = [GAP_DAY + timedelta(days=offset) for offset in range(1, 3)]
+        fake_provider.frames[symbol] = _verified_raw(symbol, days)
+        fake_provider.adjustments[symbol] = _factors(symbol, [GAP_DAY, *days])
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+        publisher=lambda root, symbol, frame, **kwargs: {"symbol": symbol, "status": "ok"},
+        clock=clock, sleeper=clock.sleep,
+    )
+
+    # 第一只等待上限 65min 后仍未解封 → 跳过; 第二只等余下 1min → 解封继续
+    assert report["circuit_pauses"] == 2, "两只各触发一次暂停"
+    assert clock.sleeps[0] == pytest.approx(65 * 60), (
+        f"首次等待必须是上限值 65min: {clock.sleeps}")
+    assert clock.sleeps[-1] == pytest.approx(60), (
+        f"第二次等待应是剩余 1min: {clock.sleeps}")
+    assert report["skipped"] == 1, "超上限未解封必须跳过该只, 不死等"
+    # 第二只解封后正常补拉成功
+    assert report["succeeded"] == 1, report["failures"]
+    assert report["attempted"] == 1, "跳过的那只不得计入 attempted"
+    # 关键: 熔断期零网络请求 (第一只被跳过; provider 只被解封后的第二只调用)
+    assert len(fake_provider.calls) == 1, (
+        f"熔断期不得发请求 (会刷新封禁): 实际调用 {len(fake_provider.calls)} 次")
+
+
+def test_circuit_break_waits_until_unblocked(
+    tmp_path: Path, monkeypatch, fake_provider: _FakeProvider,
+) -> None:
+    """熔断短暂 (10 分钟 < 上限): 等到解封后继续, 全部标的正常补拉。"""
+    clock = _FakeClock()
+    import app.data_providers.hk_daily_provider as provider_module
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 1, "blocked_until": clock() + 10 * 60})
+
+    _fast_targets(tmp_path, 1)
+    symbol = "00002.HK"
+    days = [GAP_DAY + timedelta(days=offset) for offset in range(1, 3)]
+    fake_provider.frames[symbol] = _verified_raw(symbol, days)
+    fake_provider.adjustments[symbol] = _factors(symbol, [GAP_DAY, *days])
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+        publisher=lambda root, symbol, frame, **kwargs: {"symbol": symbol, "status": "ok"},
+        clock=clock, sleeper=clock.sleep,
+    )
+
+    assert report["circuit_pauses"] == 1
+    assert clock.sleeps and clock.sleeps[0] == pytest.approx(10 * 60), (
+        f"等待时长应等于剩余冷却 10min: {clock.sleeps}")
+    assert report["skipped"] == 0 and report["succeeded"] == 1, (
+        f"解封后必须继续补拉: {report}")
+
+
+def test_batch_pause_progress_summary(tmp_path: Path, monkeypatch, fake_provider: _FakeProvider) -> None:
+    """批间暂停: batch-size=2 跑 5 只 → 恰好 2 次批间回调 (2、4 处), 各带进度摘要。"""
+    clock = _FakeClock()
+    pauses: list[tuple[int, int, dict]] = []
+    monkeypatch.setattr(repair_hk_stale, "_BATCH_PAUSE_SECONDS", 0.0)
+    _fast_targets(tmp_path, 5)
+    for index in range(5):
+        symbol = f"{index + 2:05d}.HK"
+        days = [GAP_DAY + timedelta(days=offset) for offset in range(1, 3)]
+        fake_provider.frames[symbol] = _verified_raw(symbol, days)
+        fake_provider.adjustments[symbol] = _factors(symbol, [GAP_DAY, *days])
+
+    report = repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1), batch_size=2,
+        publisher=lambda root, symbol, frame, **kwargs: {"symbol": symbol, "status": "ok"},
+        clock=clock, sleeper=clock.sleep,
+        batch_pause=lambda index, total, rep: pauses.append((index, total, dict(rep))),
+    )
+
+    assert [p[0] for p in pauses] == [2, 4], (
+        f"batch=2 跑 5 只应在 2、4 处暂停: {[p[0] for p in pauses]}")
+    assert all(p[1] == 5 for p in pauses)
+    assert pauses[0][2]["succeeded"] == 2, "首个暂停点摘要应已含 2 个成功"
+    assert pauses[-1][2]["succeeded"] == 4, "第二个暂停点在最后一只前, 成功数为 4"
+    assert report["succeeded"] == 5
+
+
+def test_default_sleep_and_batch_size_cli() -> None:
+    """默认限速提到 0.5s (腾讯 WAF 防护), batch 默认 100 —— 契约级断言。"""
+    assert repair_hk_stale._DEFAULT_SLEEP_SECONDS == 0.5, (
+        "默认限速必须是 0.5s (0.1s 实证 80 只即熔断)")
+    assert repair_hk_stale._DEFAULT_BATCH_SIZE == 100
+    assert repair_hk_stale._CALENDAR_WINDOW_DAYS == 120, "日历窗口与腾讯兜底窗口同宽"
+    assert repair_hk_stale._CIRCUIT_WAIT_MAX_SECONDS == 65 * 60
+
+
+def test_resolve_fetch_injects_calendar_window(monkeypatch, fake_provider: _FakeProvider) -> None:
+    """日历窗口注入: repair 路径把现役 provider 实例的校验窗口压到 120 天。"""
+    fake_provider.calendar_window_days = None
+    provider, _fetch = repair_hk_stale._resolve_fetch("HK", calendar_window_days=120)
+    assert provider is fake_provider, "必须注入现役实例, 不是新建"
+    assert provider.calendar_window_days == 120
+    default_provider, _ = repair_hk_stale._resolve_fetch("HK")
+    assert default_provider.calendar_window_days == 120, "不传时不得改现役配置"
+
+
+def test_repair_loop_sets_narrow_calendar_window(
+    tmp_path: Path, monkeypatch, fake_provider: _FakeProvider,
+) -> None:
+    """真实调用点: repair_stale 循环必须把现役 provider 的日历窗口压窄。
+
+    这是 hkHSI 请求量砍一个数量级的**生效点** —— 只在 _resolve_fetch 里支持
+    注入但循环不传, 等于没改 (变异 D 实证: 不传时其余测试全绿)。
+    """
+    fake_provider.calendar_window_days = None
+    _fast_targets(tmp_path, 1)
+    symbol = "00002.HK"
+    days = [GAP_DAY + timedelta(days=offset) for offset in range(1, 3)]
+    fake_provider.frames[symbol] = _verified_raw(symbol, days)
+    fake_provider.adjustments[symbol] = _factors(symbol, [GAP_DAY, *days])
+
+    repair_hk_stale.repair_stale(
+        tmp_path, "HK", dry_run=False, today=TODAY, sleep_seconds=0.0,
+        stale_before=GAP_DAY + timedelta(days=1),
+        publisher=lambda root, symbol, frame, **kwargs: {"symbol": symbol, "status": "ok"},
+    )
+
+    assert fake_provider.calendar_window_days == repair_hk_stale._CALENDAR_WINDOW_DAYS, (
+        f"补拉循环必须注入窄日历窗口 ({repair_hk_stale._CALENDAR_WINDOW_DAYS}), "
+        f"否则 hkHSI 请求数随 28 年历史膨胀: {fake_provider.calendar_window_days}")
+
+
+def test_circuit_remaining_reads_live_state(monkeypatch) -> None:
+    """熔断剩余读取: 直接读现役模块 dict, 未来为正/已过期为 0/缺模块为 0。"""
+    import app.data_providers.hk_daily_provider as provider_module
+
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 1, "blocked_until": time_module.monotonic() + 300})
+    assert 0 < repair_hk_stale._tencent_circuit_remaining() <= 300
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 0, "blocked_until": 0.0})
+    assert repair_hk_stale._tencent_circuit_remaining() == 0.0
+    monkeypatch.setattr(provider_module, "_TENCENT_CIRCUIT",
+                        {"failures": 0, "opens": 1, "blocked_until": None})
+    assert repair_hk_stale._tencent_circuit_remaining() == 0.0
