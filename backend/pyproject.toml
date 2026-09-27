@@ -18,6 +18,7 @@ dependencies = [
     "pyarrow>=16.0",
     "pandas>=2.2",                # 仅在 BacktestService 边界使用,见 §7.4 / ADR-19
     "requests>=2.31",             # sina_us_provider (US 默认源) 的 HTTP 客户端
+    "py-mini-racer>=0.12",        # 新浪美股日 K K2 编码解码的 JS 引擎 (zh_js_decode)
     "psutil>=5.9",                # 独立回测 worker 的峰值 RSS 与退出后内存指标
     # llvmlite 不再提供 macOS Intel wheel；该平台使用 Matrix 纯 Python fallback。
     "numba>=0.65.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
@@ -64,7 +65,9 @@ desktop = [
 
 # 港股/美股多市场数据源 (M1 港股 + 后续美股)
 # 启用:`uv sync --extra multi-market`, 或在用户机器上 `pip install akshare yfinance`
-# 注: 保持可选 extra, 因为部分离线/Docker 部署不需要这层依赖
+# 注: 保持可选 extra, 因为部分离线/Docker 部署不需要这层依赖。
+# ⚠️ akshare 不仅是行情源: 新浪美股日 K 解码链 (zh_js_decode) 硬依赖它,
+#    服务端港美日 K 调度 (sina_us_provider 默认源) 需要 multi-market 全装。
 multi-market = [
     "akshare>=1.12",
     "yfinance>=0.2.30",
