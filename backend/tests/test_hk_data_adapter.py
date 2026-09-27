@@ -16,6 +16,7 @@ from app.services.hk_data_adapter import (
     HK_DEMO_SYMBOLS,
     fetch_hk_daily_akshare,
     fetch_hk_instruments_akshare,
+    fetch_hk_instruments_file,
     load_demo_instruments,
     sync_hk_instruments,
 )
@@ -325,3 +326,90 @@ def test_fetch_us_instruments_akshare_mapping(monkeypatch):
     syms = sorted(df["symbol"].to_list())
     assert syms == ["AAPL.US", "MSFT.US"]
     assert df.filter(pl.col("symbol") == "AAPL.US")["name"].to_list() == ["苹果"]
+
+
+# ── 港股本地 universe 文件通道 (与 US us_universe.csv 对称) ──
+
+def _write_hk_universe_csv(tmp_path: Path, codes: list[str]) -> Path:
+    """生成受控 hk_universe.csv (symbol,name 两列, 与 parquet 导出口径一致)。"""
+    instruments = tmp_path / "instruments"
+    instruments.mkdir(exist_ok=True)
+    pl.DataFrame({
+        "symbol": codes,
+        "name": [f"标的{code}" for code in codes],
+    }).write_csv(instruments / "hk_universe.csv")
+    return instruments / "hk_universe.csv"
+
+
+def test_fetch_hk_instruments_file_maps_and_zeropads(tmp_path: Path):
+    """本地 CSV universe 统一 5 位补零 + .HK 后缀, 跳过非法代码。"""
+    _write_hk_universe_csv(tmp_path, ["700", "0700.HK", "9988", "HSI"])
+    result = fetch_hk_instruments_file(tmp_path)
+    assert result is not None
+    # 700/0700.HK 均归一化为 00700.HK; HSI 非 5 位数字被过滤
+    assert result["symbol"].to_list() == ["00700.HK", "09988.HK"]
+    assert result["market"].unique().to_list() == ["HK"]
+    assert result["source"].unique().to_list() == ["hk_universe_file"]
+    assert result.filter(pl.col("symbol") == "00700.HK")["name"].to_list() == ["标的0700.HK"]
+
+
+def test_fetch_hk_instruments_file_missing_returns_none(tmp_path: Path):
+    """无 universe 文件时返回 None (不抛错, 由调用方决定回退路径)。"""
+    assert fetch_hk_instruments_file(tmp_path) is None
+
+
+def test_sync_hk_instruments_file_channel_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """akshare 失败时走文件通道, 严格模式 (allow_demo=False) 成功写入。"""
+    import app.services.hk_data_adapter as adapter
+
+    monkeypatch.setattr(adapter, "fetch_hk_instruments_akshare", lambda: None)
+    codes = [f"{i:05d}" for i in range(1, 121)]
+    _write_hk_universe_csv(tmp_path, codes)
+    count = sync_hk_instruments(tmp_path, use_akshare=True, allow_demo=False)
+    assert count == 120
+    out = tmp_path / "instruments" / "hk_instruments.parquet"
+    assert out.exists()
+    df = pl.read_parquet(out)
+    assert df.height == 120
+    assert df["source"].unique().to_list() == ["hk_universe_file"]
+    assert df["market"].unique().to_list() == ["HK"]
+
+
+def test_sync_hk_instruments_corrupt_file_raises_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """universe 文件损坏 (解析失败) 时回退失败, 严格模式必须 raise 且不落盘。"""
+    import app.services.hk_data_adapter as adapter
+
+    monkeypatch.setattr(adapter, "fetch_hk_instruments_akshare", lambda: None)
+    instruments = tmp_path / "instruments"
+    instruments.mkdir()
+    (instruments / "hk_universe.csv").write_bytes(b"\x00\x01\x02 not a csv")
+    with pytest.raises(RuntimeError, match="拒绝写入 demo 快照"):
+        sync_hk_instruments(tmp_path, use_akshare=True, allow_demo=False)
+    assert not (instruments / "hk_instruments.parquet").exists()
+
+
+def test_sync_hk_instruments_strict_fails_without_any_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """文件与 akshare 均不可用时, 严格模式 raise 并保留现有快照 (不写 parquet)。"""
+    import app.services.hk_data_adapter as adapter
+
+    monkeypatch.setattr(adapter, "fetch_hk_instruments_akshare", lambda: None)
+    with pytest.raises(RuntimeError, match="拒绝写入 demo 快照"):
+        sync_hk_instruments(tmp_path, use_akshare=True, allow_demo=False)
+    assert not (tmp_path / "instruments" / "hk_instruments.parquet").exists()
+
+
+def test_sync_hk_instruments_file_hit_skips_akshare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """显式 use_akshare=False 且文件命中时, akshare 拉取完全不被调用。"""
+    import app.services.hk_data_adapter as adapter
+
+    def _forbidden():
+        raise AssertionError("文件命中时不应调用 akshare 拉取")
+
+    monkeypatch.setattr(adapter, "fetch_hk_instruments_akshare", _forbidden)
+    codes = [f"{i:05d}" for i in range(1, 111)]
+    _write_hk_universe_csv(tmp_path, codes)
+    count = sync_hk_instruments(tmp_path, use_akshare=False, allow_demo=False)
+    assert count == 110
+    out = tmp_path / "instruments" / "hk_instruments.parquet"
+    assert out.exists()
+    assert pl.read_parquet(out)["source"].unique().to_list() == ["hk_universe_file"]

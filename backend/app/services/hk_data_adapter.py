@@ -154,6 +154,59 @@ def fetch_hk_instruments_akshare() -> pl.DataFrame | None:
     return None
 
 
+def fetch_hk_instruments_file(data_dir: Path) -> pl.DataFrame | None:
+    """读取受控的本地港股 universe 文件。
+
+    支持 ``hk_universe.csv`` / ``hk_universe.parquet``，字段接受
+    ``symbol``/``ticker``/``code`` 和 ``name``/``company``。symbol 归一化为
+    5 位补零的 ``XXXXX.HK``（自动 strip ``.HK`` 后缀），非法代码（非 5 位数字）
+    静默跳过。文件必须由用户或外部同步流程提供，导入结果仍由
+    ``sync_hk_instruments`` 的严格门槛校验；读取失败时返回 None 并告警，
+    由调用方决定是否回退 demo / 抛错。
+    """
+    instruments_dir = data_dir / "instruments"
+    candidates = (instruments_dir / "hk_universe.parquet", instruments_dir / "hk_universe.csv")
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
+        return None
+    try:
+        raw = pl.read_parquet(path) if path.suffix == ".parquet" else pl.read_csv(path)
+        if raw.is_empty():
+            return None
+        columns = {column.lower().strip(): column for column in raw.columns}
+        symbol_col = next((columns[key] for key in ("symbol", "ticker", "code") if key in columns), None)
+        if symbol_col is None:
+            logger.warning("港股本地 universe 缺少 symbol/ticker/code 字段: %s", path)
+            return None
+        name_col = next((columns[key] for key in ("name", "company", "中文名称") if key in columns), None)
+        sector_col = next((columns[key] for key in ("sector",) if key in columns), None)
+        industry_col = next((columns[key] for key in ("industry",) if key in columns), None)
+        rows: list[dict] = []
+        for row in raw.to_dicts():
+            code = str(row.get(symbol_col) or "").strip().upper()
+            if code.endswith(".HK"):
+                code = code[:-3]
+            code = code.zfill(5)
+            # 港股代码固定 5 位数字, 指数 (^HSI) / 脏行在此一并过滤
+            if len(code) != 5 or not code.isdigit():
+                continue
+            rows.append({
+                "symbol": f"{code}.HK",
+                "name": str(row.get(name_col) or code) if name_col else code,
+                "code": code,
+                "exchange": "HK",
+                "asset_type": "stock",
+                "source": "hk_universe_file",
+                "sector": str(row.get(sector_col) or "") if sector_col else None,
+                "industry": str(row.get(industry_col) or "") if industry_col else None,
+            })
+        result = normalize_instruments(rows, asset_type="stock", source="hk_universe_file")
+        return result if not result.is_empty() else None
+    except Exception as exc:
+        logger.warning("读取港股本地 universe 失败 %s: %s", path, exc)
+        return None
+
+
 def sync_hk_instruments(
     data_dir: Path,
     *,
@@ -169,6 +222,13 @@ def sync_hk_instruments(
     frames: list[pl.DataFrame] = []
     if use_akshare:
         full = fetch_hk_instruments_akshare()
+        if full is not None and not full.is_empty():
+            frames.append(full)
+    if not frames:
+        # akshare 不可用或拉取失败时, 回退受控本地 universe 文件 (与 US 对称)。
+        # HK 的 akshare 链路 (新浪兜底) 仍可达, 故维持 akshare 优先、文件兜底,
+        # 保证调度在线上拿到最新全市场池, 断网/缺依赖时也不再硬失败。
+        full = fetch_hk_instruments_file(data_dir)
         if full is not None and not full.is_empty():
             frames.append(full)
     if not frames:
