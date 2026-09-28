@@ -26,6 +26,19 @@ const STATUS_META: Record<string, { label: string; dot: string; text: string }> 
 
 const MARKET_LABEL: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股' }
 
+/**
+ * A1 同步健康度标签: parquet 日期没落后 ≠ 同步正常。
+ * - job_failed     最近同步任务失败 (universe 缺失/调度崩溃) → 同步失败
+ * - mostly_failed  任务标成功但 >50% 标的失败 (零落盘假成功) → 同步异常
+ * - no_recent_run  最近 26h 无任务记录 → 未调度
+ * 均 warns (黄), title 携带 detail; ok/缺省不渲染。
+ */
+const SYNC_HEALTH_META: Record<string, { label: string; cls: string }> = {
+  job_failed:    { label: '同步失败', cls: 'text-warning' },
+  mostly_failed: { label: '同步异常', cls: 'text-warning' },
+  no_recent_run: { label: '未调度',   cls: 'text-muted' },
+}
+
 function marketName(m: MarketFreshness) {
   return m.label || MARKET_LABEL[m.market] || m.market
 }
@@ -36,15 +49,22 @@ function MarketChip({ m }: { m: MarketFreshness }) {
     ? ` ${(m.coverage_ratio * 100).toFixed(0)}%`
     : ''
   const stale = m.stale_days != null && m.stale_days > 0 ? ` 落后${m.stale_days}天` : ''
+  const syncHealth = m.sync_health ? SYNC_HEALTH_META[m.sync_health] : undefined
   return (
     <span
       className="flex items-center gap-1.5 whitespace-nowrap"
-      title={`最新 ${m.latest_date ?? '—'} · 原始 ${m.raw_latest_date ?? '—'} · 覆盖 ${m.coverage_units ?? '—'}${m.coverage_unit_label}${pct}`}
+      title={`最新 ${m.latest_date ?? '—'} · 原始 ${m.raw_latest_date ?? '—'} · 覆盖 ${m.coverage_units ?? '—'}${m.coverage_unit_label}${pct}${syncHealth ? ` · ${m.sync_health_detail ?? ''}` : ''}`}
     >
       <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', meta.dot)} />
       <span className="text-foreground/80">{marketName(m)}</span>
       <span className="font-mono text-foreground/60">{m.latest_date ?? '—'}</span>
       <span className={meta.text}>{meta.label}{stale}</span>
+      {syncHealth && (
+        <span className={`flex items-center gap-0.5 rounded border border-warning/40 px-1 ${syncHealth.cls}`}>
+          <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+          {syncHealth.label}
+        </span>
+      )}
     </span>
   )
 }

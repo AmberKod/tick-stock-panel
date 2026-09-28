@@ -9,7 +9,7 @@
   字段名保持不变以复用前端组件。
 - board 映射: HK 按 08 前缀分主板/创业板; US 统一 "美股"。
 - 指数段: 返回核心指数 symbol/name (行情由独立指数源补充, 暂空)。
-- 无概念/行业 ext_data → concept_rank/industry_rank 暂空。
+- 无概念 ext_data → concept_rank 显式 unavailable (A3); 行业按 sector 聚合 (US NASDAQ / HK 维表 sector)。
 - 幸存者偏差显式化: ``_load_latest_rows`` 只取全市场 ``max(date)`` 那天的行,
   停在更早日期的标的会被静默丢弃。它同时返回 **样本覆盖率**
   (``covered / universe``,见 ``_build_coverage``),把这层偏差标出来而不是藏起来。
@@ -481,6 +481,21 @@ def _sector_rank(rows: list[dict], limit: int = 5) -> dict[str, list[dict]]:
     return {"leading": leading, "lagging": lagging}
 
 
+# ── A3: 港美 concept_rank 显式不可用声明 ────────────────────────────────
+# 铁律「不可用不伪装」: 港美没有概念维表 (instruments 无 concept 字段,
+# ext_data 概念配置面向 A 股 symbol), concept_rank 恒空是**结构性缺口**,
+# 不是"今天恰好没数据"。空 {leading:[], lagging:[]} 会被下游当成
+# "真实的空排名"渲染 (market_recap 摘要写"(暂无数据)"、前端可当成 0 条),
+# 因此这里显式带上 status/reason, 消费方按 unavailable 处理。
+# leading/lagging 保留空列表仅为兼容旧 schema 消费方 (字段缺省比空更糟)。
+_CONCEPT_RANK_UNAVAILABLE: dict = {
+    "leading": [],
+    "lagging": [],
+    "status": "unavailable",
+    "reason": "港美无概念维表, 概念热度为结构性不可用 (非当日数据缺失)",
+}
+
+
 def build_hk_us_overview(market: str, data_dir: Path, as_of: date | None = None) -> dict:
     """装配港美市场总览 (结构对齐 A股 build_market_overview)。"""
     market = market.upper()
@@ -516,7 +531,7 @@ def build_hk_us_overview(market: str, data_dir: Path, as_of: date | None = None)
             "radar": [],
             "emotion": {"score": 50, "label": "暂无"},
             "top_gainers": [], "top_losers": [], "turnover_leaders": [], "active_leaders": [],
-            "concept_rank": {"leading": [], "lagging": []},
+            "concept_rank": _CONCEPT_RANK_UNAVAILABLE,
             "industry_rank": {"leading": [], "lagging": []},
         })
 
@@ -665,6 +680,6 @@ def build_hk_us_overview(market: str, data_dir: Path, as_of: date | None = None)
         "top_losers": _top_rows(rows, "change_pct", False, market),
         "turnover_leaders": _top_rows(rows, "amount", True, market),
         "active_leaders": _top_rows(rows, "vol_ratio_5d", True, market),
-        "concept_rank": {"leading": [], "lagging": []},
+        "concept_rank": _CONCEPT_RANK_UNAVAILABLE,
         "industry_rank": _sector_rank(rows, limit=5),
     })

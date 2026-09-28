@@ -1211,7 +1211,7 @@ export interface AbnormalOverview {
   rows: AbnormalRow[]
 }
 
-/** 港美异动总览 (动量口径) — rows/status 与 A股同 schema, 但无指数基准字段 */
+/** 港美异动总览 (动量口径, 日线收盘 T-1 — enriched 一天一写, 盘中恒为上一交易日快照) — rows/status 与 A股同 schema, 但无指数基准字段 */
 export interface AbnormalHkUsOverview {
   asof: number
   as_of: string | null
@@ -3784,6 +3784,14 @@ export interface MarketFreshness {
   coverage_unit_label: string
   status: 'ok' | 'stale' | 'shallow' | 'behind_raw' | 'partial' | 'empty' | 'unknown'
   gap: { from: string; to: string; missing_days: number; reason: string } | null
+  /**
+   * A1 同步健康度 (仅 HK/US; A 股走盘后管道不适用, 字段缺省)。
+   * job_failed = 最近同步任务失败; mostly_failed = 任务标成功但 >50% 标的失败
+   * (零落盘假成功); no_recent_run = 最近 26h 无任务记录; ok = 最近任务成功。
+   */
+  sync_health?: 'ok' | 'job_failed' | 'mostly_failed' | 'no_recent_run'
+  /** sync_health 非 ok 时的人话原因摘要 (title 展示用) */
+  sync_health_detail?: string
 }
 
 export interface DataFreshness {

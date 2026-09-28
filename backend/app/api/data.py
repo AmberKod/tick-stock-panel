@@ -628,6 +628,143 @@ def _job_market(job: dict, message: str | None) -> str | None:
     return None
 
 
+# ── A1: 港美日 K 同步健康度 (不可用不伪装) ─────────────────────────────
+# 背景: 09-25 HK 调度 job 失败但 freshness 因「落后1天<容差4天」判 ok, 状态栏全绿;
+# 09-27 US job 标 succeeded 但 6071 只全部 per-symbol 失败 (零落盘假成功)。
+# 这两类的共同病根: freshness 只看 parquet 落盘日期, 完全不感知 job 失败态。
+# 这里补第三层信号: 最近一个调度周期内该市场 market_daily 类 job 的终态。
+
+# 回看窗口: 覆盖一个调度周期 (HK 18:00 / US 08:00 Asia/Shanghai, 最长跨日 26h)。
+SYNC_HEALTH_LOOKBACK_HOURS = 26
+# failed_symbols / symbols_total 超过该比例时判 mostly_failed (零落盘假成功靠它)。
+SYNC_HEALTH_MOSTLY_FAILED_RATIO = 0.5
+
+
+def _job_market_strict(job: dict) -> str | None:
+    """market_daily 类 job 的市场判定 (比 _job_market 更严: 只认 market_daily 特征)。
+
+    判定顺序 (由强到弱, 都不命中返回 None — 绝不猜):
+    1. result.market (succeeded 的 run_market_daily_sync payload 顶层必有);
+    2. result.universe_sync_rows (服务内调度 _run_market_daily_scheduled 独有标记,
+       但它不带 market —— 此时退回日志文本推断);
+    3. 日志/stage 文本含 "HK"/"港股"/"US"/"美股" (失败 job 无 result, 09-25 事故
+       即此形态: log 第一条就是 "同步 HK 全量标的池…")。
+    """
+    result = job.get("result") or {}
+    market = result.get("market")
+    if isinstance(market, str) and market.strip():
+        return market.strip().upper()
+    log = job.get("log") or []
+    message = " ".join(
+        str(entry.get("msg") or "") for entry in log if isinstance(entry, dict)
+    ) if log else ""
+    text = f"{job.get('error') or ''} {message} {job.get('stage') or ''}"
+    if "HK" in text or "港股" in text:
+        return "HK"
+    if "US" in text or "美股" in text:
+        return "US"
+    return None
+
+
+def _is_market_daily_job(job: dict) -> bool:
+    """识别 market_daily 类 job (服务内调度或手动 /market-data run)。
+
+    判据 (满足其一):
+    - result.operation == "daily_download" 且带 symbols_total/completed_symbols;
+    - result 含 universe_sync_rows (服务内调度在 run_market_daily_sync 结果上补的标记);
+    - 文本特征: 日志/stage/error 含 "全量标的池" / "日K同步" / "instruments 获取失败"。
+      失败 job 无 result (09-25 事故形态: sync_instruments 阶段即抛错), 其
+      error 是 "港股全量 instruments 获取失败…" — 这正是要抓的失败态;
+      注意 list_recent 返回的 _summary **不含 log**, 故 error/stage 必须参与匹配。
+    其他 job (A 股盘后管道 daily_days / 分钟K minute_rows / 修复修正) 不命中。
+    """
+    result = job.get("result") or {}
+    if result.get("operation") == "daily_download" and (
+        "symbols_total" in result or "completed_symbols" in result
+    ):
+        return True
+    if "universe_sync_rows" in result:
+        return True
+    log = job.get("log") or []
+    parts = [str(job.get("error") or ""), str(job.get("stage") or "")]
+    parts.extend(
+        str(entry.get("msg") or "") for entry in log if isinstance(entry, dict)
+    )
+    text = " ".join(parts)
+    return any(
+        marker in text
+        for marker in ("全量标的池", "日K同步", "instruments 获取失败")
+    )
+
+
+def _sync_health_for(market: str, *, now: datetime | None = None) -> dict:
+    """最近一个调度周期内该市场 market_daily 类 job 的健康度。
+
+    判定 (按优先级):
+    1. 最近一条 job status=failed            → job_failed  (含 universe 失败);
+    2. 最近一条 succeeded 但 failed 占比 > 0.5 → mostly_failed (零落盘假成功);
+    3. 最近一条 succeeded 且失败占比 ≤ 0.5     → ok;
+    4. 窗口内无任何 job 记录                  → no_recent_run。
+    任何内部异常降级为 no_recent_run + detail 说明, 绝不让状态栏 500。
+    """
+    fallback = {"sync_health": "no_recent_run", "sync_health_detail": "最近 26h 无同步任务记录"}
+    # 注意: 顶部 ``from app.services import pipeline_jobs as job_store`` 绑定的是**模块**,
+    # 模块上没有 list_recent/active_id (那是 JobStore 单例的方法)。这里显式取单例;
+    # 顺手修掉 _active_job_summary 的同款隐性 AttributeError (被 except 吞成 None)。
+    from app.services.pipeline_jobs import job_store as _job_store_instance
+    try:
+        jobs = _job_store_instance.list_recent(limit=50)
+    except Exception as exc:
+        logger.warning("sync_health: 读取 job_store 失败: %s", exc)
+        return {"sync_health": "no_recent_run", "sync_health_detail": f"任务记录读取失败: {exc}"}
+    now = now or datetime.now(UTC)
+    candidates: list[tuple[datetime, dict]] = []
+    for job in jobs:
+        ts = job.get("finished_at") or job.get("started_at")
+        if not ts:
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        age_s = (now - stamp).total_seconds()
+        # 双向窗口: 排除 26h 前的陈旧记录, 也排除时钟漂移/未来时间戳的记录
+        # (负 age 一律放过会把"未来"的 job 当成最近一次结果, 09-27 重放时
+        # 已实测踩坑: 事故时刻的判定被次日补跑成功的记录覆盖)。
+        if age_s < 0 or age_s > SYNC_HEALTH_LOOKBACK_HOURS * 3600:
+            continue
+        if job.get("status") not in ("succeeded", "failed"):
+            continue
+        if not _is_market_daily_job(job) or _job_market_strict(job) != market.upper():
+            continue
+        candidates.append((stamp, job))
+    if not candidates:
+        return fallback
+    # list_recent 已按 started_at 倒序; 同刻并列时取 finished_at 更晚的一条
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    _, latest = candidates[0]
+    status = latest.get("status")
+    if status == "failed":
+        reason = str(latest.get("error") or "").strip() or "任务失败 (未记录原因)"
+        return {"sync_health": "job_failed", "sync_health_detail": f"最近同步任务失败: {reason}"}
+    result = latest.get("result") or {}
+    failed_n = len(result.get("failed_symbols") or [])
+    total = result.get("symbols_total")
+    if not isinstance(total, int) or total <= 0:
+        total = len(result.get("completed_symbols") or []) + failed_n or None
+    if total and failed_n / total > SYNC_HEALTH_MOSTLY_FAILED_RATIO:
+        return {
+            "sync_health": "mostly_failed",
+            "sync_health_detail": f"任务标成功但 {failed_n}/{total} 只标的同步失败 (>50%), 落盘可能未推进",
+        }
+    detail = f"最近任务成功 ({total} 只)" if total else "最近任务成功"
+    if failed_n:
+        detail += f", {failed_n} 只失败"
+    return {"sync_health": "ok", "sync_health_detail": detail}
+
+
 def _active_job_summary() -> dict | None:
     """当前正在跑的数据任务 (供底部状态栏显示"正在拉哪个市场的哪一天")。"""
     try:
@@ -657,11 +794,19 @@ def freshness(request: Request) -> dict:
     """数据新鲜度画像: 各市场最新日期 / 覆盖度 / 缺口建议 + 当前同步任务。
 
     前端底部状态栏常驻消费, 2s 级轮询; 分区扫描结果按 TTL 缓存。
+    A1: 港美市场额外注入 sync_health (最近调度周期 job 失败态), 弥补
+    「parquet 日期未落后但同步一直在失败」的感知盲区 (A 股走盘后管道,
+    不适用)。job_store 查询每次实时执行, 不走 TTL 缓存 — 失败发生后
+    状态栏必须在下一个轮询周期 (≤30s) 内变色。
     """
     repo = request.app.state.repo
-    return data_freshness.get_data_freshness(
+    payload = data_freshness.get_data_freshness(
         repo.store.data_dir, active_job=_active_job_summary()
     )
+    for item in payload.get("markets") or []:
+        if str(item.get("market") or "").upper() in ("HK", "US"):
+            item.update(_sync_health_for(str(item["market"])))
+    return payload
 
 
 @router.post("/freshness/invalidate")

@@ -891,6 +891,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           <div className="rounded-btn bg-base px-3 py-2 text-[10px] leading-relaxed text-muted">
             按交易所异动规则口径 (3日±20%/30%… 10日+100%、30日+200% 等按板块) 计算
             个股涨跌幅偏离值的接近度, 上穿阈值时告警; 冷却期内同一标的不重复提醒。
+            <br />
+            口径注意: A 股含实时叠加; 港美标的 (.HK/.US) 为日线收盘口径 (T-1) —
+            每日收盘快照后评估一次 (港股约 18:35 / 美股约 08:35 北京时间), 盘中不实时更新。
           </div>
         </div>
       )}

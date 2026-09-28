@@ -227,3 +227,30 @@ def test_build_overview_ignores_coverage_without_changing_schema(tmp_path):
         assert key in ov
     assert ov["breadth"]["total"] == 1
     assert ov["as_of"] == "2026-09-18"
+
+
+# ---------------------------------------------------------------
+# A3: concept_rank 显式不可用声明 (不可用不伪装)
+# ---------------------------------------------------------------
+
+def test_concept_rank_declared_unavailable(tmp_path):
+    """港美 concept_rank 必须显式带 status=unavailable, 不能伪装成真空排名。
+
+    结构性缺口 (港美无概念维表) 与"当日恰好没数据"必须可区分:
+    leading/lagging 保持空列表兼容旧 schema, 但 status/reason 显式声明。
+    """
+    _write_enriched_rows(tmp_path, "00700.HK", [("2026-09-18", 0.06)])
+    _write_fake_instruments(tmp_path, "HK", ["00700"])
+    ov = build_hk_us_overview("HK", tmp_path)
+    rank = ov["concept_rank"]
+    assert rank["leading"] == [] and rank["lagging"] == []
+    assert rank["status"] == "unavailable"
+    assert "概念" in rank["reason"]
+
+
+def test_concept_rank_unavailable_on_empty_market(tmp_path):
+    """空数据分支同样声明 unavailable (两个 return 路径都要盖到)。"""
+    ov = build_hk_us_overview("US", tmp_path)
+    assert ov["concept_rank"]["status"] == "unavailable"
+    # 行业榜不受影响: 仍是普通 {leading, lagging} 结构, 无 status 键
+    assert "status" not in ov["industry_rank"]

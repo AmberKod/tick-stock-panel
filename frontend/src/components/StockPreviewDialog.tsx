@@ -101,6 +101,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   })
   // 异动边缘: 与异动页同 queryKey 共享缓存; 该股处于观察/边缘/触发状态时在图表上方显示信息条
   // 港美 symbol (.HK/.US 后缀) 走动量口径接口, 与 A股分缓存; 两种返回在 queryFn 内归一化为 {asof, rows}
+  // 口径: 港美异动是日线收盘口径 (T-1) — enriched parquet 一天一写 (HK 18:00/US 08:00 北京时间同步),
+  // 盘中恒为上一交易日快照, 不叠加实时行情; 评估在各市场同步后独立触发 (约 18:35/08:35)
   const abnormalMarket: '' | 'HK' | 'US' = symbol?.endsWith('.HK')
     ? 'HK'
     : symbol?.endsWith('.US') ? 'US' : ''
@@ -446,7 +448,10 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2 shrink-0 ${meta.bar}`}>
                   <span className="flex shrink-0 items-center gap-1.5">
                     <Activity className={`h-3.5 w-3.5 ${meta.icon}`} />
-                    <span className={`text-[11px] font-bold ${meta.icon}`}>异动</span>
+                    <span
+                      className={`text-[11px] font-bold ${meta.icon}`}
+                      title={abnormalMarket ? '港美异动为日线收盘口径 (T-1): 基于最新收盘快照计算, 不叠加盘中实时行情' : undefined}
+                    >异动</span>
                     <span className={`rounded px-1.5 py-0.5 text-[10px] ${meta.cls}`}>
                       {meta.label}
                     </span>
@@ -459,7 +464,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                         <span
                           key={w}
                           title={abnormalMarket
-                            ? `近${parseInt(w, 10)}日累计动量 / 自定阈值 (港美无交易所异动披露制度) · 接近度=|动量|/阈值`
+                            ? `近${parseInt(w, 10)}日累计动量 / 自定阈值 · 日线收盘口径 (T-1, 最新收盘快照) · 港美无交易所异动披露制度 · 接近度=|动量|/阈值`
                             : `近${parseInt(w, 10)}日累计偏离(含实时) / 交易所规则阈值 · 接近度=|偏离|/阈值`}
                           className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] ${
                             dominant
@@ -476,7 +481,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                     })}
                   <span
                     className="ml-auto shrink-0 font-mono text-[10px] text-muted"
-                    title="异动引擎上次计算时间"
+                    title={abnormalMarket ? '港美异动为日线收盘口径 (T-1): 基于最新收盘快照计算, 盘中不实时更新' : '异动引擎上次计算时间'}
                   >
                     计算于 {fmtAbnormalCalcTime(abnormal.data?.asof ?? 0)}
                   </span>
