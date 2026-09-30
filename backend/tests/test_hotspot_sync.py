@@ -84,7 +84,7 @@ def test_run_sync_with_fake_ak_share_source(data_dir):
 
 
 def test_register_hotspot_jobs_uses_cron_trigger(data_dir):
-    """四个 job: cn/hk 09:05-15:35 (mon-fri), us 21:05-23:35 (mon-fri) + 00:05-03:35 (tue-sat)。"""
+    """四个 job: cn/hk 09:05-15:35 (mon-fri), us 21:05-23:35 (mon-fri) + 00:05-04:35 (tue-sat)。"""
     scheduler = _FakeScheduler()
     register_hotspot_jobs(scheduler, data_dir)
     assert len(scheduler.jobs) == 4
@@ -115,14 +115,16 @@ def test_register_hotspot_jobs_uses_cron_trigger(data_dir):
     assert (
         _expr(HOTSPOT_SYNC_JOB_ID_US_LATE, "hour"),
         _expr(HOTSPOT_SYNC_JOB_ID_US_LATE, "day_of_week"),
-    ) == ("0-3", "tue-sat")
+    ) == ("0-4", "tue-sat")
 
 
 def test_us_late_job_covers_friday_overnight_session(data_dir):
-    """核心回归: 周五夜盘后半段 (北京时间周六 00:05~03:35) 必须被覆盖。
+    """核心回归: 周五夜盘后半段 (北京时间周六 00:05~04:35) 必须被覆盖。
 
-    day_of_week 是日历日口径, 跨日行情的 0-3 段配 tue-sat 才能覆盖到周五夜盘,
+    day_of_week 是日历日口径, 跨日行情的 0-4 段配 tue-sat 才能覆盖到周五夜盘,
     同时跳过周日凌晨与周一凌晨 (美股休市) 的空转。
+    尾端 04:35 (而非 03:35): 美股冬令时 (11-01 起) 收盘延后到北京 05:00,
+    04:00-05:00 收盘段必须有热点采集; 夏令时下 04:35 为收盘后空转 (无害)。
     """
     tz = ZoneInfo("Asia/Shanghai")
     scheduler = _FakeScheduler()
@@ -138,15 +140,16 @@ def test_us_late_job_covers_friday_overnight_session(data_dir):
 
     fires: list[str] = []
     cursor = friday_2335
-    for _ in range(8):
+    for _ in range(10):
         cursor = _next(cursor)
         fires.append(cursor.strftime("%a %H:%M"))
     assert fires == [
         "Sat 00:05", "Sat 00:35", "Sat 01:05", "Sat 01:35",
         "Sat 02:05", "Sat 02:35", "Sat 03:05", "Sat 03:35",
+        "Sat 04:05", "Sat 04:35",
     ]
     # 周日凌晨不再空转: 下一次是下周二 00:05
-    assert _next(datetime(2026, 9, 26, 3, 35, tzinfo=tz)) == datetime(2026, 9, 29, 0, 5, tzinfo=tz)
+    assert _next(datetime(2026, 9, 26, 4, 35, tzinfo=tz)) == datetime(2026, 9, 29, 0, 5, tzinfo=tz)
 
 
 def test_us_evening_job_does_not_fire_on_weekend(data_dir):
