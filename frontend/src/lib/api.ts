@@ -12,7 +12,7 @@ type RequestOptions = RequestInit & {
   quiet?: boolean
 }
 
-async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+export async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const { quiet, ...fetchInit } = init ?? {}
   const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
@@ -31,7 +31,10 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
       } else if (typeof raw === 'string') {
         detail = raw
       } else if (raw && typeof raw === 'object') {
-        detail = JSON.stringify(raw)
+        // 后端结构化错误体 {code, message}(如 /api/novel/*)：优先取 message 给人看，
+        // 否则 JSON.stringify 会把 code 也堆进 toast，读起来像报错日志。
+        const rawObj = raw as { message?: unknown }
+        detail = typeof rawObj.message === 'string' ? rawObj.message : JSON.stringify(raw)
       }
     } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`

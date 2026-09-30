@@ -154,6 +154,20 @@ export const QK = {
   // 强度梯队(动量档位) — 仅港美
   strengthLadder:       (market: string, date?: string, bands?: string[]) =>
     ['strength-ladder', market, date ?? '', bands?.join(',') ?? ''] as const,
+
+  // ===== 小说工作区 (/api/novel/*) =====
+  // 统一用 'novel' 前缀, 方便一次性失效整域; 且**不进 SSE_INVALIDATE_PREFIXES**
+  // (行情推送与小说域无关, 否则每秒打穿本地文件读)。
+  // 书籍级 key 必须带 bookId: 切书时若只按前缀匹配会串数据。
+  novelStatus:          ['novel', 'status'] as const,
+  novelBooks:           ['novel', 'books'] as const,
+  novelBookMeta:        (bookId: string) => ['novel', 'book-meta', bookId] as const,
+  novelOutline:         (bookId: string) => ['novel', 'outline', bookId] as const,
+  novelChapters:        (bookId: string) => ['novel', 'chapters', bookId] as const,
+  novelChapter:         (bookId: string, chapterId: string) => ['novel', 'chapter', bookId, chapterId] as const,
+  novelState:           (bookId: string) => ['novel', 'state', bookId] as const,
+  novelView:            (bookId: string, name: string) => ['novel', 'view', bookId, name] as const,
+  novelJob:             (jobId: string) => ['novel', 'job', jobId] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
