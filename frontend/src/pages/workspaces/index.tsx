@@ -2,7 +2,6 @@ import { Link } from 'react-router-dom'
 import {
   Newspaper,
   Image as ImageIcon,
-  BookOpen,
   Clapperboard,
   ArrowLeft,
   CheckCircle2,
@@ -144,24 +143,8 @@ export function ImageWorkspace() {
   )
 }
 
-export function NovelWorkspace() {
-  return (
-    <WorkspacePlaceholder
-      icon={BookOpen}
-      title="小说"
-      tagline="本地优先的写作台：书架 / 大纲树 / 章节编辑 + AI 续写"
-      color="#22c55e"
-      phase="Phase 4"
-      features={[
-        { name: '书架与大纲', desc: '每本书独立目录，大纲树 + 章节 Markdown 管理' },
-        { name: '章节编辑器', desc: 'Markdown 编辑，天然可 git、可 diff' },
-        { name: 'AI 续写/润色', desc: '走统一 AI 网关，按大纲上下文续写' },
-        { name: '导出', desc: '章节产物支持导出 Markdown / 文本' },
-      ]}
-      synergy="本地优先：小说稿是纯 Markdown + JSON 大纲，数据始终在你自己的 data/ 目录里，任何编辑器都能打开。"
-    />
-  )
-}
+// 小说工作区已落地(Phase 4): 占位实现移除, 路由直连 ./NovelWorkspace
+// (见 router.tsx)。图片/视频仍为占位页, 待 Phase 3 / Phase 5 落地。
 
 export function VideoWorkspace() {
   return (

@@ -43,7 +43,8 @@ const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 // 新闻工作区已落地(Anspire 检索), 不再是占位页
 const News = lazy(() => import('./pages/News').then(m => ({ default: m.NewsPage })))
 const ImageWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.ImageWorkspace })))
-const NovelWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.NovelWorkspace })))
+// 小说工作区已落地(Phase 4): 不再走 workspaces/index 的占位实现
+const NovelWorkspace = lazy(() => import('./pages/workspaces/NovelWorkspace').then(m => ({ default: m.NovelWorkspace })))
 const VideoWorkspace = lazy(() => import('./pages/workspaces').then(m => ({ default: m.VideoWorkspace })))
 
 // ===== M1 港股入口 (列表 + 详情) =====
