@@ -1,0 +1,122 @@
+%% ============================================================
+%% 时序图 ① — AI 续写异步任务全链路（4 步 checkpoint + resume 分支）
+%% ============================================================
+sequenceDiagram
+    autonumber
+    actor U as 作者
+    participant UI as AiDraftPanel.tsx
+    participant API as api/novel.py
+    participant JOB as NovelJobRegistry
+    participant ST as NovelStore
+    participant AI as ai_provider.generate_ai_text
+    participant FS as data/novel/books/&lt;id&gt;/
+
+    U->>UI: 点「续写本章」
+    UI->>API: GET /api/novel/status
+    API-->>UI: {available:false, code:ai_unavailable, reason}
+    Note over UI: UnavailableBar 展示原因 + 按钮置灰（fail-closed，不发请求）
+
+    U->>UI: 配置好 AI 后重试
+    UI->>API: POST .../chapters/ch-002/ai/draft {mode:continue}
+    API->>JOB: create_job(book, ch-002, continue)
+    JOB->>ST: get_book + get_state + check_write_gate
+    alt beat/summary 为空且 skip_gate=false
+        ST-->>JOB: raise WriteGateError
+        JOB-->>API: 422 {code:missing_beat}
+        API-->>UI: 422 → 黄条「本章细纲为空，AI 续写已禁用」
+    else 门禁通过
+        JOB->>FS: 原子写 checkpoints/job-*.json（4 步 pending, status=queued）
+        JOB->>JOB: asyncio.create_task(_run) + Semaphore(2) 排队
+        API-->>UI: 202 {job_id}
+    end
+
+    UI->>API: GET /api/novel/jobs/{job_id}（每 1.5s 轮询，跨刷新可读盘）
+    API->>JOB: get_job → 读盘
+    API-->>UI: NovelJob{status, steps, failed_step}
+
+    Note over JOB,AI: ── Step 1 context（纯本地）──
+    JOB->>ST: build_context_card(book, ch-002)
+    ST->>FS: 读 book.json + state.json + 最近 2 章
+    ST-->>JOB: 上下文卡 Markdown
+    JOB->>FS: 原子写 checkpoint（step1=done, artifacts.context_card_md）
+
+    Note over JOB,AI: ── Step 2 draft_text（AI 调用）──
+    JOB->>AI: await generate_ai_text(messages, max_tokens=…)
+    AI-->>JOB: 正文草稿 或 RuntimeError/ValueError
+    alt 调用失败
+        JOB->>FS: 写 checkpoint（step2=failed, failed_step=draft_text, error）
+        JOB-->>UI: 轮询得到 status=failed（step1 产物仍在盘中）
+        U->>UI: 点「重试该步骤」
+        UI->>API: POST /jobs/{id}/resume
+        API->>JOB: resume → 重跑（step1 标 skipped 不重跑）
+    else 成功
+        JOB->>ST: write_draft(book, ch-002, continue, text)
+        ST->>FS: 原子写 drafts/d-*.md（永不覆盖 正文/）
+        JOB->>FS: 写 checkpoint（step2=done, draft_id, draft_text）
+    end
+
+    Note over JOB,AI: ── Step 3 fact_snapshot（第二次 AI 调用）──
+    JOB->>AI: await generate_ai_text(fact_prompt)
+    AI-->>JOB: JSON 字符串
+    JOB->>JOB: parse_fact_snapshot(raw)
+    alt 非法 JSON / 缺字段
+        JOB->>FS: 写 checkpoint（step3=failed, failed_step=fact_snapshot）
+        JOB-->>UI: 「事实快照无法解析，未写入追踪态 — 正文不受影响」[重试][手工补录]
+    else 解析通过
+        JOB->>FS: 写 checkpoint（step3=done, artifacts.fact_json）
+    end
+
+    Note over JOB,FS: ── Step 4 ingest（只算计划，不写 state.json）──
+    JOB->>ST: 计算 ingest_plan（新角色/状态变化/伏笔/关系/摘要补丁）
+    JOB->>FS: 写 checkpoint（step4=done, status=done）
+
+    UI->>API: GET /jobs/{id} → status=done
+    UI->>U: 原文 ↔ 草稿 并排对照 + 摄取计划预览 + 写后自检清单
+    Note over UI: 此时 state.json 字节未变（P0-6④）
+
+
+%% ============================================================
+%% 时序图 ② — 草稿采纳 → 事实摄取 → 派生视图重建
+%% ============================================================
+sequenceDiagram
+    autonumber
+    actor U as 作者
+    participant UI as AiDraftPanel.tsx
+    participant API as api/novel.py
+    participant ST as NovelStore
+    participant FS as data/novel/books/&lt;id&gt;/
+    participant Q as 前端 React Query
+
+    U->>UI: 点「采纳」（润色模式：仅替换选中区间）
+    UI->>API: POST .../chapters/ch-002/adopt {draft_id, fact?}
+    API->>ST: read_draft(book_id, draft_id)
+    ST->>FS: 读 drafts/d-*.md
+    ST-->>API: 草稿全文
+
+    API->>ST: adopt_draft(book, ch-002, draft_id)
+    ST->>FS: 原子写 正文/ch-002-*.md（newline='' 保留换行习惯）
+    ST->>FS: book.json：status=published, word_count, updated_at, version+1
+    Note over ST,FS: 顺序固定：先正文后 book.json，任一步失败即 500 write_failed，正文已落盘不回滚（诚实上报）
+
+    alt 携带 fact（AI 快照 或 用户手工补录）
+        API->>API: ChapterFact.model_validate(fact)
+        alt 校验失败
+            API-->>UI: 422 {code:fact_parse_failed, message}
+            Note over UI: 正文已采纳成功，仅追踪态未写入 → 提示「正文已更新，追踪态未写入」[手工补录]
+        else 校验通过
+            API->>ST: ingest_facts(book, ch-002, fact)
+            ST->>FS: 读 state.json → 并入 characters / foreshadow / chapters
+            ST->>FS: 原子写 state.json（newline='\n'）
+            ST-->>API: BookState
+        end
+    end
+
+    API->>ST: rebuild_views(book_id)
+    ST->>FS: 遍历排序后的 characters / foreshadow / chapters
+    ST->>FS: 原子写 views/context-card.md, views/timeline.md, views/characters.md
+    ST-->>API: ["context-card.md","timeline.md","characters.md"]
+    API-->>UI: 200 {ok, chapter, state, views_rebuilt}
+
+    UI->>Q: invalidateQueries([QK.novelChapters, QK.novelState, QK.novelViews])
+    Q-->>UI: 中栏状态点 ● 正式、字数刷新；左栏设定摘要统计刷新
+    UI->>U: 「已采纳为正式 · 追踪态已更新 · 派生视图已重建」

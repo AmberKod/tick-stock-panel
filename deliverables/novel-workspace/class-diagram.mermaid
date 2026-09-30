@@ -1,0 +1,133 @@
+classDiagram
+    class NovelStore {
+        -Path root
+        +novel_root() Path
+        +book_dir(book_id) Path
+        +chapter_path(book_id, rel) Path
+        +list_books() list
+        +create_book(title) BookMeta
+        +get_book(book_id) BookMeta
+        +rename_book(book_id, title) BookMeta
+        +delete_book(book_id) None
+        +save_outline(book_id, version, nodes) BookMeta
+        +list_chapters(book_id, volume_id) list
+        +read_chapter(book_id, chapter_id) tuple
+        +write_chapter(book_id, chapter_id, content) dict
+        +write_draft(book_id, chapter_id, mode, text) str
+        +read_draft(book_id, draft_id) str
+        +get_state(book_id) BookState
+        +ingest_facts(book_id, chapter_id, fact) BookState
+        +adopt_draft(book_id, chapter_id, draft_id) dict
+        +rebuild_views(book_id) list
+        +read_view(book_id, name) str
+        +build_context_card(book_id, chapter_id) str
+        +export_chapter(book_id, chapter_id, fmt) tuple
+        +export_book(book_id, fmt) tuple
+    }
+    class NovelAI {
+        +ai_status() AiStatus
+        +check_write_gate(chapter, skip) None
+        +build_context_card(store, book_id, chapter_id) str
+        +assemble_messages(...) list
+        +parse_fact_snapshot(raw) ChapterFact
+        +lint_text(text) list
+        +generate_draft(messages) str
+    }
+    class NovelJobRegistry {
+        -dict tasks
+        -Semaphore sem
+        +create_job(...) NovelJob
+        +get_job(job_id) NovelJob
+        +resume(job_id) NovelJob
+        +cancel(job_id) NovelJob
+        -_run(job) None
+    }
+    class BookMeta {
+        +int version
+        +str id
+        +str title
+        +str setting_summary
+        +OutlineTree outline
+    }
+    class OutlineTree {
+        +list nodes
+    }
+    class OutlineVolume {
+        +str id
+        +str title
+        +int order
+        +list children
+    }
+    class OutlineChapter {
+        +str id
+        +str title
+        +str status
+        +str summary
+        +str beat
+        +str file
+        +int word_count
+    }
+    class BookState {
+        +RollingState rolling
+        +dict characters
+        +list foreshadow
+        +list chapters
+    }
+    class ChapterFact {
+        +str id
+        +list chars
+        +list state_changes
+        +list planted
+        +list resolved
+        +list relations
+        +str source
+    }
+    class RelationDelta {
+        +str source
+        +str target
+        +str delta
+    }
+    class NovelJob {
+        +str job_id
+        +str mode
+        +list steps
+        +JobArtifacts artifacts
+        +str status
+        +str failed_step
+    }
+    class JobStep {
+        +str name
+        +str status
+        +str at
+        +str error
+    }
+    class LintHit {
+        +str rule
+        +str message
+        +int line
+        +str excerpt
+    }
+    class AiStatus {
+        +bool configured
+        +str provider
+        +str model
+        +bool available
+        +str reason
+        +str code
+    }
+
+    NovelStore ..> BookMeta : 读写 book.json
+    NovelStore ..> BookState : 读写 state.json
+    NovelStore ..> NovelJob : 读写 checkpoints
+    BookMeta *-- OutlineTree
+    OutlineTree *-- OutlineVolume
+    OutlineVolume *-- OutlineChapter
+    BookState *-- ChapterFact
+    ChapterFact *-- RelationDelta
+    NovelJob *-- JobStep
+    NovelAI ..> NovelStore : 只读依赖
+    NovelAI ..> AiStatus : 产出
+    NovelAI ..> LintHit : 产出
+    NovelJobRegistry ..> NovelStore : 读写 checkpoint/drafts
+    NovelJobRegistry ..> NovelAI : 驱动 4 步
+    NovelJobRegistry ..> NovelJob : 状态机
