@@ -80,6 +80,8 @@ CHAPTERS_DIR = "正文"
 DRAFTS_DIR = "drafts"
 CHECKPOINTS_DIR = "checkpoints"
 VIEWS_DIR = "views"
+#: 换元仿写域目录名（与 CHAPTERS_DIR 同构，由 `rewrite_path()` 强制其内）。
+REWRITE_DIR = "rewrite"
 
 BOOKS_DIR = "books"
 BOOK_FILE = "book.json"
@@ -126,6 +128,13 @@ ERR_AI_UNAVAILABLE = "ai_unavailable"          # 503
 ERR_AI_ERROR = "ai_error"                      # 503
 ERR_WRITE_FAILED = "write_failed"              # 500
 ERR_INTERNAL = "internal_error"                # 500
+
+# 换元仿写域（增量，见 `deliverables/novel-workspace/ARCHITECTURE-rewrite.md` §8.3）。
+# 三个新异常都继承 NovelValidationError → 自动享受 api/novel.py 的
+# `_http_error(422, exc.code, ...)` 翻译，错误翻译表一行不改。
+ERR_REWRITE_SOURCE_REJECTED = "rewrite_source_rejected"   # 422
+ERR_REWRITE_GATE_BLOCKED = "rewrite_gate_blocked"         # 422
+ERR_REWRITE_ACK_REQUIRED = "rewrite_ack_required"         # 422
 
 
 # ─────────────────────────── 异常 ───────────────────────────
@@ -343,6 +352,34 @@ def validate_id(value: str, what: str = "id") -> str:
     return text
 
 
+def lexically_inside(root: Path, target: Path) -> bool:
+    """纯**词法**的「target 必须在 root 之内」判断 —— 路径校验的唯一口径。
+
+    为什么不用 `Path.resolve()`（QA P2-1）：`resolve()` 要做 FS 往返，在目录
+    **正被并发创建**的瞬间会返回瞬态值 —— 16 线程并发首次创建
+    `rewrite/drafts/` 时，约 1-2% 的**合法**路径被误判成 `path_escape`
+    （失败后立刻重算又能通过）。FastAPI 同步端点走线程池，可与 job 写盘并发，
+    用户就会看到莫名 422 或 job step2 failed。
+
+    `os.path.abspath` + `os.path.commonpath` 是纯字符串运算（只依赖 cwd，
+    不 stat、不 open），结果与并发完全无关 —— 校验要么恒真要么恒假。
+
+    代价（**明确记录**）：不解析符号链接。若**书籍目录内部**存在指向外部的
+    软链，词法判断会放行。本应用的书籍目录由 `create_book` 建为真实目录、
+    `file` 字段由 `slugify` 生成，且「能写磁盘 = 完全授信」（同 P2-3 的威胁
+    模型边界），故接受该代价；换来的是判定不受并发影响。
+    """
+    root_key = os.path.normcase(os.path.abspath(str(root)))
+    target_key = os.path.normcase(os.path.abspath(str(target)))
+    if root_key == target_key:
+        return True
+    try:
+        return os.path.commonpath([root_key, target_key]) == root_key
+    except ValueError:
+        # Windows 不同盘符没有公共前缀 → 绝不可能包含
+        return False
+
+
 def validate_rel_path(rel: str, root: Path) -> Path:
     """校验相对路径并拼接，拒绝 `..` 与绝对路径（目录穿越防护）。
 
@@ -361,12 +398,18 @@ def validate_rel_path(rel: str, root: Path) -> Path:
         raise NovelValidationError("相对路径不能为空", code=ERR_PATH_ESCAPE)
     if text.startswith("/") or text.startswith("\\") or re.match(r"^[A-Za-z]:[\\/]", text):
         raise NovelValidationError(f"不接受绝对路径: {text!r}", code=ERR_PATH_ESCAPE)
+    # ★盘符注入★：`drafts/C:/Windows/win.ini` 这种写法在**字符串层面**看起来只是
+    # 「目录里的一个子路径」，但 `Path.resolve()` 会把它解析成另一个盘符的绝对路径。
+    # 改成词法校验后不再做 FS 往返，就必须在**每一段**上挡掉盘符，否则等于开了一个
+    # 跨盘逃逸口子（QA `test_store_path_helpers_respect_boundary` 守着这条）。
+    for part in Path(text).parts:
+        if re.match(r"^[A-Za-z]:", part):
+            raise NovelValidationError(f"不接受绝对路径或盘符: {text!r}", code=ERR_PATH_ESCAPE)
 
     base = Path(root)
     candidate = base / text
-    resolved_root = base.resolve()
-    resolved = candidate.resolve()
-    if resolved != resolved_root and resolved_root not in resolved.parents:
+    # 词法判断（不做 FS 往返）—— 见 `lexically_inside` 的并发根因说明。
+    if not lexically_inside(base, candidate):
         raise NovelValidationError(f"路径逃逸出书籍目录: {text!r}", code=ERR_PATH_ESCAPE)
     return candidate
 
@@ -501,6 +544,14 @@ def _atomic_write_json(path: Path, payload: object) -> None:
     _atomic_write_text(path, text, newline="\n")
 
 
+# ── 公开别名（换元仿写域复用，绝不复制原子写实现）──
+# 私有名 `_atomic_write_text` / `_atomic_write_json` 保留给既有的 12 处调用点
+# （一行不动），新代码统一用无下划线的公开名。两份实现同一份代码，
+# 将来改 WinError5 退避逻辑只改一处。
+atomic_write_text = _atomic_write_text
+atomic_write_json = _atomic_write_json
+
+
 def _read_text(path: Path) -> str:
     """读文本文件，不做换行翻译（`newline=""`，字节级保留）。"""
     with path.open("r", encoding="utf-8", newline="") as stream:
@@ -580,11 +631,36 @@ class NovelStore:
              save_outline 共用同一入口，不会有人抄漏一份。
         """
         path = validate_rel_path(rel_file, self.book_dir(book_id))
-        chapters_root = self.chapters_dir(book_id).resolve()
-        resolved = path.resolve()
-        if resolved != chapters_root and chapters_root not in resolved.parents:
+        # 与 `rewrite_path()` 共用同一个词法口径 —— 并发下不会误判（QA P2-1）。
+        if not lexically_inside(self.chapters_dir(book_id), path):
             raise NovelValidationError(
                 f"章节文件必须位于 {CHAPTERS_DIR}/ 内: {rel_file!r}", code=ERR_PATH_ESCAPE
+            )
+        return path
+
+    def rewrite_dir(self, book_id: str) -> Path:
+        """`rewrite/` 目录（换元仿写域的根，已校验 book_id）。"""
+        return self.book_dir(book_id) / REWRITE_DIR
+
+    def rewrite_path(self, book_id: str, rel_file: str) -> Path:
+        """把仿写域的相对路径拼成绝对路径，并约束在 `rewrite/` 内。
+
+        与 `chapter_path()` **完全同构**的两道校验，缺一不可：
+          1. `validate_rel_path` —— 不许逃出书籍目录（防 `../`、绝对路径、盘符）。
+          2. **必须在 `rewrite/` 之内** —— 否则仿写域的文件名可以指向
+             `book.json` / `state.json` / `正文/*.md`，一次原子写就能毁掉一本书。
+             这是「仿写生成阶段零写入权威数据」的**结构性保证**（不靠自觉）。
+
+        该函数必须与 `chapter_path()` 放在同一个类里 —— 「路径校验唯一入口」
+        这条纪律的价值就在于「不会有人抄漏一份」。把它丢到新文件等于开第二个入口。
+        """
+        path = validate_rel_path(rel_file, self.book_dir(book_id))
+        # 词法判断：**不**用 `Path.resolve()`。QA P2-1：并发首次建 `rewrite/drafts/`
+        # 时 `resolve()` 返回瞬态值，约 1-2% 合法路径被误判 `path_escape`。
+        # 详见 `lexically_inside`。
+        if not lexically_inside(self.rewrite_dir(book_id), path):
+            raise NovelValidationError(
+                f"仿写文件必须位于 {REWRITE_DIR}/ 内: {rel_file!r}", code=ERR_PATH_ESCAPE
             )
         return path
 

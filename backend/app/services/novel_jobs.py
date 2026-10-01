@@ -50,6 +50,16 @@ MAX_CONCURRENT_JOBS = 2
 _SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 
+def ai_semaphore() -> asyncio.Semaphore:
+    """共享并发闸门（换元仿写的 `RewriteJobRegistry` 复用同一把）。
+
+    AI 网关是**共享外部配额**。若仿写另起一把 `Semaphore(2)`，
+    「1 个续写 + 1 个仿写」实际并发就是 4，会把用户 Key 打爆。
+    共享后全局上限恒为 2。
+    """
+    return _SEMAPHORE
+
+
 class NovelJobError(RuntimeError):
     """任务层异常基类。
 

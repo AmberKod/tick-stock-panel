@@ -110,6 +110,14 @@ def _guarded() -> Iterator[None]:
         raise _as_http(exc) from exc
 
 
+# ── 公开别名（换元仿写路由复用，**不复制错误翻译表**）──
+# api/novel_rewrite.py 通过这三个别名复用同一套翻译口径，
+# 私有名 `_http_error` / `_as_http` / `_guarded` 保留给本文件既有端点。
+http_error = _http_error
+as_http = _as_http
+guarded = _guarded
+
+
 # ─────────────────────────── 请求模型 ───────────────────────────
 
 
@@ -567,6 +575,11 @@ def _validate_fact(payload: dict[str, Any]) -> ChapterFact:
         return ChapterFact.model_validate(payload)
     except Exception as exc:
         raise novel_ai.FactParseError(f"事实快照校验失败: {exc}") from exc
+
+
+#: 公开别名（换元仿写路由复用）。必须放在 `_validate_fact` 定义**之后**，
+#: 否则模块导入时该名字还不存在（模块级别名是"取值"，不是"延迟引用"）。
+validate_fact = _validate_fact
 
 
 def _view_generated_at(store: NovelStore, book_id: str, name: str) -> str:
