@@ -391,3 +391,452 @@ export const LINT_RULE_LABELS: Record<string, string> = {
   ai_cliche: 'AI 高频味词',
   repeat_sentence: '连续重复句',
 }
+
+// ===== 换元仿写（rewrite）=====
+//
+// 与 backend/app/services/novel_rewrite_store.py 的 Pydantic 模型手工同步。
+// 三条必须记住的对齐约定（踩了就是静默错位）：
+//   1. 关系边的 **HTTP/磁盘 JSON 键名是 from / to**（Pydantic 字段名是
+//      source/target，因为 `from` 是 Python 保留字）。本文件按 HTTP 侧写。
+//   2. 质检四态 `CheckStatus` 是**封闭联合**，禁止增加第五态、禁止把
+//      `unavailable` 渲染成 `pass`（「待核」≠「通过」）。
+//   3. 免责文案以后端下发的 `report.disclaimer.text` 为**唯一来源**，
+//      前端不另写一份（P0-6：不许出现承诺式措辞）。
+
+/** 质检四态（★禁止增加第五态，禁止混淆★） */
+export type CheckStatus = 'pass' | 'warn' | 'fail' | 'unavailable'
+
+export const CHECK_STATUSES: readonly CheckStatus[] = [
+  'pass',
+  'warn',
+  'fail',
+  'unavailable',
+] as const
+
+/** 八项质检的 key（与后端 CHECK_KEYS 同序） */
+export type CheckKey =
+  | 'proper_noun'
+  | 'signature_scene'
+  | 'relation_topology'
+  | 'beat_sequence'
+  | 'near_duplicate'
+  | 'unique_prop'
+  | 'one_to_one_character'
+  | 'isomorphic_reversal'
+
+export const CHECK_KEYS: readonly CheckKey[] = [
+  'proper_noun',
+  'signature_scene',
+  'relation_topology',
+  'beat_sequence',
+  'near_duplicate',
+  'unique_prop',
+  'one_to_one_character',
+  'isomorphic_reversal',
+] as const
+
+export const CHECK_LABELS: Record<CheckKey, string> = {
+  proper_noun: '① 原作专名黑名单',
+  signature_scene: '② 标志场景黑名单',
+  relation_topology: '③ 关系拓扑指纹（命门）',
+  beat_sequence: '④ 桥段功能序列（命门）',
+  near_duplicate: '⑤ 原句 / 近复制句',
+  unique_prop: '⑥ 独特道具 / 具体对白',
+  one_to_one_character: '⑦ 一对一人物映射',
+  isomorphic_reversal: '⑧ 同构反转底牌',
+}
+
+/** 四态标签（`unavailable` 是「待核」，不是「通过」） */
+export const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
+  pass: '通过',
+  warn: '需人工核对',
+  fail: '硬阻断',
+  unavailable: '待核',
+}
+
+/** 四态状态点字符 */
+export const CHECK_STATUS_DOT: Record<CheckStatus, string> = {
+  pass: '●',
+  warn: '◐',
+  fail: '✕',
+  unavailable: '?',
+}
+
+/**
+ * 四态文字配色（穷举表，新增状态会在编译期报错）。
+ * `pass` 用中性前景色 —— 域色 #22c55e 只用于状态点（见 CHECK_PASS_COLOR）。
+ */
+export const CHECK_STATUS_TONE: Record<CheckStatus, string> = {
+  pass: 'text-secondary',
+  warn: 'text-warning',
+  fail: 'text-danger',
+  unavailable: 'text-muted',
+}
+
+/** 域色 #22c55e 的唯一合法用途之一：pass 状态点。 */
+export const CHECK_PASS_COLOR = '#22c55e'
+
+/**
+ * **免责声明不存在第二来源** —— 前端任何分支都不写免责措辞。
+ *
+ * 声明只能来自两处、且两处同源：
+ *   1. `GET .../rewrite/disclaimer`（生成前，报告还没有的时候）；
+ *   2. `report.disclaimer`（出了报告之后）。
+ * 若端点取不到，UI 只能显示「加载失败」这样的**状态句**（见 RiskNoticeCard 的
+ * `DISCLAIMER_LOAD_FAILED`），绝不能显示替代声明 —— 否则将来改了后端文案，
+ * 用户在生成前（告知最该生效的时机）看到的就是过期声明。
+ */
+
+/** 产物类型（plan 设定卡 / outline 章级大纲 / chapter 分章草稿） */
+export type RewriteKind = 'plan' | 'outline' | 'chapter'
+
+export const REWRITE_KIND_LABELS: Record<RewriteKind, string> = {
+  plan: '五层重建设定卡',
+  outline: '六章级大纲',
+  chapter: '分章草稿',
+}
+
+// ===== 结构蓝图 =====
+
+/** 来源标注（只存笔记/描述，**绝不存原文**） */
+export interface SourceRef {
+  label: string
+  work_type: string
+  note: string
+}
+
+/** 抽象层功能位（思想层面，不受著作权保护） */
+export interface FunctionSlot {
+  slot: string
+  trait: string
+}
+
+export interface AbstractLayer {
+  function_slots: FunctionSlot[]
+  emotion_beats: string[]
+  info_gap: string[]
+  reversal_types: string[]
+  reversal_positions: number[]
+  motifs: string[]
+  pacing: string
+}
+
+/** 关系图有向边（HTTP 键名 from / to） */
+export interface RewriteRelationEdge {
+  from: string
+  to: string
+  /** 关系类型：师徒 / 同门 / 敌对 / 管理 / 血缘 … */
+  kind: string
+  /** 权力流向："高→低" / "低→高" / "对等" */
+  power: string
+}
+
+export interface L1Symbols {
+  banned: string[]
+  new_lexicon: Record<string, string>
+}
+
+export interface L2Scenes {
+  banned: string[]
+  new_scenes: string[]
+}
+
+export interface L3Relations {
+  source_graph: RewriteRelationEdge[]
+  /** A1 裁定：降级为只读展示，判据只用两张图 */
+  source_fingerprint: Record<string, unknown> | null
+  new_graph: RewriteRelationEdge[]
+}
+
+export interface L4Events {
+  new_causal_chain: string[]
+}
+
+export interface L5Beats {
+  source_seq: string[]
+  new_seq: string[]
+}
+
+export interface RebuildLayer {
+  L1_symbols: L1Symbols
+  L2_scenes: L2Scenes
+  L3_relations: L3Relations
+  L4_events: L4Events
+  L5_beats: L5Beats
+}
+
+export interface GateInfo {
+  required_layers: string[]
+  skipped_at: string | null
+  skip_reason: string
+}
+
+export interface Blueprint {
+  version: number
+  id: string
+  book_id: string
+  title: string
+  created_at: string
+  updated_at: string
+  source_ref: SourceRef
+  abstract: AbstractLayer
+  rebuild: RebuildLayer
+  gate: GateInfo
+}
+
+/** 空蓝图（新建书时的初始形态；不填充任何示例内容 —— 空就是空）。 */
+export function emptyBlueprint(bookId = ''): Blueprint {
+  return {
+    version: 1,
+    id: '',
+    book_id: bookId,
+    title: '',
+    created_at: '',
+    updated_at: '',
+    source_ref: { label: '', work_type: '', note: '' },
+    abstract: {
+      function_slots: [],
+      emotion_beats: [],
+      info_gap: [],
+      reversal_types: [],
+      reversal_positions: [],
+      motifs: [],
+      pacing: '',
+    },
+    rebuild: {
+      L1_symbols: { banned: [], new_lexicon: {} },
+      L2_scenes: { banned: [], new_scenes: [] },
+      L3_relations: { source_graph: [], source_fingerprint: null, new_graph: [] },
+      L4_events: { new_causal_chain: [] },
+      L5_beats: { source_seq: [], new_seq: [] },
+    },
+    gate: { required_layers: ['L3', 'L5'], skipped_at: null, skip_reason: '' },
+  }
+}
+
+/** 关系拓扑指纹（L3 判据的展示态） */
+export interface RelationFingerprint {
+  node_count: number
+  edge_count: number
+  nodes: string[]
+  degrees: number[]
+  kinds: Record<string, number>
+  flow: Record<string, number>
+  unknown_power: number
+}
+
+// ===== 质检报告 =====
+
+export interface Evidence {
+  line: number | null
+  excerpt: string
+}
+
+export interface CheckItem {
+  key: string
+  layer: string
+  mode: string
+  status: CheckStatus
+  detail: string
+  evidence: Evidence[]
+  human_tip: string
+  human_checked: boolean
+  checked_at: string | null
+  /** 算法中间量：展示「为什么这么判」（可核对性） */
+  metrics: Record<string, unknown>
+}
+
+export interface ReverseQuestion {
+  q: string
+  expect: string
+  human_checked: boolean
+  human_answer: string | null
+}
+
+export interface ReportSummary {
+  /** fail 数（硬阻断） */
+  blocking: number
+  warn: number
+  unavailable: number
+  passed: number
+  adoptable: boolean
+}
+
+export interface ReportAck {
+  required: boolean
+  acknowledged_at: string | null
+  disclaimer_version: string | null
+  checked_keys: string[]
+}
+
+export interface Disclaimer {
+  version: string
+  text: string
+}
+
+export interface RewriteReport {
+  rewrite_id: string
+  blueprint_id: string
+  book_id: string
+  chapter_id: string | null
+  kind: RewriteKind
+  /** 相对 rewrite/ 的草稿路径 */
+  draft_file: string
+  generated_at: string
+  disclaimer: Disclaimer
+  checks: CheckItem[]
+  reverse_three: ReverseQuestion[]
+  summary: ReportSummary
+  ack: ReportAck
+}
+
+// ===== 仿写 job =====
+
+export type RewriteStepName = 'precheck' | 'generate' | 'evaluate' | 'finalize'
+
+export interface RewriteJobStep {
+  name: RewriteStepName
+  status: StepStatus
+  at: string | null
+  error: string | null
+}
+
+export const REWRITE_STEP_ORDER: RewriteStepName[] = [
+  'precheck',
+  'generate',
+  'evaluate',
+  'finalize',
+]
+
+export const REWRITE_STEP_LABELS: Record<RewriteStepName, string> = {
+  precheck: '输入预检',
+  generate: 'AI 生成',
+  evaluate: '本地质检',
+  finalize: '出报告',
+}
+
+export interface RewriteArtifacts {
+  precheck_hits: Record<string, unknown>[]
+  draft_rel: string | null
+  draft_text: string | null
+  outline_patch: Record<string, unknown> | null
+  character_table: Record<string, unknown>[]
+  reversal_table: Record<string, unknown>[]
+  lint_hits: Record<string, unknown>[]
+}
+
+export interface RewriteJob {
+  job_id: string
+  book_id: string
+  chapter_id: string | null
+  kind: RewriteKind
+  blueprint_id: string
+  risk_ack: boolean
+  skip_gate: boolean
+  created_at: string
+  updated_at: string
+  steps: RewriteJobStep[]
+  artifacts: RewriteArtifacts
+  rewrite_id: string | null
+  status: JobStatus
+  failed_step: string | null
+}
+
+// ===== 请求 / 响应包装 =====
+
+export interface BlueprintResponse {
+  ok: boolean
+  blueprint: Blueprint
+  ready: boolean
+  missing_layers: string[]
+}
+
+/** 预检命中项（后端绝不会回显被拒原文全文，只给 ≤40 字片段） */
+export interface PrecheckHit {
+  field: string
+  rule: string
+  excerpt: string
+  hint: string
+}
+
+/** 预检结果：422 也是**正常返回**（要把 hits + 引导示例展示给用户）。 */
+export interface PrecheckResult {
+  ok: boolean
+  passed: boolean
+  hits: PrecheckHit[]
+  sample: string
+  honesty_note: string
+  message: string
+}
+
+export interface ReportResponse {
+  ok: boolean
+  report: RewriteReport
+}
+
+export interface ReportListItem {
+  rewrite_id: string
+  kind: string
+  generated_at: string
+  blocking: number
+  adoptable: boolean
+}
+
+export interface ReportsResponse {
+  ok: boolean
+  reports: ReportListItem[]
+  count: number
+}
+
+export interface RewriteAdoptResponse {
+  ok: boolean
+  chapter?: OutlineChapter
+  state?: BookState
+  views_rebuilt?: string[]
+  outline?: OutlineTree
+  version?: number
+}
+
+export interface RewriteSnapshotResponse {
+  ok: boolean
+  snapshot: Record<string, unknown>
+}
+
+/** `GET .../rewrite/disclaimer` —— 免责声明的**单点下发**（生成前用）。 */
+export interface RewriteDisclaimerResponse {
+  ok: boolean
+  disclaimer: Disclaimer
+  /** 预检诚实声明（UI 固定小字，后端同时下发） */
+  honesty_note: string
+}
+
+export interface RewriteGenerateRequest {
+  risk_ack?: boolean
+  skip_gate?: boolean
+  skip_reason?: string
+  chapter_id?: string | null
+  version?: number | null
+}
+
+export interface RewriteCheckPayload {
+  key: string
+  human_checked: boolean
+}
+
+export interface RewriteReversePayload {
+  index: number
+  human_checked: boolean
+  human_answer?: string | null
+}
+
+export interface RewriteCheckRequest {
+  checks: RewriteCheckPayload[]
+  reverse: RewriteReversePayload[]
+}
+
+export interface RewriteAdoptRequest {
+  ack?: boolean
+  target?: 'chapter' | 'outline'
+  version?: number | null
+  fact?: Record<string, unknown> | null
+}

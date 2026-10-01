@@ -168,6 +168,19 @@ export const QK = {
   novelState:           (bookId: string) => ['novel', 'state', bookId] as const,
   novelView:            (bookId: string, name: string) => ['novel', 'view', bookId, name] as const,
   novelJob:             (jobId: string) => ['novel', 'job', jobId] as const,
+
+  // 换元仿写（rewrite）—— 同样带 'novel' 前缀且不进 SSE_INVALIDATE_PREFIXES。
+  // 报告 key 必须带 bookId + rewriteId：报告是磁盘上的独立文件，切报告不能串。
+  novelRewriteBlueprint: (bookId: string) => ['novel', 'rewrite-blueprint', bookId] as const,
+  novelRewriteReports:   (bookId: string, kind?: string) =>
+                           ['novel', 'rewrite-reports', bookId, kind ?? ''] as const,
+  novelRewriteReport:    (bookId: string, rewriteId: string) =>
+                           ['novel', 'rewrite-report', bookId, rewriteId] as const,
+  novelRewriteJob:       (bookId: string, jobId: string) => ['novel', 'rewrite-job', bookId, jobId] as const,
+  novelRewriteSnapshot:  (bookId: string) => ['novel', 'rewrite-snapshot', bookId] as const,
+  // 免责声明是全局常量，但端点挂在 book 路径下；key 带 bookId 保持一致，
+  // 实际由 staleTime: Infinity 保证只取一次。
+  novelRewriteDisclaimer: (bookId: string) => ['novel', 'rewrite-disclaimer', bookId] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

@@ -12,6 +12,24 @@ type RequestOptions = RequestInit & {
   quiet?: boolean
 }
 
+/**
+ * 后端结构化错误体的 `code`（如 `/api/novel/*` 的 `ai_unavailable` /
+ * `rewrite_ack_required`）。
+ *
+ * **只加字段，不改既有行为**：既有调用方读 `err.message` 的逻辑一行不动，
+ * `code` 是可选的附加信息；取不到就是 undefined。
+ */
+export type ErrorWithCode = Error & { code?: string }
+
+/** 从 `request` 抛出的 Error 上取后端错误码（取不到返回 null）。 */
+export function errorCode(err: unknown): string | null {
+  if (err instanceof Error) {
+    const code = (err as ErrorWithCode).code
+    return typeof code === 'string' && code ? code : null
+  }
+  return null
+}
+
 export async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const { quiet, ...fetchInit } = init ?? {}
   const isFormData = fetchInit.body instanceof FormData
@@ -22,6 +40,9 @@ export async function request<T>(path: string, init?: RequestOptions): Promise<T
   const res = await fetch(`${BASE}${path}`, { ...fetchInit, headers })
   if (!res.ok) {
     let detail = ''
+    // 后端结构化错误体里的 code（仅附加，不参与 message 拼接 —— 不能让
+    // 错误码混进给用户看的文案里)。
+    let errCode: string | undefined
     try {
       const j = JSON.parse(await res.text())
       const raw = j.detail ?? j.message ?? ''
@@ -33,14 +54,17 @@ export async function request<T>(path: string, init?: RequestOptions): Promise<T
       } else if (raw && typeof raw === 'object') {
         // 后端结构化错误体 {code, message}(如 /api/novel/*)：优先取 message 给人看，
         // 否则 JSON.stringify 会把 code 也堆进 toast，读起来像报错日志。
-        const rawObj = raw as { message?: unknown }
+        const rawObj = raw as { message?: unknown; code?: unknown }
         detail = typeof rawObj.message === 'string' ? rawObj.message : JSON.stringify(raw)
+        if (typeof rawObj.code === 'string' && rawObj.code) errCode = rawObj.code
       }
     } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
     // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
     if (res.status !== 401 && !quiet) toast(msg, 'error')
-    throw new Error(msg)
+    const err: ErrorWithCode = new Error(msg)
+    if (errCode) err.code = errCode
+    throw err
   }
   return res.json() as Promise<T>
 }

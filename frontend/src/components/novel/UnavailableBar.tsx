@@ -4,7 +4,7 @@
 // 设计原则 P2（诚实不可用）：能力缺失/调用失败必须显式说明原因，
 // 禁止静默空结果、禁止把失败包装成「暂无内容」。
 
-import { AlertTriangle, Info, WifiOff } from 'lucide-react'
+import { AlertTriangle, Info, ShieldAlert, WifiOff } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
@@ -17,6 +17,10 @@ export type UnavailableCode =
   | 'write_failed'
   | 'lint_hits'
   | 'generic'
+  // 换元仿写域（backend/app/services/novel_store.py 新增的三个 422 码）
+  | 'rewrite_source_rejected'
+  | 'rewrite_gate_blocked'
+  | 'rewrite_ack_required'
 
 export interface UnavailableBarProps {
   code: UnavailableCode
@@ -34,6 +38,9 @@ const ICONS: Record<UnavailableCode, LucideIcon> = {
   write_failed: AlertTriangle,
   lint_hits: Info,
   generic: Info,
+  rewrite_source_rejected: ShieldAlert,
+  rewrite_gate_blocked: ShieldAlert,
+  rewrite_ack_required: ShieldAlert,
 }
 
 const TONES: Record<UnavailableCode, string> = {
@@ -44,6 +51,11 @@ const TONES: Record<UnavailableCode, string> = {
   write_failed: 'border-danger/40 bg-danger/10 text-foreground',
   lint_hits: 'border-border bg-elevated text-secondary',
   generic: 'border-border bg-elevated text-secondary',
+  // 仿写域：预检拒绝 / 闸门未过 / 未完成勾选，都是「当前这一步被挡住」，
+  // 不是系统故障 —— 一律走 warning 通道（不用 danger，避免被误读成数据丢了）。
+  rewrite_source_rejected: 'border-warning/40 bg-warning/10 text-foreground',
+  rewrite_gate_blocked: 'border-warning/40 bg-warning/10 text-foreground',
+  rewrite_ack_required: 'border-warning/40 bg-warning/10 text-foreground',
 }
 
 const ICON_TONES: Record<UnavailableCode, string> = {
@@ -53,6 +65,9 @@ const ICON_TONES: Record<UnavailableCode, string> = {
   write_failed: 'text-danger',
   lint_hits: 'text-muted',
   generic: 'text-muted',
+  rewrite_source_rejected: 'text-warning',
+  rewrite_gate_blocked: 'text-warning',
+  rewrite_ack_required: 'text-warning',
 }
 
 const DEFAULT_MESSAGES: Record<UnavailableCode, string> = {
@@ -68,6 +83,13 @@ const DEFAULT_MESSAGES: Record<UnavailableCode, string> = {
   // 场景 5（写后自检命中）
   lint_hits: '自检提醒 — 仅提醒，未改写你的文字。',
   generic: '该能力当前不可用。',
+  // 仿写域默认文案（具体原因由调用方传 message 覆盖 —— 后端给的更准）
+  rewrite_source_rejected:
+    '输入疑似原文，已被预检拒绝（未保存）。请改写成结构笔记后重试 —— 本工具不接收原文。',
+  rewrite_gate_blocked:
+    'L3 关系拓扑与 L5 桥段序列是命门层，未填表不能发起生成。补齐后可继续。',
+  rewrite_ack_required:
+    '采纳前置条件未满足：硬阻断项未清零，或仍有待核项未勾选，或反向三问未勾完。',
 }
 
 export function UnavailableBar({ code, message, action, className }: UnavailableBarProps) {

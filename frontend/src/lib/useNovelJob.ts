@@ -9,7 +9,7 @@ import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 
 import { novelApi } from './novelApi'
 import { QK } from './queryKeys'
-import type { JobStatus, NovelJob } from './novelTypes'
+import type { JobStatus, NovelJob, RewriteJob } from './novelTypes'
 
 /** 终态集合 —— 与后端 `novel_jobs.TERMINAL_JOB_STATUSES` 严格一致。 */
 export const NOVEL_JOB_TERMINAL: readonly JobStatus[] = ['done', 'failed', 'cancelled'] as const
@@ -26,6 +26,13 @@ export interface UseNovelJobResult {
   /** 是否仍在轮询中（非终态） */
   polling: boolean
   query: UseQueryResult<NovelJob, Error>
+}
+
+/** 仿写任务轮询结果（与 `UseNovelJobResult` 同构，只换 job 类型）。 */
+export interface UseRewriteJobResult {
+  job: RewriteJob | null
+  polling: boolean
+  query: UseQueryResult<RewriteJob, Error>
 }
 
 /**
@@ -49,6 +56,37 @@ export function useNovelJob(jobId: string | null): UseNovelJobResult {
       return POLL_INTERVAL_MS
     },
     // 失败时不要无限重试到刷屏；轮询本身会再拉
+    retry: 1,
+  })
+
+  const job = query.data ?? null
+  return {
+    job,
+    polling: !!jobId && !isJobTerminal(job?.status),
+    query,
+  }
+}
+
+/**
+ * 轮询仿写任务（`RewriteJob`）。
+ *
+ * 与 `useNovelJob` 同构（同一份终态集合 / 轮询节奏），差异只有两点：
+ *   1. 端点带 `book_id`：`/books/{id}/rewrite/jobs/{job_id}`；
+ *   2. 终态之外还会产出 `rewrite_id` —— 调用方在 `status === 'done'` 时
+ *      把它写回父级 state 即可拉到报告，**不需要额外列表请求**。
+ */
+export function useRewriteJob(bookId: string | null, jobId: string | null): UseRewriteJobResult {
+  const query = useQuery<RewriteJob, Error>({
+    queryKey: QK.novelRewriteJob(bookId ?? '', jobId ?? ''),
+    queryFn: () => novelApi.getRewriteJob(bookId as string, jobId as string),
+    enabled: !!bookId && !!jobId,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchInterval: (q) => {
+      const status = q.state.data?.status
+      if (isJobTerminal(status)) return false
+      return POLL_INTERVAL_MS
+    },
     retry: 1,
   })
 

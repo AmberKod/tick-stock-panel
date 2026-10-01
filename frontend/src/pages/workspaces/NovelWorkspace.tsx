@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, Plus } from 'lucide-react'
+import { BookOpen, PenLine, Plus, Shuffle } from 'lucide-react'
 
 import { errMessage, novelApi } from '@/lib/novelApi'
 import { QK } from '@/lib/queryKeys'
@@ -20,14 +20,24 @@ import { AiDraftPanel } from '@/components/novel/AiDraftPanel'
 import { BookshelfOutlinePanel } from '@/components/novel/BookshelfOutlinePanel'
 import { ChapterEditor } from '@/components/novel/ChapterEditor'
 import { ChapterListPanel } from '@/components/novel/ChapterListPanel'
+import { RewritePanel } from '@/components/novel/RewritePanel'
 import type { ChapterCard } from '@/lib/novelTypes'
 
-type MobileTab = 'books' | 'chapters' | 'editor'
+type MobileTab = 'books' | 'chapters' | 'editor' | 'rewrite'
 
 const MOBILE_TABS: { key: MobileTab; label: string }[] = [
   { key: 'books', label: '书架' },
   { key: 'chapters', label: '章节' },
   { key: 'editor', label: '编辑' },
+  { key: 'rewrite', label: '仿写' },
+]
+
+/** 右栏两种模式：写作（编辑器 + AI 续写/润色） / 仿写（换元仿写工作台）。 */
+type EditorMode = 'write' | 'rewrite'
+
+const EDITOR_MODES: { key: EditorMode; label: string; icon: typeof PenLine }[] = [
+  { key: 'write', label: '写作', icon: PenLine },
+  { key: 'rewrite', label: '仿写', icon: Shuffle },
 ]
 
 export function NovelWorkspace() {
@@ -39,6 +49,10 @@ export function NovelWorkspace() {
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [mobileTab, setMobileTab] = useState<MobileTab>('books')
+  // 右栏模式与仿写态由父级持有 —— 切栏 / 切移动端 tab 都不丢正在跑的任务。
+  const [editorMode, setEditorMode] = useState<EditorMode>('write')
+  const [rewriteJobId, setRewriteJobId] = useState<string | null>(null)
+  const [rewriteId, setRewriteId] = useState<string | null>(null)
 
   // 移动端判定：订阅 matchMedia，不引第三方依赖
   useEffect(() => {
@@ -78,6 +92,8 @@ export function NovelWorkspace() {
     setChapterId(null)
     setSelection('')
     setJobId(null)
+    setRewriteJobId(null)
+    setRewriteId(null)
   }, [bookId])
 
   useEffect(() => {
@@ -110,6 +126,9 @@ export function NovelWorkspace() {
   }
 
   const emptyState = books.length === 0 && !booksQuery.isLoading
+
+  // 右栏到底渲染哪一块：移动端跟顶部四段控件，桌面端跟 [写作|仿写] 切换。
+  const showRewrite = isMobile ? mobileTab === 'rewrite' : editorMode === 'rewrite'
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-base">
@@ -173,11 +192,58 @@ export function NovelWorkspace() {
           />
         )}
 
-        {/* ③ 右栏：编辑器 + 底部 AI 面板 */}
-        {(!isMobile || mobileTab === 'editor') && (
+        {/* ③ 右栏：写作（编辑器 + 底部 AI 面板）/ 仿写（换元仿写工作台） */}
+        {(!isMobile || mobileTab === 'editor' || mobileTab === 'rewrite') && (
           <div className="flex min-w-0 flex-1 flex-col">
+            {!isMobile && (
+              <div className="flex shrink-0 items-center gap-1 border-b border-border bg-surface px-2 py-1.5">
+                {EDITOR_MODES.map((mode) => {
+                  const Icon = mode.icon
+                  const active = editorMode === mode.key
+                  return (
+                    <button
+                      key={mode.key}
+                      type="button"
+                      onClick={() => setEditorMode(mode.key)}
+                      aria-pressed={active}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded-btn px-2 py-1 text-xs transition-colors',
+                        active ? 'bg-elevated text-foreground' : 'text-muted hover:text-foreground',
+                      )}
+                    >
+                      <Icon
+                        className="h-3.5 w-3.5"
+                        // 域色 #22c55e 的合法用途之一：当前模式图标
+                        style={active ? { color: '#22c55e' } : undefined}
+                        aria-hidden="true"
+                      />
+                      {mode.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
             {emptyState ? (
               <EmptyBookshelf dataDirAbs={dataDirAbs} />
+            ) : showRewrite ? (
+              <RewritePanel
+                bookId={bookId}
+                chapterId={chapterId}
+                aiStatus={statusQuery.data ?? null}
+                rewriteJobId={rewriteJobId}
+                rewriteId={rewriteId}
+                onJobCreated={setRewriteJobId}
+                onReportSelected={setRewriteId}
+                onAdopted={() => {
+                  if (!bookId) return
+                  qc.invalidateQueries({ queryKey: QK.novelChapters(bookId) })
+                  qc.invalidateQueries({ queryKey: QK.novelState(bookId) })
+                  qc.invalidateQueries({ queryKey: QK.novelOutline(bookId) })
+                  qc.invalidateQueries({ queryKey: QK.novelBooks })
+                  qc.invalidateQueries({ queryKey: QK.novelRewriteReports(bookId) })
+                }}
+              />
             ) : (
               <ChapterEditor
                 bookId={bookId}
