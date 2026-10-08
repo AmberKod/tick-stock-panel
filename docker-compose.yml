@@ -48,10 +48,47 @@ services:
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
 
+  # S2-1: Postgres 16.9。
+  # 当前 TSP 完全不依赖数据库(状态层迁移在 S4), 所以 db 与 app 必须彼此独立:
+  #   - 不设 depends_on —— 否则 DB 起不来会拖垮正在运行的 TSP, 而 TSP 现在根本
+  #     不需要 DB; 两者独立起停才符合"零中断"要求。
+  #   - 不给 app 加 DATABASE_URL —— 代码当前不用这些变量, 加了只会造成困惑,
+  #     而且改 app 的 environment 会触发容器重建, 纯属打断线上服务。
+  # 等 S4 状态层迁移时再接线。
+  db:
+    image: postgres:16.9
+    container_name: tsp_db
+    # 凭据全部来自 .env(已被 .gitignore:55 忽略), 这里只做变量引用, 绝不硬编码。
+    # POSTGRES_PASSWORD 用 :? 语法, 缺失时 compose 直接报错, 避免空密码静默启动。
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-tsp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 .env 中设置}
+      - POSTGRES_DB=${POSTGRES_DB:-tsp}
+      # 与 app 对齐: 让日志时间戳等 naive 时间走北京时间(Asia/Shanghai)。
+      - TZ=Asia/Shanghai
+    ports:
+      # 宿主 5432 实测空闲: Dify 的 postgres:15-alpine 只在容器网络内暴露 5432,
+      # 未映射到宿主; RAGFlow 的 MySQL 占的是 3306。
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # 与 tsp_parquet 对称: named volume + 顶层 external: true。
+      # 卷需先手工 `docker volume create tsp_dbdata`, compose 不会代建。
+      - tsp_dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tsp} -d ${POSTGRES_DB:-tsp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
 # 顶层卷声明。
 # external: true 有两层作用:
 #   1. 卷由外部创建, compose 不负责创建, 也不会给它加项目名前缀;
 #   2. `docker compose down -v` 不会把它一起删掉 —— 行情数据需要这层保护。
 volumes:
   tsp_parquet:
+    external: true
+  # S2-1: Postgres 数据卷, 与 tsp_parquet 同规则(防项目名前缀 + 防 down -v 误删)。
+  tsp_dbdata:
     external: true
