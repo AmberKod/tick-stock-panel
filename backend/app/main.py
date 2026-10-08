@@ -5,6 +5,7 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -420,15 +421,38 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ================================================================
+# 请求耗时中间件 — 常量定义 (中间件本体见下方 auth_middleware 之后)
+# ================================================================
+# 动机: uvicorn access log 不记处理耗时, 所以「同步期间 API 有没有变慢」
+# 根本没有数据 —— 今天只能证明吞吐没掉、零 5xx, 证明不了延迟没涨。
+# 跑一段时间后可按下面的固定格式 grep 出 P50/P95, 用真实延迟数据决定
+# 要不要为「同步期间 API 变慢」做专门的优化。
+#
+# ⚠️ 注册位置不是随意的: Starlette 的 add_middleware 是 **insert(0)**,
+# build_middleware_stack 再按 user_middleware **逆序** 由内向外包裹 ——
+# 也就是「最后注册 = 最外层」。耗时中间件必须在最外层, 否则:
+#   ① 测到的只是路由耗时, 认证中间件的开销被漏掉, P95 系统性偏低;
+#   ② 被认证拦下(401/403)的请求根本不会经过它, 直接从统计里消失。
+# 所以它刻意注册在 auth_middleware **之后**(见下方), 不要往前挪。
+#
+# 日志格式固定为 key=value, 便于 grep / awk 聚合:
+#   REQ method=GET path=/api/watchlist status=200 dur_ms=12.3
+# 聚合示例:
+#   grep -o 'dur_ms=[0-9.]*' backend.log | cut -d= -f2 | sort -n
+_TIMING_HEADER = "X-Process-Time"
+
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)
 # 注: allow_credentials=True 与 allow_origins=['*'] 不能共存 (浏览器规范),
 # 本项目认证走 header (API Key), 不依赖 cookie, 故关闭 credentials 换取通配来源。
+# expose_headers 让浏览器端 JS 也能读到 X-Process-Time(默认只在服务端可见)。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[_TIMING_HEADER],
 )
 
 
@@ -475,6 +499,44 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     # 未登录: 401(前端跳登录页)
     return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
+
+
+# ================================================================
+# 请求耗时中间件 (注册在认证之后 —— 见上方 _TIMING_HEADER 处的位置说明)
+# ================================================================
+# 开销控制:
+#   - 只做一次 perf_counter 差值 + 一次字符串格式化, 无 I/O、无锁、无 await 切换;
+#   - 用 logging 的惰性 %-args, INFO 未开启时连格式化都不会发生;
+#   - 日志走既有 StreamHandler / RotatingFileHandler(与 uvicorn 同路径),
+#     不引入队列线程, 也不把请求拖进异步写日志的等待。
+@app.middleware("http")
+async def process_time_middleware(request: Request, call_next):
+    """记录每个请求的处理耗时(毫秒), 并回写 X-Process-Time 响应头。"""
+    start = perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # 异常路径同样要留耗时证据: 否则最慢的那批请求会在统计里凭空消失,
+        # 把 P95 系统性压低。记录后原样抛出, 仍交给 FastAPI / uvicorn 处理。
+        elapsed_ms = (perf_counter() - start) * 1000.0
+        logger.info(
+            "REQ method=%s path=%s status=%s dur_ms=%.1f",
+            request.method,
+            request.url.path,
+            "exception",
+            elapsed_ms,
+        )
+        raise
+    elapsed_ms = (perf_counter() - start) * 1000.0
+    response.headers[_TIMING_HEADER] = f"{elapsed_ms:.1f}"
+    logger.info(
+        "REQ method=%s path=%s status=%s dur_ms=%.1f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 # 路由
