@@ -2,7 +2,12 @@
 name = "tickflow-stock-panel-backend"
 version = "0.2.1"
 description = "A 股选股 + 监控 + 回测面板 — TickFlow 适配"
-requires-python = ">=3.11"
+# 上限 <3.14 是硬性要求: 没有上限时, uv 会为"未来"的 Python 版本求解依赖
+# (例如 python_full_version >= '3.15' 这条 split), 而 py-mini-racer>=0.12 在
+# sys_platform == 'win32' 分支上只有 <=0.6.0 可用 -> 求解失败 -> `uv lock` 无法
+# 生成 -> uv.lock 永久停留在旧版本 -> 新增的主依赖(requests / py-mini-racer 自身)
+# 在 `uv sync --frozen` 下被静默跳过, 容器里装不到, 美股日 K 链路缺件失效。
+requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 dependencies = [
     # Web
@@ -13,12 +18,20 @@ dependencies = [
     "python-multipart>=0.0.6",
     "sse-starlette>=2.0",
     # Data
-    "polars>=1.0",
+    # 上限 <2.0 是硬性要求: 不加上限时容器里会解析到 polars 2.x, 与本机 venv
+    # 的 1.40.1 差一个大版本, 导致容器与本机读写同一批 parquet 的行为分叉。
+    "polars>=1.40,<2.0",
     "duckdb>=1.0",
     "pyarrow>=16.0",
     "pandas>=2.2",                # 仅在 BacktestService 边界使用,见 §7.4 / ADR-19
     "requests>=2.31",             # sina_us_provider (US 默认源) 的 HTTP 客户端
-    "py-mini-racer>=0.12",        # 新浪美股日 K K2 编码解码的 JS 引擎 (zh_js_decode)
+    # 新浪美股日 K K2 编码解码的 JS 引擎 (zh_js_decode)。
+    # ⚠️ 包名必须是 mini-racer: 旧名 py-mini-racer 在 PyPI 上止于 0.6.0, 根本没有
+    #    >=0.12 的版本, 写 "py-mini-racer>=0.12" 会导致 `uv lock` 在任何平台都无解
+    #    (这是 uv.lock 长期无法重新生成、新增主依赖被静默跳过的根因)。
+    #    0.12+ 已改名 mini-racer; 两者提供的模块名都是 py_mini_racer,
+    #    代码里 `import py_mini_racer` 不受影响。
+    "mini-racer>=0.12",
     "psutil>=5.9",                # 独立回测 worker 的峰值 RSS 与退出后内存指标
     # llvmlite 不再提供 macOS Intel wheel；该平台使用 Matrix 纯 Python fallback。
     "numba>=0.65.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
@@ -47,7 +60,8 @@ dependencies = [
 # machines without AVX2/FMA support.
 # Enable with: uv sync --extra legacy-cpu
 legacy-cpu = [
-    "polars[rtcompat]>=1.0",
+    # 与主依赖保持一致的上限, 避免 legacy-cpu 场景单独装到 2.x。
+    "polars[rtcompat]>=1.40,<2.0",
 ]
 
 # vectorbt 还会引入绘图、交互组件等完整分析栈，仍保持为可选 extras。
