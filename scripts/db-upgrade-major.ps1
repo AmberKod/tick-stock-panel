@@ -25,6 +25,16 @@
         · 备份是强制的(-SkipBackup 需要同时给 -Yes, 且会打印红字警告);
         · 切换默认不自动做, 需要显式 -AutoSwitch -Yes。
 
+    🔴 当前状态(2026-10-08 起): 前提已不成立, 入口会硬失败
+        TSP 的 DB 已迁出 docker-compose.yml, 改用用户自部署的外部实例
+        postgres-18.6(网络 ying-app-network, 宿主端口 15432)。compose 里已经
+        没有 db 服务, 本脚本依赖的容器 tsp_db / 卷 tsp_dbdata / compose 的
+        image 与 volumes 行都不存在了。
+        因此入口加了前提校验: 检测不到 db 服务就打印明确错误并以**退出码 2**
+        退出, 绝不静默继续, 也绝不会去动 postgres-18.6(那是用户的通用库)。
+        主体代码完整保留 —— 若将来 DB 重新收回 compose 托管, 恢复 db 服务定义
+        后本脚本可原样复用。
+
 .PARAMETER TargetVersion
     目标版本, 形如 '17' 或 '17.2'。主版本号必须大于当前主版本号。
 
@@ -87,6 +97,61 @@ Write-InfoMsg ('项目根: ' + $projectRoot)
 
 # 不改调用方的工作目录; 改为给 compose 显式传 -f, 脚本对 cwd 无副作用。
 $composeFile = Join-Path $projectRoot 'docker-compose.yml'
+
+# ============================================================ [0] 前提校验(fail-closed)
+# DB 已于 2026-10-08 迁出 compose: 现在是外部实例 postgres-18.6(网络
+# ying-app-network, 宿主端口 15432), 不在本项目 compose 里。本脚本依赖的
+# 容器 tsp_db、卷 tsp_dbdata、以及第 7 步要替换的 compose 行全部不存在了。
+# 前提不成立就必须硬失败: 静默继续只会在第 5 步去拉一个和线上库无关的容器,
+# 而万一走到 AutoSwitch 更是会去 stop/重建别人的实例 —— 所以拦在入口。
+Write-SectionMsg '前提校验: 检测 docker-compose.yml 是否仍托管 db 服务'
+
+if (-not (Test-Path -LiteralPath $composeFile)) {
+    Write-FailMsg ('未找到 docker-compose.yml: ' + $composeFile)
+    exit 2
+}
+
+$composeServices = @()
+$composeInvoke = $null
+try {
+    $composeInvoke = Get-ComposeInvocation
+}
+catch {
+    Write-WarnMsg ('无法取得 compose 调用方式: ' + $_.Exception.Message + ' —— 退化为文本扫描。')
+}
+if ($null -ne $composeInvoke) {
+    $svcOut = Invoke-ComposeCapture -Invocation $composeInvoke -Arguments @('-f', $composeFile, 'config', '--services')
+    if ($null -ne $svcOut) {
+        foreach ($s in $svcOut) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$s)) { $composeServices += ([string]$s).Trim() }
+        }
+    }
+}
+if ($composeServices.Count -eq 0) {
+    # compose 解析没成功(例如 docker 不可用)。退化为文本扫描, 依然 fail-closed:
+    # 扫不到 `db:` 服务定义就当作没有, 不会放行。
+    $composeRaw = Get-Content -LiteralPath $composeFile -Raw -Encoding UTF8
+    if ($composeRaw -match '(?m)^\s{2}db:\s*(#.*)?$') { $composeServices += 'db' }
+    Write-WarnMsg ('compose 未返回服务列表, 已用文本扫描兜底, 判定结果: ' + $(if ($composeServices -contains 'db') { '存在 db' } else { '不存在 db' }))
+}
+
+if ($composeServices -notcontains 'db') {
+    Write-Host ''
+    Write-FailMsg 'docker-compose.yml 里已没有 db 服务 —— 本脚本的前提不成立, 已中止。'
+    Write-Host ''
+    Write-Host '        事实(2026-10-08 已生效):' -ForegroundColor Yellow
+    Write-Host '          · TSP 的 DB 已迁出 compose, 改用用户自部署的外部实例 postgres-18.6;' -ForegroundColor Yellow
+    Write-Host '          · 该实例在网络 ying-app-network 上, 经宿主端口 15432 访问;' -ForegroundColor Yellow
+    Write-Host '          · 它不属于本 compose 项目, 本脚本(以及 TSP 的任何脚本)都无权' -ForegroundColor Yellow
+    Write-Host '            停止 / 重建 / 升级它 —— 那是用户自己的通用库。' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host '        Postgres 大版本升级请由该实例的属主自行处理, 不要在这里跑。' -ForegroundColor Cyan
+    Write-Host '        若将来 DB 重新收回 compose 托管, 恢复 db 服务定义后本脚本可原样复用。' -ForegroundColor Cyan
+    Write-Host ''
+    exit 2
+}
+
+Write-OkMsg ('compose 中检测到 db 服务, 前提成立: ' + ($composeServices -join ', '))
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 

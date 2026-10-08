@@ -48,39 +48,20 @@ services:
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
 
-  # S2-1: Postgres 16.9。
-  # 当前 TSP 完全不依赖数据库(状态层迁移在 S4), 所以 db 与 app 必须彼此独立:
-  #   - 不设 depends_on —— 否则 DB 起不来会拖垮正在运行的 TSP, 而 TSP 现在根本
-  #     不需要 DB; 两者独立起停才符合"零中断"要求。
-  #   - 不给 app 加 DATABASE_URL —— 代码当前不用这些变量, 加了只会造成困惑,
-  #     而且改 app 的 environment 会触发容器重建, 纯属打断线上服务。
-  # 等 S4 状态层迁移时再接线。
-  db:
-    image: postgres:16.9
-    container_name: tsp_db
-    # 凭据全部来自 .env(已被 .gitignore:55 忽略), 这里只做变量引用, 绝不硬编码。
-    # POSTGRES_PASSWORD 用 :? 语法, 缺失时 compose 直接报错, 避免空密码静默启动。
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-tsp}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 .env 中设置}
-      - POSTGRES_DB=${POSTGRES_DB:-tsp}
-      # 与 app 对齐: 让日志时间戳等 naive 时间走北京时间(Asia/Shanghai)。
-      - TZ=Asia/Shanghai
-    ports:
-      # 宿主 5432 实测空闲: Dify 的 postgres:15-alpine 只在容器网络内暴露 5432,
-      # 未映射到宿主; RAGFlow 的 MySQL 占的是 3306。
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      # 与 tsp_parquet 对称: named volume + 顶层 external: true。
-      # 卷需先手工 `docker volume create tsp_dbdata`, compose 不会代建。
-      - tsp_dbdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tsp} -d ${POSTGRES_DB:-tsp}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: unless-stopped
+  # 数据库: 不再由本 compose 托管(S2-1 的 postgres:16.9 容器 tsp_db 已于 2026-10-08
+  # 下线, 原因见下)。改用用户自部署的 postgres-18.6(宿主端口 15432), 凭据与地址
+  # 统一由 .env 的 POSTGRES_HOST / POSTGRES_PORT / POSTGRES_USER / POSTGRES_PASSWORD
+  # / POSTGRES_DB 提供, 本文件不再引用它们。
+  #
+  # 为什么走宿主映射而不是让 app 加入 ying-app-network:
+  #   改 networks 会触发 app 容器重建, 从而中断正在运行的 TSP。而 app 段已经配了
+  #   extra_hosts: host.docker.internal:host-gateway, 直接走 host.docker.internal:15432
+  #   即可连通(实测容器内 TCP 连通 OK, 127.0.0.1:15432 对照组不通, 排除假阳性),
+  #   因此可以零中断完成切换。S4 若实测 NAT 成为瓶颈, 再改为容器网络直连不迟。
+  #
+  # 为什么现在就下线 16.9: grep 全仓确认 TSP 代码当前不含任何数据库依赖
+  #   (无 psycopg / asyncpg / sqlalchemy / DATABASE_URL), 状态层迁移在 S4 才做。
+  #   16.9 实例里没有 TSP 数据, 下线不涉及任何迁移。
 
 # 顶层卷声明。
 # external: true 有两层作用:
@@ -89,6 +70,6 @@ services:
 volumes:
   tsp_parquet:
     external: true
-  # S2-1: Postgres 数据卷, 与 tsp_parquet 同规则(防项目名前缀 + 防 down -v 误删)。
-  tsp_dbdata:
-    external: true
+  # 原 tsp_dbdata(Postgres 16.9 数据卷)不再在此声明 —— db 服务已移除。
+  # 卷对象本身暂不删除, 留作回退保险(重新起一个 16.9 容器即可挂回)。
+  # 确认 18.6 稳定运行后再手工 `docker volume rm tsp_dbdata`。

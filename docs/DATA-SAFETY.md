@@ -1,6 +1,7 @@
 # TSP 数据安全红线
 
-> 最后更新：2026-10-08（S2 数据安全基建落地当天）
+> 最后更新：2026-10-08（S2 数据安全基建落地当天；同日晚完成 **DB 实例切换**：
+> compose 托管的 `postgres:16.9` / 容器 `tsp_db` 下线，改用外部实例 `postgres-18.6`）
 > 适用范围：`E:\ai_codes\ai_personal_panel\tsp-fresh` 及其 Docker 数据卷
 >
 > 这份文档里的每一条都对应**今天真实发生过的事**，不是通用安全常识的复述。
@@ -14,9 +15,11 @@
 |---|---|---|
 | `docker compose down` | ✅ 可以 | 容器没了，卷还在 |
 | `docker compose down -v` | 🔴 **绝不** | 卷的生命周期保护只有一层，见 §2 |
-| `docker volume rm tsp_parquet / tsp_dbdata` | 🔴 **绝不** | 数据当场消失，无回收站 |
+| `docker volume rm tsp_parquet / tsp_dbdata` | 🔴 **绝不** | 数据当场消失，无回收站（`tsp_dbdata` 已下线，仅作回退保险，删了同样没回收站） |
 | `docker volume prune` | 🔴 **绝不** | 同上，而且会顺手删掉别的项目的卷 |
-| 升级 Postgres 大版本 | ⚠️ 只能走 §4 | 直接换镜像 = PGDATA  incompatible，起不来 |
+| 停止 / 删除 / 重建 `postgres-18.6` | 🔴 **绝不** | 那是用户自部署的**通用外部库**，不属于 TSP；停机影响的是它上面所有库 |
+| `docker compose up -d db` | ❌ 无效 | db 服务已删除，只会报 `no such service`；DB 现在是外部实例，见 §1.1 |
+| 升级 Postgres 大版本 | ⚠️ 由实例属主处理 | DB 已迁出 compose，`db-upgrade-major.ps1` 入口会直接退出 2，见 §4 |
 | 删镜像 / 删容器瘦身 | ⚠️ 没用 | vhdx **只增不减**，见 §3 |
 | 只把备份放 E 盘 | 🔴 不够 | E 盘就是 vhdx 所在的盘，同盘备份等于没备份 |
 
@@ -29,15 +32,29 @@
 | 卷名 | 内容 | 2026-10-08 实测 | 容器 |
 |---|---|---|---|
 | `tsp_parquet` | parquet 行情数据 + 缓存 | **979,180 KiB（≈956 MiB）/ 24,449 个文件** | `TickFlow_Stock_Panel` |
-| `tsp_dbdata` | Postgres 16.9 PGDATA | **47,164 KiB（≈46 MiB）** | `tsp_db` |
+| `tsp_dbdata` | **已下线**（原 postgres:16.9 PGDATA，2026-10-08 随 `tsp_db` 一起下线） | **47,164 KiB（≈46 MiB）** | 原 `tsp_db`（已 stop + rm），保留作回退 |
 
-两个卷都在 `docker-compose.yml` 顶层声明为 `external: true`：
+⚠️ **数据库已经不在本 compose 里了**。2026-10-08 起改用用户自部署的**外部实例**：
+
+| 项 | 值 |
+|---|---|
+| 容器名 / 镜像 | `postgres-18.6` / `postgres:18.6` |
+| 所在网络 | `ying-app-network`（**TSP 不在该网络里**） |
+| 宿主端口映射 | `15432` → 容器 `5432` |
+| 存储 | bind mount 到 `E:/docker_app_data/postgres_app/data`（容器内 PGDATA `/var/lib/postgresql/18/docker`） |
+| TSP 接入路径 | 容器内 `host.docker.internal:15432`（compose 已配 `extra_hosts: host.docker.internal:host-gateway`） |
+| TSP 归属 | 库 `tsp` / 用户 `tsp`（owner=tsp），与属主 `ying_admin` 的其它库隔离 |
+
+**为什么走宿主映射而不让 TSP 加入 `ying-app-network`**：改 `networks` 会触发 app 容器
+重建，从而中断正在提供服务的 `TickFlow_Stock_Panel`。走 `host.docker.internal:15432`
+可以零中断完成切换（实测：容器内 `/dev/tcp/host.docker.internal/15432` = OK，
+`127.0.0.1:15432` = FAIL 作为对照组排除假阳性，`tsp` 用户认证连接返回 `PostgreSQL 18.6`）。
+
+卷声明现在只剩 `tsp_parquet`，`tsp_dbdata` 已从 compose 顶层移除（**但卷对象没删**）：
 
 ```yaml
 volumes:
   tsp_parquet:
-    external: true
-  tsp_dbdata:
     external: true
 ```
 
@@ -46,6 +63,9 @@ volumes:
 1. **防项目名前缀**：不加它，compose 会按项目名创建 `tsp-fresh_tsp_parquet`，
    卷名对不上就挂载到一个空卷上，表现是「服务起来了但数据全没了」。
 2. **防 `down -v` 误删**：external 卷不由 compose 管理生命周期。
+
+`tsp_dbdata` 虽然已不在 compose 里，但**仍然保留**作为回退保险（重新起一个 16.9
+容器就能挂回）。确认 18.6 稳定运行足够久之后再手工 `docker volume rm tsp_dbdata`。
 
 ### 1.2 `E:\ai_codes\ai_personal_panel\tsp-fresh\data` **不是备份**
 
@@ -99,13 +119,20 @@ cd E:\ai_codes\ai_personal_panel\tsp-fresh
 `db-down.ps1` 硬编码拒绝 `-RemoveVolumes`，并在下线前后各打印一次
 `tsp_parquet` / `tsp_dbdata` 的存在性，肉眼可核对。
 
+另外它只停 **TSP 自己的服务**：DB 现在是外部实例 `postgres-18.6`，不属于本 compose
+项目，脚本会校验待停止列表里没有 `postgres-18.6` 才继续（命中就报错退出 1）。
+
 ---
 
 ## 3. 🔴 红线二：vhdx 只增不减
 
 今天实测：`docker_data-20261008-0946.vhdx` = **29.9 GiB**，
-而里面真正的应用数据只有 `tsp_parquet` 956 MiB + `tsp_dbdata` 46 MiB。
-剩下的全是历史层——**包括已经删掉的镜像、已经停掉的容器写过的文件**。
+而里面真正的应用数据只有 `tsp_parquet` 956 MiB（外加已下线的 `tsp_dbdata` 46 MiB，
+现已不再被任何容器挂载，只是留着没删）。剩下的全是历史层——**包括已经删掉的镜像、
+已经停掉的容器写过的文件**。
+
+> 现在的库 `postgres-18.6` 用的是 bind mount（`E:/docker_app_data/postgres_app/data`），
+> 数据在宿主 NTFS 上，**不计入 vhdx**。所以别再拿 vhdx 大小去估 DB 体量。
 
 WSL2 的 ext4.vhdx **不会自动回收空间**。所以：
 
@@ -126,28 +153,46 @@ optimize-vhd -Path "<Docker Desktop 实际使用的 ext4.vhdx 路径>" -Mode ful
 
 ---
 
-## 4. 🔴 红线三：Postgres 跨大版本只能逻辑迁移
+## 4. 🔴 红线三：Postgres 跨大版本只能逻辑迁移 —— 但**当前实例不由我们升级**
 
 PGDATA 格式**跨大版本不兼容**。把 `postgres:16.9` 换成 `postgres:17`
 直接指到同一个 `tsp_dbdata`，结果只有一个：容器起不来，日志里一句
-`database files are incompatible with server`。
+`database files are incompatible with server`。唯一安全路径始终是逻辑迁移：
+**`pg_dumpall` → 新建空卷 + 新版本容器 → 导入 → 校验 → 切换**。
 
-唯一安全路径：**`pg_dumpall` → 新建空卷 + 新版本容器 → 导入 → 校验 → 切换**。
-已封装成脚本，强制先备份：
+### 4.1 但这条红线现在**不适用**于 TSP 自己的脚本
+
+因为 DB 已经不是我们的了。2026-10-08 起 TSP 用的是用户自部署的**外部实例**
+`postgres-18.6`（网络 `ying-app-network`，宿主端口 `15432`）：
+
+* 它不在 `docker-compose.yml` 里，`docker compose down/up` 碰不到它；
+* 它上面跑着属主 `ying_admin` 的其它库，**不属于 TSP**；
+* 它的 PGDATA 在宿主的 bind mount 上，不在 `tsp_dbdata` 卷里。
+
+所以：**Postgres 大版本升级请由该实例的属主自行处理**。TSP 侧的任何脚本都不得
+停止 / 重建 / 升级 `postgres-18.6`。
+
+`db-upgrade-major.ps1` 已经做了 fail-closed 处理：入口先检测 `docker-compose.yml`
+里是否仍有 `db:` 服务定义，没有就打印明确错误并以**退出码 2**退出：
 
 ```powershell
-.\scripts\db-upgrade-major.ps1 -TargetVersion 17
+.\scripts\db-upgrade-major.ps1 -TargetVersion 19
+# → [FAIL] docker-compose.yml 里已没有 db 服务 —— 本脚本的前提不成立, 已中止。
+# → 退出码 2（实测）
 ```
 
-脚本行为（7 步）：
+脚本主体代码**完整保留**（7 步逻辑迁移流程没删），将来若 DB 重新收回 compose
+托管，恢复 `db` 服务定义后可原样复用。
 
-1. 预检 docker / 容器 / .env，读出当前主版本（今天实测 16）；
-2. 拒绝降级和同大版本；
-3. **强制先跑一次 `db-backup.ps1`**（除非显式 `-SkipBackup -Yes`，不推荐）；
-4. `pg_dumpall` 全量逻辑导出（含 role 和全部 database）；
-5. 新建卷 `tsp_dbdata_v17`，起新容器 `tsp_db_v17`；
-6. `psql` 导入 + 校验；
-7. 切换：默认只打印手工切换步骤，`-AutoSwitch -Yes` 才自动切。
+### 4.2 将来若要给外部实例做大版本升级（属主操作参考）
+
+1. 先 `pg_dumpall` 全量逻辑导出（含 role 和全部 database）；
+2. 用新版本镜像起**全新的空数据目录**（不是复用旧 PGDATA）；
+3. 逻辑导入 → 校验版本 / database 列表 / 业务表数量；
+4. 校验通过后再切换端口或连接串。
+
+⚠️ 即使是将来，也不要在 TSP 仓库里用 `db-upgrade-major.ps1` 对外部实例执行这些
+动作 —— 那个脚本只会碰 compose 里的容器。
 
 **`tsp_dbdata`（旧卷）脚本永远不会删**，切换后要人工确认无误再自行处理。
 
@@ -165,31 +210,43 @@ PGDATA 格式**跨大版本不兼容**。把 `postgres:16.9` 换成 `postgres:17
 
 ### 5.1 Postgres 恢复（custom 格式 dump）
 
-> ⚠️ **PG 16 的 `pg_restore` 不接受 `-` 表示 stdin**。今天 21:39 首次真实演练
-> 就是挂在 `docker exec -i tsp_db pg_restore -l - < file` 上，报错
+> 目标容器是**外部实例 `postgres-18.6`**（网络 `ying-app-network`，宿主端口 `15432`，
+> 镜像 `postgres:18.6`）。它不在 TSP 的 compose 项目里，所以只能按**容器名**操作
+> （`docker cp` / `docker exec`），不能用 `docker compose ... db`。
+> 如果哪天需要走网络而不是容器名，主机/端口就是 `.env` 里的
+> `POSTGRES_HOST=host.docker.internal` + `POSTGRES_PORT=15432`（**不是** 5432）。
+
+> ⚠️ **`pg_restore` 不接受 `-` 表示 stdin**（16 和 18 都一样）。今天 21:39 首次真实
+> 演练就是挂在 `docker exec -i postgres-18.6 pg_restore -l - < file` 上，报错
 > `could not open input file "-": No such file or directory`，退出码 1。
 > 必须让 pg_restore 读**真实文件路径**。
 
 ```bash
 # 1) 把归档放进容器
-MSYS_NO_PATHCONV=1 docker cp "E:\tsp-backups\db\tsp-db-tsp-20261008-214159.dump" tsp_db:/tmp/restore.dump
+MSYS_NO_PATHCONV=1 docker cp "E:\tsp-backups\db\tsp-db-tsp-20261008-214159.dump" postgres-18.6:/tmp/restore.dump
 
 # 2) 恢复（--clean --if-exists 会先删同名对象，可重复执行）
-MSYS_NO_PATHCONV=1 docker exec tsp_db pg_restore -U tsp -d tsp --clean --if-exists /tmp/restore.dump
+MSYS_NO_PATHCONV=1 docker exec postgres-18.6 pg_restore -U tsp -d tsp --clean --if-exists /tmp/restore.dump
 
-# 3) 清理容器内临时归档（别留在可写层里白占 vhdx，见 §3）
-MSYS_NO_PATHCONV=1 docker exec tsp_db rm -f /tmp/restore.dump
+# 3) 清理容器内临时归档
+MSYS_NO_PATHCONV=1 docker exec postgres-18.6 rm -f /tmp/restore.dump
 ```
+
+> 第 3 步现在主要是卫生习惯而不是 vhdx 问题：18.6 的数据目录是宿主 bind mount
+> （`E:/docker_app_data/postgres_app/data`），`/tmp` 仍在容器可写层里，还是会占
+> vhdx（见 §3），所以照样别留。
 
 恢复前先确认归档没坏：
 
 ```bash
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "E:\tsp-backups\db:/tsp_dump_check:ro" \
-  --entrypoint pg_restore postgres:16.9 -l /tsp_dump_check/tsp-db-tsp-20261008-214159.dump
+  --entrypoint pg_restore postgres:18.6 -l /tsp_dump_check/tsp-db-tsp-20261008-214159.dump
 ```
 
-正常输出应包含 `; Archive created at ...`、`; TOC Entries: 4`、`; Format: CUSTOM`。
+正常输出应包含 `; Archive created at ...`、`; TOC Entries: 4`、`; Format: CUSTOM`；
+18.6 实例导出时还会带
+`; Dumped from database version: 18.6 (Debian 18.6-1.pgdg13+2)`。
 **用 `docker run` 起一次性容器来校验，不要用 `docker exec`**（同版本 pg_restore
 读宿主机文件最干净，且不留任何东西在 vhdx 里）。
 
@@ -234,7 +291,10 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 2. `wsl --shutdown`；
 3. 用 `E:\DockerBackup\docker_data-20261008-0946.vhdx` 替换 Docker Desktop
    实际使用的 ext4.vhdx（**先给当前 vhdx 改名留一份，别覆盖**）；
-4. 启动 Docker Desktop，`docker volume ls` 确认 `tsp_parquet` / `tsp_dbdata` 在。
+4. 启动 Docker Desktop，`docker volume ls` 确认 `tsp_parquet` 在（`tsp_dbdata`
+   也应在，它现在只是回退保险）；
+5. `postgres-18.6` 的数据在宿主 `E:/docker_app_data/postgres_app/data` 上，
+   **不在 vhdx 里**，所以整机灾难时要单独确认这份 bind mount 的备份情况。
 
 ---
 
@@ -242,16 +302,24 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 
 ```powershell
 cd E:\ai_codes\ai_personal_panel\tsp-fresh
-.\scripts\db-backup.ps1              # 默认保留 14 份，自动出 D 盘副本
+.\scripts\db-backup.ps1              # 默认容器 postgres-18.6，保留 14 份，自动出 D 盘副本
 .\scripts\db-backup.ps1 -DryRun      # 演练，不产生任何文件
 .\scripts\db-backup.ps1 -KeepBackups 30
 ```
+
+默认目标已经是外部实例 `postgres-18.6`（不再是 `tsp_db`）。宿主端口从 `.env` 的
+`POSTGRES_PORT` 读，缺失时回落 `15432`（不硬编码 5432）。脚本只做导出，不会停止或
+重启该容器。
+
+> 外部实例**没有配 healthcheck**，所以 `docker inspect ... {{.State.Health.Status}}`
+> 会报 `map has no entry for key "Health"`。脚本因此只看 `State.Status`，真正的存活
+> 性由 `docker exec <容器> pg_isready` 把关 —— 比 healthcheck 更直接。
 
 六步，每步都会失败即停（`throw`）：
 
 | 步 | 做什么 | 失败会怎样 |
 |---|---|---|
-| [1/6] | 预检 docker / 容器 healthy / .env 里 `POSTGRES_*` | 缺变量直接停 |
+| [1/6] | 预检 docker / 容器 running + `pg_isready` 通过 / .env 里 `POSTGRES_*` | 缺变量或连不上直接停 |
 | [2/6] | 生成 `tsp-db-<db>-<yyyyMMdd-HHmmss>.dump` | — |
 | [3/6] | `pg_dump -Fc`，重定向交给 `cmd /c` | 非 0 退出码即停 |
 | [4/6] | 非空校验 + `pg_restore -l` 结构校验 | 坏档立刻报 |
@@ -270,8 +338,11 @@ cd E:\ai_codes\ai_personal_panel\tsp-fresh
 
 * Postgres 密码是 40 位随机串，只存在于 `E:\ai_codes\ai_personal_panel\tsp-fresh\.env`；
 * `.env` 被 `.gitignore:55:.env` 忽略，**不进版本控制**；
-* `docker-compose.yml` 只写 `${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 .env 中设置}`，
-  **不硬编码**；`${VAR:?...}` 语法保证忘了配就起不来，而不是静默用弱密码；
+* 现在 `docker-compose.yml` **不再引用任何 `POSTGRES_*` 变量**（db 服务已移除），
+  凭据只由 `.env` 提供给将来接线的应用代码；任何脚本/文档都不得硬编码密码；
+* 备份脚本走 `docker exec` + 容器内 Unix socket，**密码不出现在命令行里**，
+  也就不会出现在 shell history / 进程列表 / 日志里。若将来改成经 `15432` 走网络，
+  请务必用 `PGPASSWORD` 环境变量或 `~/.pgpass` 传递，**不要**写成 `-p <密码>`；
 * 提交前务必 `git status --short` 确认没有密码文件被 stage。
 
 ```bash
@@ -285,8 +356,13 @@ git status --short            # 不应出现 .env
 
 **每次动 compose / 卷之后：**
 
-- [ ] `docker volume ls | grep tsp` —— `tsp_parquet`、`tsp_dbdata` 都在；
-- [ ] `docker ps` —— `TickFlow_Stock_Panel` 和 `tsp_db` 都 Up；
+- [ ] `docker volume ls | grep tsp` —— `tsp_parquet` 在，`tsp_dbdata` 也应在
+      （已下线，仅作回退保险，别删）；
+- [ ] `docker ps` —— `TickFlow_Stock_Panel` 和 **`postgres-18.6`** 都 Up。
+      注意 `postgres-18.6` 是**外部实例**：它在网络 `ying-app-network` 上，
+      **不在** TSP 的 compose 项目里；TSP 是经宿主端口 `15432`
+      （容器内 `host.docker.internal:15432`）访问它的。所以 `docker compose ps`
+      里**看不到**它是正常的，要用 `docker ps` 看；
 - [ ] `docker inspect -f '{{.State.StartedAt}}' TickFlow_Stock_Panel`
       —— 和动之前一致（今天基准 `2026-10-08T02:57:55.86037531Z`），
       **变了就说明 TSP 被重启过**。
@@ -307,9 +383,9 @@ git status --short            # 不应出现 .env
 
 | 脚本 | 用途 |
 |---|---|
-| `scripts/db-backup.ps1` | Postgres 备份 + 异盘副本 + 保留策略 + 可恢复性校验 |
-| `scripts/db-down.ps1` | 下线 db（**不带 `-v`**，显式拒绝 `-RemoveVolumes`） |
-| `scripts/db-upgrade-major.ps1` | Postgres 跨大版本逻辑迁移 |
+| `scripts/db-backup.ps1` | 外部实例 `postgres-18.6` 备份 + 异盘副本 + 保留策略 + 可恢复性校验 |
+| `scripts/db-down.ps1` | 下线 TSP 服务（**不带 `-v`**，显式拒绝 `-RemoveVolumes`，且不碰外部 DB 实例） |
+| `scripts/db-upgrade-major.ps1` | Postgres 跨大版本逻辑迁移 —— **当前前提不成立，入口 fail-closed 退出 2** |
 | `scripts/deploy.ps1` / `rollback.ps1` | TSP 应用发布 / 回滚 |
 | `scripts/export-parquet.ps1` | parquet 导出 |
 | `scripts/deploy-common.ps1` | 公共函数库（输出、命令执行、compose 调用） |

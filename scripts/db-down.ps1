@@ -11,8 +11,14 @@
 
     🔴 为什么这个脚本必须存在:
         `docker compose down -v` 会连带删除 anonymous/named volume。我们的
-        tsp_parquet(21,426 个 parquet / 1,320,178 行行情)与 tsp_dbdata 一旦被删,
-        就是不可恢复的数据损失。
+        tsp_parquet(21,426 个 parquet / 1,320,178 行行情)一旦被删就是不可恢复的
+        数据损失;tsp_dbdata 虽已随 16.9 下线, 但它是回退保险, 同样删不得。
+
+    ℹ️ DB 已不在本 compose 里(2026-10-08 起):
+        数据库改用用户自部署的**外部实例** postgres-18.6(网络 ying-app-network,
+        宿主端口 15432), 不由本项目托管。本脚本**只停 TSP 自己的服务**, 绝不会
+        停止 / 删除 postgres-18.6 —— 那是用户的通用库。脚本里加了硬校验: 若
+        compose 待停止列表里出现 postgres-18.6, 直接报错退出(退出码 1)。
         两个卷都声明了 external: true, 理论上 `down -v` 也不会删它们 —— 但那是
         "应该", 不是"保证"。compose 版本差异、手滑多打一个参数、换个人来操作,
         都可能绕过这层保护。所以本脚本把"拒绝 -v"做成硬约束, 不靠人记住。
@@ -50,7 +56,7 @@ if ($RemoveVolumes) {
     Write-Host ''
     Write-Host '        本脚本拒绝执行任何带 -v 的 down。原因:' -ForegroundColor Red
     Write-Host '          · tsp_parquet 存着 21,426 个 parquet / 1,320,178 行行情数据;' -ForegroundColor Red
-    Write-Host '          · tsp_dbdata 存着 Postgres 全部数据;' -ForegroundColor Red
+    Write-Host '          · tsp_dbdata 存着原 postgres:16.9 的 PGDATA(现已下线, 仅作回退保险);' -ForegroundColor Red
     Write-Host '          · 两者删掉都不可恢复(备份只覆盖到最近一次导出)。' -ForegroundColor Red
     Write-Host ''
     Write-Host '        如果你确实需要删除卷, 请显式执行:' -ForegroundColor Yellow
@@ -79,15 +85,27 @@ $compose = Get-ComposeInvocation
 
 $psLines = Invoke-ExternalCapture -Exe $compose.Exe -Arguments (@($compose.Prefix) + @('-f', $composeFile, 'ps', '--format', '{{.Service}}|{{.Name}}|{{.Status}}')) -Silent
 $svcCount = 0
+$svcNames = @()
 if ($null -ne $psLines) {
     foreach ($l in $psLines) {
         if (-not [string]::IsNullOrWhiteSpace([string]$l)) {
             Write-InfoMsg ('运行中: ' + [string]$l)
             $svcCount++
+            $parts = ([string]$l).Split('|')
+            if ($parts.Count -ge 2) { $svcNames += $parts[1] }
         }
     }
 }
 if ($svcCount -eq 0) { Write-InfoMsg '当前没有运行中的服务。' }
+
+# 硬校验: postgres-18.6 是用户自部署的外部实例, 不属于本 compose 项目, 动不得。
+# 正常情况下 compose 永远不会把它列进来; 万一哪天有人把外部实例写进了本项目的
+# compose 文件, 这里必须拦住, 而不是跟着 down 掉别人的库。
+if ($svcNames -contains 'postgres-18.6') {
+    Write-FailMsg '待停止列表里出现了外部数据库实例 postgres-18.6 —— 它不属于本 compose 项目, 已中止, 不会执行 down。'
+    exit 1
+}
+Write-OkMsg '待停止列表不包含外部实例 postgres-18.6, 安全。'
 
 $protectedVolumes = @('tsp_parquet', 'tsp_dbdata')
 foreach ($v in $protectedVolumes) {
@@ -142,6 +160,10 @@ if ($missing.Count -gt 0) {
 
 Write-Host ''
 Write-Host ('重新启动: ' + $compose.Exe + ' ' + (($compose.Prefix) -join ' ') + ' -f "' + $composeFile + '" up -d') -ForegroundColor Gray
-Write-Host ('只起数据库: ' + $compose.Exe + ' ' + (($compose.Prefix) -join ' ') + ' -f "' + $composeFile + '" up -d db') -ForegroundColor Gray
+Write-Host ''
+Write-Host '数据库: DB 已不在本 compose 里 —— 现在是外部实例 postgres-18.6' -ForegroundColor Gray
+Write-Host '        (网络 ying-app-network, 宿主端口 15432), 不随本项目的 up/down 起停。' -ForegroundColor Gray
+Write-Host '        不要再敲 `docker compose up -d db`: 该服务已删除, 只会得到一个' -ForegroundColor Gray
+Write-Host '        "no such service" 错误。' -ForegroundColor Gray
 Write-Host ''
 Write-WarnMsg '再次强调: 任何时候都不要用 docker compose down -v。'

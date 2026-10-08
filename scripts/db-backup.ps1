@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     六步:
-      [1/6] 预检 — docker 可用、db 容器存在且 healthy、.env 里 POSTGRES_* 齐备
+      [1/6] 预检 — docker 可用、db 容器 running 且 pg_isready 通过、.env 里 POSTGRES_* 齐备
       [2/6] 生成带时间戳的备份文件名
       [3/6] pg_dump 导出(默认 custom 格式 -Fc, 可被 pg_restore 直接识别)
       [4/6] 校验 — 文件非空 + pg_restore -l 能列出内容(证明不是坏档)
@@ -21,6 +21,11 @@
        trust 认证, 所以命令行里不会出现密码。若你改过 pg_hba, 本脚本会失败,
        届时请在 .env 里补 PGPASSWORD 并自行加 -e 传递。
 
+    ⚠️ 实例归属: 默认目标容器 postgres-18.6 是用户自部署的**外部**实例(镜像
+       postgres:18.6, 网络 ying-app-network, 宿主端口 15432), 不由本项目的
+       docker-compose.yml 托管(compose 里的 db 服务已于 2026-10-08 移除)。
+       本脚本只做只读查询与导出, 绝不停止 / 删除 / 重建该容器。
+
 .EXAMPLE
     .\db-backup.ps1
     .\db-backup.ps1 -DryRun
@@ -28,7 +33,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ContainerName = 'tsp_db',
+    # 外部实例: 不再由 docker-compose.yml 托管, 容器名是实际运行的实例名。
+    [string]$ContainerName = 'postgres-18.6',
     [string]$BackupDir = 'E:\tsp-backups\db',
     [string]$MirrorDir = 'D:\tsp-backups\db',
     [switch]$NoMirror,
@@ -89,9 +95,13 @@ if ($DryRun) {
 
 Test-DockerReady | Out-Null
 
-$inspect = Invoke-ExternalCapture -Exe 'docker' -Arguments @('inspect', '-f', '{{.State.Status}}|{{.State.Health.Status}}', $ContainerName) -Silent
+# 只看 State.Status, 不再拼 Health.Status: 外部实例 postgres-18.6 没配 healthcheck,
+# `{{.State.Health.Status}}` 会直接报 "map has no entry for key \"Health\"" 并让
+# docker inspect 非零退出, 从而被误判成"容器不存在"(2026-10-08 首次真跑就挂在这)。
+# 真正的存活性由下面的 pg_isready 把关, 比 healthcheck 更直接。
+$inspect = Invoke-ExternalCapture -Exe 'docker' -Arguments @('inspect', '-f', '{{.State.Status}}', $ContainerName) -Silent
 if ($null -eq $inspect -or $inspect.Count -eq 0) {
-    throw ('未找到数据库容器: ' + $ContainerName + '。请先执行 docker compose up -d db。')
+    throw ('未找到数据库容器: ' + $ContainerName + '。DB 现在是外部实例(postgres-18.6), 不由 docker-compose.yml 托管, 请确认该容器在跑; 不要试图 docker compose up -d db。')
 }
 $stateLine = [string]$inspect[0]
 Write-OkMsg ('数据库容器 ' + $ContainerName + ' 状态: ' + $stateLine)
@@ -104,14 +114,36 @@ if ($stateLine -notmatch 'running') {
 $dbImage = ''
 $imgOut = Invoke-ExternalCapture -Exe 'docker' -Arguments @('inspect', '-f', '{{.Config.Image}}', $ContainerName) -Silent
 if ($null -ne $imgOut -and $imgOut.Count -gt 0) { $dbImage = ([string]$imgOut[0]).Trim() }
-if ([string]::IsNullOrWhiteSpace($dbImage)) { $dbImage = 'postgres:16.9' }
+if ([string]::IsNullOrWhiteSpace($dbImage)) { $dbImage = 'postgres:18.6' }
 Write-InfoMsg ('校验用镜像: ' + $dbImage + ' (取自容器, 保证 pg_restore 与 pg_dump 同版本)')
 
 $dbUser = Read-DotEnvValue -ProjectRoot $projectRoot -Key 'POSTGRES_USER'
 $dbName = Read-DotEnvValue -ProjectRoot $projectRoot -Key 'POSTGRES_DB'
 if ([string]::IsNullOrWhiteSpace($dbUser)) { throw '.env 缺少 POSTGRES_USER' }
 if ([string]::IsNullOrWhiteSpace($dbName)) { throw '.env 缺少 POSTGRES_DB' }
-Write-OkMsg ('连接参数: user=' + $dbUser + ' db=' + $dbName + ' (密码不落命令行, 走 Unix socket)')
+
+# 宿主映射端口只在 .env 里有(不硬编码 5432)。本脚本走 docker exec(容器内 Unix
+# socket), 不直接用这个端口, 但预检打印出来供人工核对: 端口对不上说明找错了实例。
+$dbPort = '15432'
+$dbPortRaw = Read-DotEnvValue -ProjectRoot $projectRoot -Key 'POSTGRES_PORT'
+if (-not [string]::IsNullOrWhiteSpace($dbPortRaw)) {
+    if ($dbPortRaw -notmatch '^[0-9]+$') {
+        throw ('.env 的 POSTGRES_PORT 不是数字: ' + $dbPortRaw)
+    }
+    $dbPort = $dbPortRaw
+}
+else {
+    Write-WarnMsg '.env 未设置 POSTGRES_PORT, 回落默认 15432(外部实例 postgres-18.6 的宿主映射端口)。'
+}
+
+Write-OkMsg ('连接参数: user=' + $dbUser + ' db=' + $dbName + ' hostPort=' + $dbPort + ' (密码不落命令行, 走 Unix socket)')
+
+# 存活性闸门: 容器 running 不代表 Postgres 在接受连接, 必须真问一次。
+$readyOut = Invoke-ExternalCapture -Exe 'docker' -Arguments @('exec', $ContainerName, 'pg_isready', '-U', $dbUser, '-d', $dbName) -Silent
+if ($null -eq $readyOut -or $readyOut.Count -eq 0) {
+    throw ('pg_isready 失败: 容器 ' + $ContainerName + ' 内的 Postgres 未接受连接(user=' + $dbUser + ', db=' + $dbName + ')。不备份一个连不上的库。')
+}
+Write-OkMsg ('pg_isready: ' + ([string]$readyOut[0]).Trim())
 
 # ============================================================ [2/6] 文件名
 Write-StepMsg -Index 2 -Total 6 -Message '生成备份文件名'
@@ -182,7 +214,7 @@ else {
     if ($Format -eq 'custom') {
         # ⚠️ 踩过的真坑: PostgreSQL 16 的 pg_restore **不接受 "-" 表示 stdin** ——
         # 它会把 "-" 当成字面文件名, 报 "could not open input file "-"", 退出码 1。
-        # 所以 `docker exec -i tsp_db pg_restore -l - < file` 这种写法必然失败
+        # 所以 `docker exec -i postgres-18.6 pg_restore -l - < file` 这种写法必然失败
         # (2026-10-08 首次真实演练就是在这里挂的)。
         # 正确做法: 起一个一次性容器, 把备份目录只读挂进去, 让 pg_restore 直接读文件路径。
         $mountSpec = $BackupDir + ':/tsp_dump_check:ro'
