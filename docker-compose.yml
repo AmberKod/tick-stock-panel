@@ -23,8 +23,23 @@ services:
       - DATA_DIR=/app/data
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
+      # 强制 uv 按 lockfile 运行, 禁止运行时重新解析依赖。
+      # 原因: 运行时 CMD 是 `uv run uvicorn ...`, 而 uv run 默认会先 sync; 非 frozen
+      # 的 sync 会做一次完整依赖解析, 由于 requires-python = ">=3.11" 没有上限, uv 需要
+      # 为 python_full_version >= '3.15' 这条 split 求解, 在 sys_platform == 'win32'
+      # 分支上 py-mini-racer>=0.12 无解(该包只有 <=0.6.0 提供), 解析失败 -> uv run 退出
+      # -> 容器被 restart: unless-stopped 无限拉起。
+      # 与构建期保持一致: Dockerfile 用的是 `uv sync --frozen`, 运行时同样走 lock;
+      # 同时保留 lock 与环境的校验, 环境真出问题会显式报错, 而不是静默跑在不确定组合上。
+      # 根治方案(本次未做): 给 pyproject 的 requires-python 加上限(如 >=3.11,<3.15),
+      # 然后重新 uv lock + 重新 build。届时本行可移除。
+      - UV_FROZEN=1
     volumes:
-      - ./data:/app/data
+      # 数据卷: 由 bind mount(./data) 切换为 named volume tsp_parquet。
+      # 该卷必须在顶层 volumes 段里声明 external: true, 否则 compose 会给卷名加
+      # 项目名前缀、生成 tsp-fresh_tsp_parquet, 用不到我们已经建好的 tsp_parquet。
+      # 宿主机 data/ 目录保留为平行副本(不再挂载), 不要删除。
+      - tsp_parquet:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
       # 保留原始 dotenv 值供首次密码初始化读取，避免 Compose 展开密码中的 $VAR。
       - ./.env:/app/.env:ro
@@ -32,3 +47,11 @@ services:
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
+
+# 顶层卷声明。
+# external: true 有两层作用:
+#   1. 卷由外部创建, compose 不负责创建, 也不会给它加项目名前缀;
+#   2. `docker compose down -v` 不会把它一起删掉 —— 行情数据需要这层保护。
+volumes:
+  tsp_parquet:
+    external: true
