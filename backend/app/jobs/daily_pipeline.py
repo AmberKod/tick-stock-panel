@@ -1325,16 +1325,18 @@ def _enriched_latest_distribution(data_dir: Path, market: str) -> Counter[date]:
     (压根没有 09-17), 而 enriched 侧有 72/2812 只被零散标的带到 09-17。
     只看 H6 会漏判这种"enriched 被推到更新的残缺日"的情况。
 
-    直接复用 ``scripts.repair_hk_stale.scan_latest_dates`` (生产已验证):
+    直接复用 ``app.services.enriched_scan.scan_latest_dates`` (生产已验证,
+    且随镜像发布 —— 早期版本 import ``scripts.repair_hk_stale``, 而 backend/scripts
+    被 .dockerignore 排除, 容器内必然 ImportError 并退化成只看 H6 单侧):
     它用 ``pl.ScanCastOptions(integer_cast="allow-float")`` 处理跨分区混 schema
     (新浪 volume=Float64 / 兜底源 Int64), 按后缀过滤 .HK/.US, 且遵循「不可用
     不计入分母」—— 目录不存在/读失败一律返回空 Counter, 不拿空结果冒充"没有
     落后"或"已最新"。
     """
     try:
-        from scripts.repair_hk_stale import scan_latest_dates
+        from app.services.enriched_scan import scan_latest_dates
     except Exception:
-        logger.warning("enriched 扫描不可用: scripts.repair_hk_stale 导入失败", exc_info=True)
+        logger.warning("enriched 扫描不可用: app.services.enriched_scan 导入失败", exc_info=True)
         return Counter()
     try:
         frame = scan_latest_dates(data_dir, market)
@@ -1374,16 +1376,16 @@ _ENRICHED_SCAN_CACHE: dict[tuple[str, str], tuple[float, Counter[date]]] = {}
 def _scan_enriched_latest_distribution(data_dir: Path, market: str) -> Counter[date]:
     """真扫 enriched 全量分区, 返回 {per-symbol 最新日: 该日标的数}。
 
-    直接复用 ``scripts.repair_hk_stale.scan_latest_dates`` (生产已验证):
+    直接复用 ``app.services.enriched_scan.scan_latest_dates`` (生产已验证):
     它用 ``pl.ScanCastOptions(integer_cast="allow-float")`` 处理跨分区混 schema
     (新浪 volume=Float64 / 兜底源 Int64), 按 ``_market_suffix`` 过滤 .HK/.US,
     且遵循「不可用不计入分母」—— 目录不存在/读失败一律返回空表, 不拿空结果
     冒充"没有 stale"或"已最新"。空 Counter = 该侧不可用。
     """
     try:
-        from scripts.repair_hk_stale import scan_latest_dates
+        from app.services.enriched_scan import scan_latest_dates
     except Exception:
-        logger.warning("enriched 扫描不可用: scripts.repair_hk_stale 导入失败", exc_info=True)
+        logger.warning("enriched 扫描不可用: app.services.enriched_scan 导入失败", exc_info=True)
         return Counter()
     try:
         frame = scan_latest_dates(data_dir, market)
@@ -1561,6 +1563,20 @@ _MARKET_DAILY_CATCHUP_AFTER = {"HK": (18, 30), "US": (8, 30)}
 # 超长假期 (如春节) 会多触发一次 incremental 空转, 框架幂等无害。
 _MARKET_DAILY_STALENESS_DAYS = {"HK": 4, "US": 3}
 
+# 启动补跑**专用**的日期落后容差 (自然日), 与上面那个常量**故意分开**。
+#
+# 为什么分开: _MARKET_DAILY_STALENESS_DAYS 还被 _market_bulk_lag_pending 当作
+# "落后超过容差" 的分母口径使用 —— 收紧它会同时抬高 bulk_lag 占比
+# (HK 实测 tol=4 时 0.075; tol 收到 1 时大批"差 1~3 天"的标的会全部计入),
+# 极可能越过 0.25 阈值, 等于这边刚堵住 partial_sync、那边又放出 bulk_lag。
+# 所以启动判定单独取一套更严的口径, bulk_lag 的分母保持不动。
+#
+# 取值 2 (HK) / 1 (US): 启动补跑只关心"是不是漏跑了那一次调度"。HK 18:00 / US
+# 08:00 的 cron 在服务停机时不会补, 容差放宽到 3~4 天会把"周一晚间重启、还停
+# 在周五"这种真实漏跑也放过(要等到周二 18:00 才补)。收到 1~2 天后, 跨周末的
+# 漏跑在下一个工作日启动时就能被抓到。
+_MARKET_DAILY_CATCHUP_STALENESS_DAYS = {"HK": 2, "US": 1}
+
 # 启动补跑的「错过太久就不补」上限 (自然日)。超过它 → 本次启动**不**补跑。
 #
 # 启动补跑的定位是「补当天那一次调度窗口」, 不是「补历史」。超过上限说明服务
@@ -1593,6 +1609,10 @@ _CATCHUP_REASON_STALE = "stale"
 # fresh —— 它不是"数据没问题", 而是"问题太大, 不该由启动补跑来处理"。
 _CATCHUP_REASON_STALE_BEYOND_CATCHUP = "stale_beyond_catchup"
 _CATCHUP_REASON_PARTIAL_SYNC = "partial_sync"
+# 启动场景对 partial_sync 的豁免 (见 _market_daily_catchup_decision): 判据成立
+# 但**不**在启动时补跑。同样必须区别于 fresh —— 它是"已知没同步完", 不是
+# "数据没问题", 由调用方显式告警。
+_CATCHUP_REASON_PARTIAL_SYNC_DEFERRED = "partial_sync_deferred"
 _CATCHUP_REASON_UNIVERSE_UNAVAILABLE = "universe_unavailable"
 # 众数日期新鲜, 但落后超过容差的标的占比超阈值 (见 _market_bulk_lag_pending)
 _CATCHUP_REASON_BULK_LAG = "bulk_lag"
@@ -1650,15 +1670,25 @@ def _market_daily_catchup_decision(
         return MarketCatchupDecision(
             needed=False, reason=_CATCHUP_REASON_STALE_BEYOND_CATCHUP, latest=latest
         )
-    if staleness > _MARKET_DAILY_STALENESS_DAYS[market]:
+    if staleness > _MARKET_DAILY_CATCHUP_STALENESS_DAYS.get(
+        market, _MARKET_DAILY_STALENESS_DAYS[market]
+    ):
         return MarketCatchupDecision(
             needed=True, reason=_CATCHUP_REASON_STALE, latest=latest
         )
     # 日期不落后 ≠ 同步完整: 最新日可能只有零散标的到位 (服务错开调度窗口时
-    # 的典型残留)。此时同样要补跑, 否则该市场长期停在"少数标的撑起来的日期"。
+    # 的典型残留)。
+    #
+    # ⚠️ 启动场景豁免 (2026-10-08 实测决定): 这条判据成立时**不在启动时补跑**。
+    # 理由: ① 同步跑在线程池、不阻塞 API; ② 容器化后重启不频繁, 但本判据是
+    #   "半同步"状态, 一次重启打断就又会留下半同步 → 下次重启再触发, 形成
+    #   "每次发版都塞一轮 30 分钟同步"的自激循环 (实测 HK 连续 3 次重启均因此
+    #   触发, 而同期日期只落后 1 天、bulk_lag 占比 0.075 远低于 0.25 阈值);
+    #   ③ 完整同步本来每天 18:00/08:00 会跑, 半同步交给正常调度窗口自愈即可。
+    # 豁免不等于当它不存在: reason 单独返回, 由调用方显式告警。
     if _market_partial_sync_pending(data_dir, market):
         return MarketCatchupDecision(
-            needed=True, reason=_CATCHUP_REASON_PARTIAL_SYNC, latest=latest
+            needed=False, reason=_CATCHUP_REASON_PARTIAL_SYNC_DEFERRED, latest=latest
         )
     # 众数日期已推进 ≠ 全市场跟上: 大批标的仍停在旧日时同样要补跑, 否则
     # "少数标的把众数带到今天" 就会把整个市场判定为健康 (09-24 HK: 众数
@@ -1732,6 +1762,19 @@ def run_market_daily_catchup(
                 )
                 results[market] = {"status": "skipped", "market": market,
                                    "reason": _CATCHUP_REASON_NO_DATA}
+                continue
+            if decision.reason == _CATCHUP_REASON_PARTIAL_SYNC_DEFERRED:
+                # 已知没同步完, 但不在启动时补跑(自激循环, 见判据处注释)。
+                # 必须走到 WARNING, 不能混进 INFO 的"无需补跑"。
+                logger.warning(
+                    "market_daily catchup: %s 最新日 %s 只有部分标的到位 "
+                    "(partial_sync), 但日期未落后 —— 启动场景不补跑, 交给 "
+                    "%s 的正常调度窗口自愈, 该市场不计入'已确认最新'",
+                    market, decision.latest,
+                    "HK 18:00" if market.upper() == "HK" else "US 08:00",
+                )
+                results[market] = {"status": "skipped", "market": market,
+                                   "reason": _CATCHUP_REASON_PARTIAL_SYNC_DEFERRED}
                 continue
             if decision.reason == _CATCHUP_REASON_STALE_BEYOND_CATCHUP:
                 # 落后超过上限: 不是"数据没问题", 而是"问题太大, 不该由启动

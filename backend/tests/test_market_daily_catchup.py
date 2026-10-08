@@ -122,12 +122,15 @@ class TestCatchupNeeded:
         now = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
         assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", now) is False
 
-    def test_partial_sync_after_window_needed(self, tmp_path: Path) -> None:
-        """最新日只有零散标的到位 → 日期没落后也要补跑。
+    def test_partial_sync_after_window_deferred(self, tmp_path: Path) -> None:
+        """最新日只有零散标的到位 → 判据成立, 但**启动场景不补跑**。
 
-        真实场景: 港股 09-17 只有 72/2812 只同步到当天 (服务错开 18:30 窗口),
-        按"众数最新日 = 09-16"算落后仅 2 天, 在容差内 → 旧判据漏判,
-        该市场就此停在少数标的撑起来的日期上。
+        原用例断言 needed=True (2026-10-08 起改为 False): 实测 HK 连续 3 次重启
+        都因 partial_sync 触发一轮 30 分钟同步, 而同期日期只落后 1 天、bulk_lag
+        占比 0.075 远低于 0.25 —— 而每次重启打断又会留下新的半同步, 形成
+        "每次发版都塞一轮同步"的自激循环。半同步交给 18:00/08:00 正常调度窗口
+        自愈。判据本身仍成立(见下方 reason 断言与 _market_partial_sync_pending
+        的独立用例), 只是不再由启动补跑执行。
         """
         today = date.today()
         prev = today - timedelta(days=2)
@@ -136,7 +139,12 @@ class TestCatchupNeeded:
             _write_h6_partition(tmp_path, f"{i:05d}.HK", [prev])
         _write_h6_partition(tmp_path, "99999.HK", [newest])  # 只有 1 只到最新日
         now = datetime.combine(today, datetime.min.time()).replace(hour=19)
-        assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", now) is True
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", now)
+        assert decision.needed is False
+        assert decision.reason == "partial_sync_deferred"
+        # 判据本身仍然判定为半同步 —— 豁免的是"启动时补跑", 不是"当它不存在"
+        assert daily_pipeline._market_partial_sync_pending(tmp_path, "HK") is True
+        assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", now) is False
 
     def test_complete_sync_not_needed(self, tmp_path: Path) -> None:
         """全部标的同步到同一天 (正常盘后同步后的状态) → 不触发。"""
@@ -147,11 +155,12 @@ class TestCatchupNeeded:
         now = datetime.combine(today, datetime.min.time()).replace(hour=19)
         assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", now) is False
 
-    def test_enriched_partial_sync_needed(self, tmp_path: Path) -> None:
-        """H6 停在 T-2 但 enriched 被零散标的推到 T-1 → 也要触发。
+    def test_enriched_partial_sync_deferred(self, tmp_path: Path) -> None:
+        """H6 停在 T-2 但 enriched 被零散标的推到 T-1 → 判据成立, 启动不补跑。
 
         09-18 实测: 港股 H6 最新停在 09-16 (压根没有 09-17), enriched 侧
-        却有 72/2812 只被带到 09-17。只看 H6 会漏判。
+        却有 72/2812 只被带到 09-17。只看 H6 会漏判 —— 所以判据必须两侧都看;
+        但命中之后**不在启动时执行**(理由见 test_partial_sync_after_window_deferred)。
         """
         today = date.today()
         prev = today - timedelta(days=2)
@@ -164,7 +173,9 @@ class TestCatchupNeeded:
         now = datetime.combine(today, datetime.min.time()).replace(hour=19)
         # H6 侧众数 = prev, 落后 2 天在容差内, 单看 H6 不触发
         assert daily_pipeline._h6_latest_by_sampling(tmp_path, "HK") == prev
-        assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", now) is True
+        decision = daily_pipeline._market_daily_catchup_decision(tmp_path, "HK", now)
+        assert decision.needed is False
+        assert decision.reason == "partial_sync_deferred"
 
 
 class TestRunCatchup:
@@ -891,3 +902,65 @@ class TestStaleBeyondCatchupWindow:
         )
         assert decision.needed is False
         assert decision.reason == "stale_beyond_catchup"
+
+
+class TestStartupCatchupToleranceAndPartialSyncDeferral:
+    """启动补跑专用容差 + partial_sync 启动豁免。
+
+    两条改动一起解决"每次发版都塞一轮 30 分钟同步":
+      - 容差收到 HK 2 / US 1 天(跨周末漏跑在下一个工作日启动时就能抓到);
+      - partial_sync 命中也不在启动时执行(半同步会被重启打断再次留下半同步,
+        形成自激循环), 交给 18:00/08:00 正常调度窗口自愈。
+    """
+
+    _EVENING = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
+
+    def test_startup_tolerance_tighter_than_bulk_lag_tolerance(self) -> None:
+        """两个容差必须分开: bulk_lag 的分母用宽口径, 收紧它会抬高占比越阈值。"""
+        for market in ("HK", "US"):
+            assert (
+                daily_pipeline._MARKET_DAILY_CATCHUP_STALENESS_DAYS[market]
+                < daily_pipeline._MARKET_DAILY_STALENESS_DAYS[market]
+            )
+
+    def test_stale_two_days_triggers_hk(self, tmp_path: Path) -> None:
+        """HK 落后 2 天 > 启动容差 2? 不 —— 用 3 天确认严格大于边界。"""
+        _write_h6_partition(tmp_path, "00001.HK", [date.today() - timedelta(days=3)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", self._EVENING
+        )
+        assert decision.needed is True
+        assert decision.reason == "stale"
+
+    def test_stale_one_day_does_not_trigger_hk(self, tmp_path: Path) -> None:
+        """HK 落后 1 天: 旧容差(4)与启动容差(2)都在容差内 → 不触发。"""
+        _write_h6_partition(tmp_path, "00001.HK", [date.today() - timedelta(days=1)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", self._EVENING
+        )
+        assert decision.needed is False
+        assert decision.reason == "fresh"
+
+    def test_run_catchup_defers_partial_sync_with_warning(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        today = date.today()
+        prev = today - timedelta(days=1)
+        newest = today
+        for i in range(10):
+            _write_h6_partition(tmp_path, f"{i:05d}.HK", [prev])
+        _write_h6_partition(tmp_path, "99999.HK", [newest])  # 只有 1 只到最新日
+        _write_universe(tmp_path, "HK")
+        _never_run(monkeypatch)  # 启动补跑触发即测试失败
+
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path), None, now=self._EVENING
+            )
+
+        assert results["HK"]["status"] == "skipped"
+        assert results["HK"]["reason"] == "partial_sync_deferred"
+        assert "启动场景不补跑" in caplog.text
+        assert "均为最新" not in caplog.text
