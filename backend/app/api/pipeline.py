@@ -88,6 +88,34 @@ async def run_now(request: Request) -> dict:
     return {"job_id": job_id, "reused": False}
 
 
+# ⚠️ 这两个端点必须声明在 `/jobs/{job_id}` **之前**: 否则 "history"/"stats"
+#    会被当成 job_id 命中通配路由, 返回 404。
+@router.get("/jobs/history")
+def job_history(limit: int = 50, status: str | None = None,
+                job_type: str | None = None, days: int | None = None) -> dict:
+    """长历史查询(走 Postgres 镜像)。
+
+    DB 不可用时**降级回退本地 JSON**, 但响应里一定带
+    `available=false / source="local_json" / reason=...` ——
+    绝不返回无解释的空列表(那会被读成「最近没跑过」)。
+    """
+    from app.state import job_state
+
+    return job_state.history_payload(limit=limit, status=status, job_type=job_type, days=days)
+
+
+@router.get("/jobs/stats")
+def job_stats(days: int = 30) -> dict:
+    """成功率 / 耗时 / 处理量聚合(走 Postgres 镜像)。
+
+    聚合**没有**本地降级: 本地 JSON 只有最近 50 条, 拿它算「30 天成功率」是假数据。
+    不可用时显式返回 available=false + reason + stats=None。
+    """
+    from app.state import job_state
+
+    return job_state.stats_payload(days=days)
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     # 每次轮询都检查卡死 job — 前端持续轮询, 进度停滞超阈值后必定自愈,
@@ -113,9 +141,17 @@ def cancel_job(job_id: str) -> dict:
 
 @router.get("/jobs")
 def list_jobs(limit: int = 20) -> dict:
+    """实时进度(来自内存/JSON, 与 DB 健康与否无关) + history_db 健康块。
+
+    history_db 显式声明「长历史现在能不能查」—— 不能让你把「查不到」误读成
+    「没问题」。DB 挂了这里的 jobs 照常是完整的实时进度。
+    """
+    from app.state import db as state_db
+
     return {
         "active_id": job_store.active_id(),
         "jobs": job_store.list_recent(limit=limit),
+        "history_db": state_db.db_status(),
     }
 
 

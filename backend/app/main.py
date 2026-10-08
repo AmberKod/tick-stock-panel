@@ -165,6 +165,14 @@ async def _application_lifespan(app: FastAPI):
     depth_service.set_app_state(app.state)
     app.state.depth_service = depth_service
 
+    # S4 切片①: job 执行状态的 Postgres 镜像。
+    # **失败只记 WARNING, 启动绝不失败** —— DB 挂了 job 照跑, 只是长历史不可查。
+    try:
+        from app.state import db as state_db
+        state_db.init()
+    except Exception as e:
+        logger.warning("db state layer unavailable: %s (job 照常执行)", e)
+
     # 启动调度器(若 enriched 数据为空,首次启动可手动 POST /api/pipeline/run)
     try:
         daily_pipeline.set_app_state(app.state)  # 供 depth_finalize job 访问 depth_service
@@ -383,6 +391,11 @@ async def _application_lifespan(app: FastAPI):
         mmanager = getattr(app.state, "mining_manager", None)
         if mmanager:
             mmanager.shutdown()
+        try:
+            from app.state import db as state_db
+            state_db.close()
+        except Exception as e:
+            logger.warning("db state layer close failed: %s", e)
         if app.state.scheduler:
             app.state.scheduler.shutdown(wait=False)
         ps = getattr(app.state, "pull_scheduler", None)

@@ -53,6 +53,12 @@ dependencies = [
     # Watchlist screenshot OCR (Tesseract)
     "pytesseract>=0.3.10",
     "Pillow>=10.0",
+    # Postgres 客户端 (S4 切片①: job 执行状态镜像)。
+    # 选 psycopg 3 同步 API + psycopg_pool: JobStore 的写入横跨 worker 线程与
+    # 事件循环两条路径, 同步连接池线程安全、一套代码通吃; asyncpg 的池绑定
+    # event loop, 需要 loop 亲和的双路径 plumbing。
+    # [binary] 避免编译工具链依赖; <4 上限与 polars 的做法一致。
+    "psycopg[binary,pool]>=3.2,<4",
 ]
 
 [project.optional-dependencies]

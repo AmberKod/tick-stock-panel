@@ -121,6 +121,32 @@ class Settings(BaseSettings):
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""
 
+    # Postgres (S4 切片①: job 执行状态镜像)
+    #
+    # ⚠️ 只能经 settings 读取, 禁止用 os.environ / os.getenv 直取 ——
+    #    线上容器的进程 env 是容器创建时 env_file 固化下来的快照, 可能已过期
+    #    (实测: 容器内 POSTGRES_PORT=5432 且无 POSTGRES_HOST, 而 /app/.env 是
+    #    实时 bind mount, 值是正确的)。pydantic-settings 的优先级是
+    #    env > .env 文件, 直取 os.environ 会拿到固化值。
+    #
+    #    走 settings 还带来一个运维收益: 改 .env 即时生效, 不必重建容器 ——
+    #    这就是 L1 级回退手段(关掉镜像只需把下面的开关置 false)。
+    #
+    # 字段名带 tsp_ 前缀 → 环境变量/`.env` 键名为 TSP_POSTGRES_ENABLED,
+    # 与 POSTGRES_HOST/POSTGRES_PORT 等既有键区分开, 避免误读。
+    #
+    # 默认 false: 新子系统默认关闭, 由用户显式开启后生效(本项目铁律 ——
+    # 不可用必须显式声明, 未经演练的路径不静默上线)。
+    tsp_postgres_enabled: bool = False
+    postgres_host: str = "host.docker.internal"
+    postgres_port: int = 15432
+    postgres_user: str = "tsp"
+    postgres_password: str = ""
+    postgres_db: str = "tsp"
+    # 连接超时(秒)。硬要求: host.docker.internal 可能先解析到不可路由的 IPv6,
+    # 没有超时会把写线程挂死。
+    postgres_connect_timeout_s: float = 3.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()

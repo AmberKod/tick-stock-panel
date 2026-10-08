@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from app.state import job_state
+
 logger = logging.getLogger(__name__)
 
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
@@ -161,6 +163,9 @@ class JobStore:
         timeout_s: int | None = None,
         *,
         long_running: bool = False,
+        job_type: str = "pipeline",
+        market: str | None = None,
+        trigger_source: str = "manual",
     ) -> tuple[str, bool]:
         """单飞创建任务。返回 (job_id, is_new)。
 
@@ -182,6 +187,7 @@ class JobStore:
             else:
                 timeout_s = preferences.get_data_source_job_timeout_s()
 
+        job: dict[str, Any] = {}
         with self._lock:
             if self._active_id:
                 active = self._active_jobs.get(self._active_id)
@@ -189,7 +195,7 @@ class JobStore:
                     return self._active_id, False
 
             job_id = uuid.uuid4().hex[:10]
-            self._active_jobs[job_id] = {
+            job = {
                 "id": job_id,
                 "status": "pending",
                 "stage": "init",
@@ -203,9 +209,18 @@ class JobStore:
                 "result": None,
                 "error": None,
                 "timeout_s": timeout_s,
+                # S4 切片①: 仅供 Postgres 镜像使用的分类维度。
+                # 新增字段是**追加**的, _summary() 不输出它们, 前端契约不变。
+                "job_type": job_type,
+                "market": market,
+                "trigger_source": trigger_source,
             }
+            self._active_jobs[job_id] = job
             self._active_id = job_id
         _register_cancel_flag(job_id)
+        # 锁外镜像: 本地权威写已完成, DB 是旁路(失败只记 WARN)
+        if job:
+            job_state.mirror(job, "create")
         return job_id, True
 
     def start(self, job_id: str) -> None:
@@ -218,6 +233,7 @@ class JobStore:
             # 心跳基准初始化为启动时刻: start() 到首次 progress() 之间的
             # 初始化阶段(解析标的池等)同样计入停滞计时。
             j["last_progress_at"] = j["started_at"]
+        job_state.mirror(j, "start")
 
     def succeed(self, job_id: str, result: Any) -> None:
         with self._lock:
@@ -233,6 +249,8 @@ class JobStore:
                 self._active_id = None
             self._delete_oldest()
             self._write_file(j)
+        # 锁外: 本地权威写(内存 + JSON)已完成, DB 只是旁路镜像
+        job_state.mirror(j, "succeed")
 
     def fail(self, job_id: str, error: str) -> None:
         with self._lock:
@@ -247,6 +265,7 @@ class JobStore:
                 self._active_id = None
             self._delete_oldest()
             self._write_file(j)
+        job_state.mirror(j, "fail")
 
     # ===== progress =====
 
@@ -281,6 +300,8 @@ class JobStore:
                 j["log"].append(entry)
                 if len(j["log"]) > 200:
                     j["log"] = j["log"][-200:]
+        # 锁外镜像(带节流: market_daily 是逐标的回调, 无节流会写放大上万次)
+        job_state.mirror(j, "progress")
         # 锁外检查取消: reap 可能在本次更新刚结束后置位,下一次回调必然命中;
         # 在这里立即检查可以把终止延迟压缩到当次回调。
         ev = _CANCEL_FLAGS.get(job_id)
