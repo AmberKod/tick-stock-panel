@@ -120,4 +120,8 @@ TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
 reports/cursor_tickflow_pro_rate_limit_p0.bundle
 .workbuddy/
-docs/
+# docs/ 整体属于私有草稿, 不入库。改成 docs/* 是为了能单独放行下面这一个例外:
+# git 无法在父目录被整体忽略时重新纳入子文件, 所以必须忽略"内容"而非"目录本身"。
+docs/*
+# 例外: 数据安全红线文档。它是操作规范, 不进版本控制等于没人看得到。
+!docs/DATA-SAFETY.md
