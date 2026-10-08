@@ -118,3 +118,36 @@ def test_catchup_failure_is_silent(tmp_path, cn_repo, monkeypatch):
     monkeypatch.setattr(daily_pipeline, "run_pipeline_then_refresh", boom)
     result = daily_pipeline.run_daily_pipeline_catchup(repo, None, now=datetime(2026, 9, 15, 18, 0))
     assert result["status"] == "failed"
+
+
+def test_catchup_skipped_when_stale_beyond_window(tmp_path, cn_repo, caplog):
+    """落后超过 _CN_CATCHUP_MAX_STALE_DAYS (7 天): 本次启动不补跑。
+
+    与港美同口径: 启动补跑只补"漏跑的那一次调度", 长期离线的 backlog 交给
+    下一次正常调度窗口或专门的补拉路径 —— 否则每次发版重启都会塞一轮
+    全市场同步, 而它跑在启动后 90 s, 最容易被随后的重启打断、整轮白跑。
+    """
+    import logging
+
+    repo, calls = cn_repo
+    _write_day(repo.store.data_dir, date(2026, 9, 1))  # 落后 14 天
+    with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+        result = daily_pipeline.run_daily_pipeline_catchup(
+            repo, None, now=datetime(2026, 9, 15, 16, 30)
+        )
+    assert result["status"] == "skipped"
+    assert calls == []  # 一次都没真跑
+    assert "超出启动补跑适用范围" in caplog.text
+    # 不得写成"无需补跑"式的健康结论 —— 它是"落后太多", 不是"没问题"
+    assert "A 股日 K 无需补跑" not in caplog.text
+
+
+def test_catchup_runs_at_max_stale_boundary(tmp_path, cn_repo):
+    """上限当天(7 天)仍在适用范围内 —— 边界含在内, 不能 off-by-one。"""
+    repo, calls = cn_repo
+    _write_day(repo.store.data_dir, date(2026, 9, 8))  # 落后 7 天
+    result = daily_pipeline.run_daily_pipeline_catchup(
+        repo, None, now=datetime(2026, 9, 15, 16, 30)
+    )
+    assert result["status"] == "ok"
+    assert "pipeline" in calls

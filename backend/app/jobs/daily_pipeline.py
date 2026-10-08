@@ -1561,6 +1561,20 @@ _MARKET_DAILY_CATCHUP_AFTER = {"HK": (18, 30), "US": (8, 30)}
 # 超长假期 (如春节) 会多触发一次 incremental 空转, 框架幂等无害。
 _MARKET_DAILY_STALENESS_DAYS = {"HK": 4, "US": 3}
 
+# 启动补跑的「错过太久就不补」上限 (自然日)。超过它 → 本次启动**不**补跑。
+#
+# 启动补跑的定位是「补当天那一次调度窗口」, 不是「补历史」。超过上限说明服务
+# 是长期离线 / 冷启动, 而不是漏跑了一次:
+#   - incremental 同步按 symbol 做增量日期对齐, 积压 N 天要做 N 倍的对齐工作,
+#     耗时随积压线性上升 —— HK 全量历史实测 5897 s (≈98 分钟);
+#   - 它跑在启动后 60 s, 是发版重启最容易被打断的时点, 打断则本轮白跑;
+#   - 「每次发版都强制塞一轮 30 分钟全市场同步」本身就是要治理的现象。
+#   长期离线的补齐应走专门的 full-history 路径, 或等下一个正常调度窗口。
+#
+# 取 7 天: 调度是 mon-fri, 最坏的**常见**情形是停机整整一周 (5 个交易日 +
+# 周末 2 天 = 7 自然日), 这个量级仍应自愈; 再往上就不是「漏跑一次」了。
+_MARKET_DAILY_CATCHUP_MAX_STALE_DAYS = {"HK": 7, "US": 7}
+
 # 补跑判定结论的原因码。needed=False 时必须能区分几种截然不同的状态:
 #   fresh                —— 已确认新鲜 (有数据且未落后), 可安全地"无需补跑"
 #   no_data              —— 新鲜度不可判定 (H6 与 enriched 双侧都取不到),
@@ -1574,6 +1588,10 @@ _CATCHUP_REASON_BEFORE_WINDOW = "before_window"
 _CATCHUP_REASON_NO_DATA = "no_data"
 _CATCHUP_REASON_FRESH = "fresh"
 _CATCHUP_REASON_STALE = "stale"
+# 落后超过 _MARKET_DAILY_CATCHUP_MAX_STALE_DAYS: 判据确实认为该补, 但已超出
+# 启动补跑的适用范围 (见该常数的注释), 本次启动不补跑。必须显式区别于
+# fresh —— 它不是"数据没问题", 而是"问题太大, 不该由启动补跑来处理"。
+_CATCHUP_REASON_STALE_BEYOND_CATCHUP = "stale_beyond_catchup"
 _CATCHUP_REASON_PARTIAL_SYNC = "partial_sync"
 _CATCHUP_REASON_UNIVERSE_UNAVAILABLE = "universe_unavailable"
 # 众数日期新鲜, 但落后超过容差的标的占比超阈值 (见 _market_bulk_lag_pending)
@@ -1624,6 +1642,14 @@ def _market_daily_catchup_decision(
             needed=False, reason=_CATCHUP_REASON_NO_DATA, latest=None
         )
     staleness = (now.date() - latest).days
+    # 「错过太久」闸门: 先于下面的落后容差判定。超过上限说明不是漏跑一次,
+    # 而是长期离线 —— 交给 full-history 路径或下一个正常调度窗口, 不在启动
+    # 时塞一轮全市场同步。注意它返回的是 needed=False 但 reason 不是 fresh,
+    # 调用方必须显式告警, 不得计入"已确认最新"。
+    if staleness > _MARKET_DAILY_CATCHUP_MAX_STALE_DAYS.get(market, 7):
+        return MarketCatchupDecision(
+            needed=False, reason=_CATCHUP_REASON_STALE_BEYOND_CATCHUP, latest=latest
+        )
     if staleness > _MARKET_DAILY_STALENESS_DAYS[market]:
         return MarketCatchupDecision(
             needed=True, reason=_CATCHUP_REASON_STALE, latest=latest
@@ -1707,6 +1733,22 @@ def run_market_daily_catchup(
                 results[market] = {"status": "skipped", "market": market,
                                    "reason": _CATCHUP_REASON_NO_DATA}
                 continue
+            if decision.reason == _CATCHUP_REASON_STALE_BEYOND_CATCHUP:
+                # 落后超过上限: 不是"数据没问题", 而是"问题太大, 不该由启动
+                # 补跑来处理"。必须走到 WARNING, 不能混进 INFO 的"无需补跑"。
+                max_days = _MARKET_DAILY_CATCHUP_MAX_STALE_DAYS.get(market, 7)
+                logger.warning(
+                    "market_daily catchup: %s 最新日 %s, 已落后 %d 天 (>%d 天上限), "
+                    "超出启动补跑适用范围(长期离线/冷启动), 本次启动不补跑 "
+                    "—— 请用 full-history 补拉或等下一个调度窗口, "
+                    "该市场不计入'已确认最新'",
+                    market, decision.latest,
+                    (now.date() - decision.latest).days if decision.latest else -1,
+                    max_days,
+                )
+                results[market] = {"status": "skipped", "market": market,
+                                   "reason": _CATCHUP_REASON_STALE_BEYOND_CATCHUP}
+                continue
             if not decision.needed:
                 skip_reasons[market] = decision.reason
                 continue
@@ -1760,6 +1802,11 @@ def run_market_daily_catchup(
 # 落后容差 3 个自然日, 覆盖周末(周五→周一 3 天), 与港美 catch-up 同口径。
 _CN_PIPELINE_CATCHUP_AFTER_MINUTES = 30
 _CN_STALENESS_DAYS = 3
+# 「错过太久就不补」上限 (自然日), 与港美同口径见
+# _MARKET_DAILY_CATCHUP_MAX_STALE_DAYS 的注释: 启动补跑只负责补"漏跑的那一次
+# 调度", 不是补历史; 超过 7 天属长期离线, 交给专门的补拉路径, 不在启动时
+# 自动塞一轮全市场同步(它跑在启动后 90 s, 最容易被随后的发版重启打断)。
+_CN_CATCHUP_MAX_STALE_DAYS = 7
 
 
 def _cn_latest_daily_date(data_dir: Path) -> date | None:
@@ -1774,20 +1821,43 @@ def _cn_latest_daily_date(data_dir: Path) -> date | None:
     return latest
 
 
-def _cn_catchup_needed(data_dir: Path, now: datetime) -> bool:
-    """判定 A 股是否需要启动兜底补跑: 工作日 + 管道窗口已过 + 日 K 落后超容差。"""
+def _cn_catchup_decision(data_dir: Path, now: datetime) -> tuple[bool, str]:
+    """判定 A 股是否需要启动兜底补跑, 同时给出原因码。
+
+    返回 (needed, reason)。reason 必须与港美同源地可区分, 否则调用方只能把
+    所有 needed=False 统一打成"无需补跑" —— 那正是 09-24 的 fail-open 本体
+    (把"压根没数据"和"落后太多不该在这补"都说成健康)。取值:
+      weekend / before_window —— 不在补跑时点
+      no_data                 —— 无 date= 分区, 交管道自己建基线 (needed=True)
+      stale_beyond_catchup    —— 落后超上限, 不该由启动补跑处理 (needed=False)
+      stale                   —— 落后超容差, 该补
+      fresh                   —— 容差内, 无需补跑
+    """
     from app.services import preferences
 
-    if now.weekday() >= 5:  # 周末不补, 等下个工作日正常调度
-        return False
+    if now.weekday() >= 5:
+        return False, "weekend"
     schedule = preferences.get_pipeline_schedule()
     window = schedule["hour"] * 60 + schedule["minute"] + _CN_PIPELINE_CATCHUP_AFTER_MINUTES
     if (now.hour * 60 + now.minute) < window:
-        return False
+        return False, "before_window"
     latest = _cn_latest_daily_date(data_dir)
-    if latest is None:  # 完全无数据: 管道本身会建基线, 交给它跑
-        return True
-    return (now.date() - latest).days > _CN_STALENESS_DAYS
+    if latest is None:
+        return True, "no_data"
+    stale_days = (now.date() - latest).days
+    if stale_days > _CN_CATCHUP_MAX_STALE_DAYS:
+        return False, _CATCHUP_REASON_STALE_BEYOND_CATCHUP
+    if stale_days > _CN_STALENESS_DAYS:
+        return True, _CATCHUP_REASON_STALE
+    return False, _CATCHUP_REASON_FRESH
+
+
+def _cn_catchup_needed(data_dir: Path, now: datetime) -> bool:
+    """判定 A 股是否需要启动兜底补跑: 工作日 + 管道窗口已过 + 日 K 落后超容差。
+
+    裸 bool 口径, 保留给既有调用/测试; 原因码见 _cn_catchup_decision。
+    """
+    return _cn_catchup_decision(data_dir, now)[0]
 
 
 def run_daily_pipeline_catchup(
@@ -1806,8 +1876,22 @@ def run_daily_pipeline_catchup(
     if now is None:
         now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     try:
-        if not _cn_catchup_needed(repo.store.data_dir, now):
-            # _cn_catchup_needed 对"无数据"是 return True (fail-closed, 交给管道
+        needed, reason = _cn_catchup_decision(repo.store.data_dir, now)
+        if not needed:
+            if reason == _CATCHUP_REASON_STALE_BEYOND_CATCHUP:
+                # 不是"数据没问题", 而是"落后太多, 不该由启动补跑处理"。
+                # 必须走 WARNING, 不能混进 INFO 的"无需补跑"(09-24 同款伪装)。
+                latest = _cn_latest_daily_date(repo.store.data_dir)
+                logger.warning(
+                    "daily_pipeline catchup: A 股日 K 最新日 %s, 已落后 %d 天 "
+                    "(>%d 天上限), 超出启动补跑适用范围(长期离线/冷启动), "
+                    "本次启动不补跑 —— 请用专门的补拉路径或等下一个调度窗口, "
+                    "该数据不计入'已确认最新'",
+                    latest, (now.date() - latest).days if latest else -1,
+                    _CN_CATCHUP_MAX_STALE_DAYS,
+                )
+                return {"status": "skipped", "reason": reason}
+            # _cn_catchup_decision 对"无数据"是 needed=True (fail-closed, 交给管道
             # 自己建基线), 不存在港美那种 None→False 伪装; 但周末/窗口未过时
             # 会在"压根没数据"的情况下同样落到这里, 此时如实告警, 不写成"无需补跑"。
             if _cn_latest_daily_date(repo.store.data_dir) is None:

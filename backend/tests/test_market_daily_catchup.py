@@ -86,7 +86,11 @@ class TestCatchupNeeded:
         assert daily_pipeline._market_daily_catchup_needed(root, "HK", now) is False
 
     def test_stale_after_window_needed(self, tmp_path: Path) -> None:
-        root = self._mk(tmp_path, date.today() - timedelta(days=10))
+        # 落后 5 天: 超过容差(HK 4 天)但仍在启动补跑的适用范围(<=7 天)内。
+        # 原用 10 天, 引入「错过太久就不补」闸门后 10 天会被判为不适用,
+        # 故收紧到 5 天以继续覆盖"落后 → 触发"这条主路径; 闸门本身见
+        # TestStaleBeyondCatchupWindow。
+        root = self._mk(tmp_path, date.today() - timedelta(days=5))
         now = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
         assert daily_pipeline._market_daily_catchup_needed(root, "HK", now) is True
 
@@ -180,7 +184,7 @@ class TestRunCatchup:
     def test_triggers_only_stale_market(self, tmp_path: Path, monkeypatch) -> None:
         today = date.today()
         # HK 落后 10 天, US 新鲜
-        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=5)])
         _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=1)])
         _write_universe(tmp_path, "HK")  # universe 可用才谈得上"真跑"
 
@@ -200,8 +204,8 @@ class TestRunCatchup:
 
     def test_scheduler_error_swallowed(self, tmp_path: Path, monkeypatch) -> None:
         today = date.today()
-        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
-        _write_h6_partition(tmp_path, "00002.US", [today - timedelta(days=10)])
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=5)])
+        _write_h6_partition(tmp_path, "00002.US", [today - timedelta(days=5)])
         _write_universe(tmp_path, "HK")
         _write_universe(tmp_path, "US", count=600)
 
@@ -222,7 +226,7 @@ class TestRunCatchup:
         0 条数据, 下次启动又重复一遍。延后更合理。
         """
         today = date.today()
-        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=5)])
         _write_universe(tmp_path, "US", count=600)
         monkeypatch.setattr(
             daily_pipeline, "_provider_cooling_down", lambda market: market.upper() == "US"
@@ -371,8 +375,8 @@ class TestNoDataNotDisguisedAsFresh:
     # ③ 有数据且落后 → 照旧触发补跑 (不受本次改动影响)
     def test_stale_data_still_triggers(self, tmp_path: Path, monkeypatch) -> None:
         today = date.today()
-        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=10)])
-        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=5)])
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=5)])
         _write_universe(tmp_path, "HK")
         _write_universe(tmp_path, "US", count=600)
 
@@ -803,3 +807,87 @@ class TestH6FullScanDoesNotCrash:
             daily_pipeline._CATCHUP_REASON_BEFORE_WINDOW,
             daily_pipeline._CATCHUP_REASON_NO_DATA,
         }
+
+
+class TestStaleBeyondCatchupWindow:
+    """「错过太久就不补」闸门。
+
+    启动补跑只负责补"漏跑的那一次调度", 不是补历史。落后超过
+    _MARKET_DAILY_CATCHUP_MAX_STALE_DAYS (7 天) 时本次启动**不**补跑:
+    长期离线的 backlog 交给下一次正常 cron 窗口(每天都会跑)或专门的
+    full-history 补拉路径, 而不是每次发版重启都塞一轮全市场同步。
+
+    关键纪律: 返回 needed=False 但 reason 必须是 stale_beyond_catchup,
+    **绝不能**是 fresh —— 它不是"数据没问题", 而是"问题太大不该在这处理"。
+    """
+
+    _EVENING = datetime.combine(date.today(), datetime.min.time()).replace(hour=19)
+    _MORNING = datetime.combine(date.today(), datetime.min.time()).replace(hour=9)
+
+    def test_decision_is_not_needed_and_not_fresh(self, tmp_path: Path) -> None:
+        _write_h6_partition(tmp_path, "00001.HK", [date.today() - timedelta(days=30)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", self._EVENING
+        )
+        assert decision.needed is False
+        assert decision.reason == "stale_beyond_catchup"
+        assert decision.latest == date.today() - timedelta(days=30)
+        # 裸 bool 口径同步为 False
+        assert daily_pipeline._market_daily_catchup_needed(tmp_path, "HK", self._EVENING) is False
+
+    def test_boundary_inside_still_triggers(self, tmp_path: Path) -> None:
+        """上限当天(7 天)仍在适用范围内 —— 边界必须含在内, 不能 off-by-one。"""
+        _write_h6_partition(tmp_path, "00001.HK", [date.today() - timedelta(days=7)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", self._EVENING
+        )
+        assert decision.needed is True
+        assert decision.reason == "stale"
+
+    def test_boundary_outside_skips(self, tmp_path: Path) -> None:
+        _write_h6_partition(tmp_path, "00001.HK", [date.today() - timedelta(days=8)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "HK", self._EVENING
+        )
+        assert decision.needed is False
+        assert decision.reason == "stale_beyond_catchup"
+
+    def test_run_catchup_skips_and_warns(self, tmp_path: Path, monkeypatch, caplog) -> None:
+        import logging
+
+        today = date.today()
+        _write_h6_partition(tmp_path, "00001.HK", [today - timedelta(days=30)])
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=30)])
+        _write_universe(tmp_path, "HK")
+        _write_universe(tmp_path, "US", count=600)
+        _never_run(monkeypatch)  # 触发补跑即测试失败
+
+        with caplog.at_level(logging.INFO, logger="app.jobs.daily_pipeline"):
+            results = daily_pipeline.run_market_daily_catchup(
+                _repo_for(tmp_path), None, now=self._EVENING
+            )
+
+        assert results["HK"]["status"] == "skipped"
+        assert results["HK"]["reason"] == "stale_beyond_catchup"
+        assert results["US"]["status"] == "skipped"
+        assert results["US"]["reason"] == "stale_beyond_catchup"
+        # 不得写成"均为最新" —— 与 no_data 同款 fail-closed 纪律
+        assert "均为最新" not in caplog.text
+        assert "超出启动补跑适用范围" in caplog.text
+
+    def test_us_gate_uses_us_threshold(self, tmp_path: Path, monkeypatch) -> None:
+        """US 容差 3 天 / 上限 7 天: 5 天该补, 10 天不补 —— 两个市场各自取值。"""
+        today = date.today()
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=5)])
+        _write_universe(tmp_path, "US", count=600)
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "US", self._MORNING
+        )
+        assert decision.needed is True
+
+        _write_h6_partition(tmp_path, "AAPL.US", [today - timedelta(days=10)])
+        decision = daily_pipeline._market_daily_catchup_decision(
+            tmp_path, "US", self._MORNING
+        )
+        assert decision.needed is False
+        assert decision.reason == "stale_beyond_catchup"
