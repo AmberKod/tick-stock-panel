@@ -98,6 +98,9 @@ async function fetchJson<T>(path: string): Promise<T> {
 export function USStockAnalysisPage() {
   const { symbol: rawSymbol = 'AAPL.US' } = useParams<{ symbol: string }>()
   const symbol = rawSymbol.toUpperCase()
+  // 新增的三个深度数据 API(OpenBB/SEC)要纯 ticker: 路由参数带 ".US" 后缀
+  // (老 realtime API 容忍后缀, 新的不容忍——实测 NVDA.US 返回 no_data, NVDA 正常)。
+  const ticker = symbol.replace(/\.US$/, '')
 
   const realtime = useQuery({
     queryKey: ['us', 'realtime', symbol],
@@ -106,24 +109,24 @@ export function USStockAnalysisPage() {
   })
 
   const deepQuote = useQuery({
-    queryKey: ['us', 'deep-quote', symbol],
+    queryKey: ['us', 'deep-quote', ticker],
     queryFn: () =>
       fetchJson<DeepQuoteResp>(
-        `/api/us/deep/quote/${encodeURIComponent(symbol)}?market=US`,
+        `/api/us/deep/quote/${encodeURIComponent(ticker)}?market=US`,
       ),
     staleTime: 30_000,
   })
 
   const financials = useQuery({
-    queryKey: ['us', 'financials', symbol],
-    queryFn: () => fetchJson<FinancialsResp>(`/api/us/financials/${encodeURIComponent(symbol)}`),
+    queryKey: ['us', 'financials', ticker],
+    queryFn: () => fetchJson<FinancialsResp>(`/api/us/financials/${encodeURIComponent(ticker)}`),
     staleTime: 600_000,
   })
 
   const filings = useQuery({
-    queryKey: ['us', 'filings', symbol],
+    queryKey: ['us', 'filings', ticker],
     queryFn: () =>
-      fetchJson<FilingsResp>(`/api/us/deep/filings/${encodeURIComponent(symbol)}?limit=8`),
+      fetchJson<FilingsResp>(`/api/us/deep/filings/${encodeURIComponent(ticker)}?limit=8`),
     staleTime: 600_000,
   })
 

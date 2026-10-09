@@ -19,18 +19,18 @@ function Test-PortListening([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-# --- 1. sec_relay (17897) ---
+# --- 1. sec_relay (17897, v2 智能分流: sec.gov 直连 + 其余转 7897) ---
 if (Test-PortListening 17897) {
     Write-Host "[OK]   sec_relay 已在 17897 运行, 跳过" -ForegroundColor Green
 } else {
-    Write-Host "[..]   启动 sec_relay (17897)..." -ForegroundColor Cyan
+    Write-Host "[..]   启动 sec_relay (17897, 智能分流)..." -ForegroundColor Cyan
     $py = "C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-    Start-Process -FilePath $py -ArgumentList "$root\scripts\sec_relay.py" -WindowStyle Minimized
+    Start-Process -FilePath $py -ArgumentList @("$root\scripts\sec_relay.py", "--upstream", "http://127.0.0.1:7897") -WindowStyle Minimized
     Start-Sleep -Seconds 2
     if (Test-PortListening 17897) {
         Write-Host "[OK]   sec_relay 已启动" -ForegroundColor Green
     } else {
-        Write-Host "[XX]   sec_relay 启动失败, 手动检查: $py $root\scripts\sec_relay.py" -ForegroundColor Red
+        Write-Host "[XX]   sec_relay 启动失败, 手动检查: $py $root\scripts\sec_relay.py --upstream http://127.0.0.1:7897" -ForegroundColor Red
     }
 }
 
