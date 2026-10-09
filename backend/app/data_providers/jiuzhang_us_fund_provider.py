@@ -81,7 +81,27 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # SEC EDGAR 必须直连: ProxyHandler({}) 显式清空代理环境 (含 http_proxy/
 # https_proxy/HTTP_PROXY/HTTPS_PROXY), 绝不走本机 7897 —— 部分代理出口 IP
 # 会被 SEC 封禁。模块级单例, 全部请求复用。
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _build_opener():
+    """按 settings 构建 opener。
+
+    默认直连(清空代理)。但 data.sec.gov 在国内直连会被 SNI 阻断
+    (2026-10-09 容器内实测: DNS 正常、SSL 握手 UNEXPECTED_EOF),
+    因此支持 settings.sec_proxy 显式指定代理; 未配置时保持直连。
+    """
+    proxy = ""
+    try:  # settings 导入失败时退化为直连(纯函数场景/单测)
+        from app.config import settings
+        proxy = getattr(settings, "sec_proxy", "") or ""
+    except Exception:
+        proxy = ""
+    if proxy:
+        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    else:
+        handler = urllib.request.ProxyHandler({})  # 显式清空环境变量代理
+    return urllib.request.build_opener(handler)
+
+
+_opener = _build_opener()
 
 # XBRL 概念候选项: 不同公司用的标签不一样, 逐个尝试直到拿到数据
 CONCEPTS = {

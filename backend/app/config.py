@@ -147,6 +147,11 @@ class Settings(BaseSettings):
     # 没有超时会把写线程挂死。
     postgres_connect_timeout_s: float = 3.0
 
+    # SEC EDGAR 代理。data.sec.gov 国内直连被 SNI 阻断(2026-10-09 容器内实测
+    # SSL UNEXPECTED_EOF), 需经代理访问。留空则直连(海外部署用)。
+    # 容器内指向宿主代理要用 host.docker.internal, 不能用 127.0.0.1。
+    sec_proxy: str = ""
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
