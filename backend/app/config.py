@@ -152,6 +152,14 @@ class Settings(BaseSettings):
     # 容器内指向宿主代理要用 host.docker.internal, 不能用 127.0.0.1。
     sec_proxy: str = ""
 
+    # OpenBB 本地 API (九章融合 P1)。宿主常驻服务, 由 D:\OpenBB\start-openbb-api.ps1
+    # 启动 (与 sec_relay 同级的运维依赖)。默认值是容器视角 —— 容器经
+    # host.docker.internal 访问宿主 6900; 后端在宿主直跑时改为
+    # http://127.0.0.1:6900/api/v1。
+    openbb_base_url: str = "http://host.docker.internal:6900/api/v1"
+    # OpenBB 请求超时(秒)。三大报表/filings 由上游(yfinance/SEC)抓取, 偶发慢。
+    openbb_timeout_s: float = 25.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()

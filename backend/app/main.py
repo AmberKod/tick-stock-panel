@@ -39,6 +39,7 @@ from app.api import (
     signals,
     stock_analysis,
     strategy,
+    us_deep,
     us_financials,
     watchlist,
 )
@@ -573,6 +574,7 @@ app.include_router(data.router)
 app.include_router(hk_api.router)
 app.include_router(us_api.router)
 app.include_router(us_financials.router)
+app.include_router(us_deep.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(hotspots.router)

@@ -53,6 +53,8 @@ REAL_SOURCES: frozenset[str] = frozenset({
     "tencent_hk_daily",
     # hk_financial_provider.py:25 (HK_FINANCIAL_SOURCE)
     "eastmoney_hk_announcement",
+    # jiuzhang_openbb_provider.py:51 (SOURCE)
+    "openbb",
     # ── provider 数据链路真实标记 (services/hk_data_adapter.py) ──
     # hk_data_adapter.py:340
     "akshare",

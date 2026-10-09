@@ -12,6 +12,7 @@
 | 本仓路径 | 来源模块 | 说明 |
 | :-- | :-- | :-- |
 | `backend/app/data_providers/jiuzhang_us_fund_provider.py` | `us_fund.py` | SEC EDGAR XBRL 美股财报。原样移植, TSP 适配: 缓存目录改落 `settings.data_dir/us_fund_cache`; 全部请求经 `ProxyHandler({})` 直连 SEC (不走本机代理); 返回带 `source: "sec-edgar"` 过 source_gate 闸门。文件头保留上游 MIT 声明。 |
+| `backend/app/data_providers/jiuzhang_openbb_provider.py` | `openbb_client.py` | OpenBB 深度数据客户端(实时盘口/三大报表/SEC 报送)。原样移植, TSP 适配: `BASE`/超时改从 `settings.openbb_base_url`/`settings.openbb_timeout_s` 读取; 返回统一外包 `{"source": "openbb", "data": ...}` 过 source_gate 闸门; `summary_text` 改为 fail-closed(异常上抛不吞); `ProxyHandler({})` 直连本机 OpenBB 服务(不走代理)。文件头保留上游 MIT 声明。 |
 
 MIT 许可证全文（来自上游 `LICENSE`）:
 
