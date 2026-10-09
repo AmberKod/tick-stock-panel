@@ -319,20 +319,34 @@ export function USStockAnalysisPage() {
           error={filings.error}
           reason={filingsReason}
         >
+          {insiderSummary(filingList) && (
+            <div className="mb-2 rounded-md bg-blue-500/10 px-2.5 py-1.5 text-xs text-blue-600 dark:text-blue-300">
+              {insiderSummary(filingList)}
+            </div>
+          )}
           <ul>
-            {filingList.map((f, i) => (
-              <li
-                key={`${f.filing_date ?? ''}-${i}`}
-                className="flex items-center justify-between py-1.5 border-b border-border/40 last:border-0"
-              >
-                <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono text-xs">
-                  {f.form_type || f.report_type || f.form || '--'}
-                </span>
-                <span className="text-sm text-fg-muted font-mono">
-                  {f.filing_date ? f.filing_date.slice(0, 10) : '--'}
-                </span>
-              </li>
-            ))}
+            {filingList.map((f, i) => {
+              const raw = f.form_type || f.report_type || f.form || ''
+              const meta = filingMeta(raw)
+              return (
+                <li
+                  key={`${f.filing_date ?? ''}-${i}`}
+                  className="flex items-center justify-between py-1.5 border-b border-border/40 last:border-0"
+                >
+                  <span className="flex items-baseline gap-1.5 min-w-0">
+                    <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono text-xs shrink-0">
+                      {raw || '--'}
+                    </span>
+                    <span className="text-xs text-fg-muted truncate" title={meta.desc}>
+                      {meta.short}
+                    </span>
+                  </span>
+                  <span className="text-sm text-fg-muted font-mono shrink-0">
+                    {f.filing_date ? f.filing_date.slice(0, 10) : '--'}
+                  </span>
+                </li>
+              )
+            })}
           </ul>
         </Panel>
       </div>
@@ -396,6 +410,48 @@ function Panel({
       )}
     </section>
   )
+}
+
+/** SEC 表单类型 → 人话。short 用于行内, desc 用于悬停完整说明。 */
+const FILING_TYPES: Record<string, { short: string; desc: string; insider?: boolean; sell?: boolean }> = {
+  '4':   { short: '内部人交易', desc: 'Form 4：高管/大股东持股变动申报（买入或卖出均需报）', insider: true },
+  '144': { short: '拟减持申报', desc: 'Form 144：关联人计划出售股票的事前申报', insider: true, sell: true },
+  '8-K': { short: '重大事项', desc: 'Form 8-K：重大事件公告（并购、业绩预告、高管变动等）' },
+  '10-Q': { short: '季报', desc: 'Form 10-Q：季度报告（财报）' },
+  '10-K': { short: '年报', desc: 'Form 10-K：年度报告（财报）' },
+  'S-1': { short: '招股书', desc: 'Form S-1：新股发行注册说明书' },
+  'SC 13D/G': { short: '举牌/大额持股', desc: 'Schedule 13D/G：持股超 5% 的权益披露', insider: true },
+  '424B4': { short: '定价说明书', desc: 'Form 424B4：最终招股定价文件' },
+}
+
+function filingMeta(raw: string): { short: string; desc: string } {
+  return FILING_TYPES[raw.toUpperCase()] ?? {
+    short: '其它申报',
+    desc: raw ? `SEC 表单类型 ${raw}` : '未知类型',
+  }
+}
+
+/** 顶部信号摘要: 近30天内内部人动向(数据能自己说话的部分)。 */
+function insiderSummary(list: { form_type?: string | null; report_type?: string | null; form?: string | null; filing_date?: string | null }[]): string | null {
+  if (!list.length) return null
+  const now = Date.now()
+  const recent = list.filter((f) => {
+    if (!f.filing_date) return false
+    const t = Date.parse(f.filing_date.slice(0, 10))
+    return Number.isFinite(t) && now - t <= 30 * 86400_000
+  })
+  if (!recent.length) return null
+  let insider = 0, sell = 0
+  for (const f of recent) {
+    const raw = (f.form_type || f.report_type || f.form || '').toUpperCase()
+    const meta = FILING_TYPES[raw]
+    if (meta?.insider) insider++
+    if (meta?.sell) sell++
+  }
+  if (!insider) return null
+  const parts = [`近 30 天内部人相关申报 ${insider} 次`]
+  if (sell > 0) parts.push(`其中减持意向申报 ${sell} 次`)
+  return parts.join('，') + '。'
 }
 
 /** bid/ask 价差百分比(基于 mid 价)。任一价缺失返回 null。 */
