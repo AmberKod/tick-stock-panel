@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     # http://127.0.0.1:6900/api/v1。
     openbb_base_url: str = "http://host.docker.internal:6900/api/v1"
     # OpenBB 请求超时(秒)。三大报表/filings 由上游(yfinance/SEC)抓取, 偶发慢。
-    openbb_timeout_s: float = 25.0
+    openbb_timeout_s: float = 45.0  # yfinance 小盘股冷拉取可 >25s(实测 AAOI 33.5s)
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)

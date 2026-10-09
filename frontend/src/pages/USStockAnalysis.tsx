@@ -74,7 +74,7 @@ interface FilingsResp {
   available: boolean
   source: string
   reason?: string
-  data?: { form_type?: string | null; form?: string | null; filing_date?: string | null }[]
+  data?: { form_type?: string | null; form?: string | null; report_type?: string | null; filing_date?: string | null }[]
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -312,7 +312,7 @@ export function USStockAnalysisPage() {
                 className="flex items-center justify-between py-1.5 border-b border-border/40 last:border-0"
               >
                 <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono text-xs">
-                  {f.form_type || f.form || '--'}
+                  {f.form_type || f.report_type || f.form || '--'}
                 </span>
                 <span className="text-sm text-fg-muted font-mono">
                   {f.filing_date ? f.filing_date.slice(0, 10) : '--'}
