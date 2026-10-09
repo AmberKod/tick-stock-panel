@@ -30,26 +30,28 @@ interface USRealtime {
 // --- 九章融合 P0/P1: OpenBB 深度盘口 / SEC 财报 / SEC 报送 ---
 // 失败契约: HTTP 200 + { available: false, reason } — 面板必须 fail-closed 展示 reason, 绝不显示假数据
 
+interface DeepQuote {
+  symbol?: string
+  name?: string
+  exchange?: string
+  last_price?: number | null
+  bid?: number | null
+  ask?: number | null
+  bid_size?: number | null
+  ask_size?: number | null
+  ma_50d?: number | null
+  ma_200d?: number | null
+  year_high?: number | null
+  year_low?: number | null
+  volume_average?: number | null
+  currency?: string
+}
+
 interface DeepQuoteResp {
   available: boolean
   source: string
   reason?: string
-  data?: {
-    symbol?: string
-    name?: string
-    exchange?: string
-    last_price?: number | null
-    bid?: number | null
-    ask?: number | null
-    bid_size?: number | null
-    ask_size?: number | null
-    ma_50d?: number | null
-    ma_200d?: number | null
-    year_high?: number | null
-    year_low?: number | null
-    volume_average?: number | null
-    currency?: string
-  }
+  data?: DeepQuote
 }
 
 interface FinancialPoint {
@@ -248,6 +250,18 @@ export function USStockAnalysisPage() {
             <Card label="平均成交量">
               {dq.volume_average != null ? formatVolume(dq.volume_average) : '--'}
             </Card>
+            <Card label="最新价">
+              {dq.last_price != null ? `$${dq.last_price.toFixed(2)}` : '--'}
+            </Card>
+          </div>
+        )}
+        {wideSpread(dq) && (
+          <div className="mt-2 flex items-center gap-1.5 rounded-md bg-yellow-500/10 px-2.5 py-1.5 text-xs text-yellow-600 dark:text-yellow-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              Bid/Ask 价差 {((spreadPct(dq) ?? 0)).toFixed(1)}% 异常偏宽 ——
+              该标的流动性差，报价快照可能滞后，买卖档仅供参考（以券商实际盘口为准）。
+            </span>
           </div>
         )}
       </Panel>
@@ -384,8 +398,20 @@ function Panel({
   )
 }
 
-function PriceSize({ price, size }: { price: number | null | undefined; size: number | null | undefined }) {
-  return (
+/** bid/ask 价差百分比(基于 mid 价)。任一价缺失返回 null。 */
+function spreadPct(dq: DeepQuote | null | undefined): number | null {
+  if (!dq || dq.bid == null || dq.ask == null || dq.bid <= 0 || dq.ask <= dq.bid) return null
+  const mid = (dq.bid + dq.ask) / 2
+  return ((dq.ask - dq.bid) / mid) * 100
+}
+
+/** 价差异常判定: >5% 视为流动性差/快照滞后(yfinance 对小票的已知限制)。 */
+function wideSpread(dq: DeepQuote | null | undefined): boolean {
+  const s = spreadPct(dq)
+  return s != null && s > 5
+}
+
+function PriceSize({ price, size }: { price: number | null | undefined; size: number | null | undefined }) {  return (
     <span>
       {price != null ? `$${price.toFixed(2)}` : '--'}
       {size != null && (
