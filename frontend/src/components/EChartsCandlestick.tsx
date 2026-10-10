@@ -380,6 +380,8 @@ interface Props {
    */
   drawCtx?: string
   onDrawingsChange?: (next: Drawing[]) => void
+  /** 画完一次性标注(文字)后让页面退回"选择"模式 */
+  onDrawToolChange?: (t: DrawTool) => void
 }
 
 /**
@@ -1100,6 +1102,7 @@ export function EChartsCandlestick({
   drawTool = null,
   drawCtx = '',
   onDrawingsChange,
+  onDrawToolChange,
 }: Props) {
   // 画图图层要拿到 ECharts 实例才能做像素↔数据坐标换算。init 在 effect 里,
   // 所以这里用 state 存实例, 让图层有能力在图表真正就绪后再挂载。
@@ -1546,6 +1549,7 @@ export function EChartsCandlestick({
             ctx={drawCtx}
             tool={drawTool ?? null}
             onChange={next => onDrawingsChange?.(next)}
+            onToolChange={onDrawToolChange}
           />
         )}
       </div>

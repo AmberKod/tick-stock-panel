@@ -16,10 +16,13 @@ import type { ECharts } from 'echarts'
 import {
   DRAW_COLORS,
   DRAW_TOOLS,
+  SINGLE_CLICK_TOOLS,
+  channelWidth,
   fibLevels,
   newDrawingId,
   type DrawPoint,
   type Drawing,
+  type DrawShape,
   type DrawTool,
 } from '@/lib/chartDrawings'
 
@@ -44,12 +47,18 @@ interface Props {
   /** null = 画图功能关闭(只显示已画的, 不吃鼠标事件) */
   tool: DrawTool | null
   onChange: (next: Drawing[]) => void
+  /** 画完文字标注后自动退回"选择"模式(否则下一次落笔又是一个空文本框) */
+  onToolChange?: (t: DrawTool) => void
 }
 
 interface Draft {
-  type: Exclude<DrawTool, 'cursor'>
+  type: DrawShape
   a: DrawPoint
   b: DrawPoint
+  /** 平行通道的第三点(定宽度) */
+  c?: DrawPoint
+  /** 'base' = 正在拖基准线; 'width' = 基准线已定, 等点一下定宽度 */
+  stage: 'base' | 'width'
 }
 
 interface EditState {
@@ -81,14 +90,22 @@ function snapPrice(price: number, row: OHLCLike | undefined): number {
   return best
 }
 
+/** 一段区间内的 K 线根数(闭区间)。锚点日期不在数据里时返回 0。 */
+function barSpan(iA: number, iB: number): number {
+  if (iA < 0 || iB < 0) return 0
+  return Math.abs(iB - iA) + 1
+}
+
 export function ChartDrawingLayer({
-  chart, dates, dateIndexMap, rows, drawings, ctx, tool, onChange,
+  chart, dates, dateIndexMap, rows, drawings, ctx, tool, onChange, onToolChange,
 }: Props) {
   const [tick, setTick] = useState(0)
   const [size, setSize] = useState({ w: 0, h: 0 })
   const [draft, setDraft] = useState<Draft | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [edit, setEdit] = useState<EditState | null>(null)
+  /** 文字标注的就地输入: {id, 当前值}。用画布上的 input, 不弹窗。 */
+  const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   // 事件回调里要读最新值, 但不能因为更新它们就重建监听
   const stateRef = useRef({ drawings, tool, draft, edit, selected })
@@ -174,34 +191,67 @@ export function ChartDrawingLayer({
   }, [toPixel])
 
   // ===== 画新图形 =====
+  const commitDraft = useCallback((d: Draft) => {
+    setDraft(null)
+    const type = d.type
+    if (type === 'channel') {
+      if (!d.c) return
+      const w = Math.abs(channelWidth(d.a, d.b, d.c,
+        idxOf(d.a.date), idxOf(d.b.date), idxOf(d.c.date)))
+      // 宽度为 0 的通道就是一条线 —— 那直接用趋势线, 不造一条假通道
+      if (!(w > 0)) return
+    }
+    const next: Drawing = {
+      id: newDrawingId(), type, a: d.a, b: d.b, ctx, color: DRAW_COLORS[type],
+    }
+    if (type === 'channel' && d.c) next.c = d.c
+    if (type === 'text') next.text = ''
+    setSelected(next.id)
+    onChange([...stateRef.current.drawings, next])
+    if (type === 'text') {
+      setEditing({ id: next.id, value: '' })
+      onToolChange?.('cursor')   // 文字是一次性标注, 画完回到选择模式
+    }
+  }, [ctx, onChange, idxOf, onToolChange])
+
   const startDraft = useCallback((e: React.MouseEvent) => {
     if (!tool || tool === 'cursor') return
+    if (editing) return
     if (!insideMainGrid(e.clientX, e.clientY)) return
+    const cur = stateRef.current.draft
+    // 平行通道第二步: 基准线已拖好, 这一下点在哪, 通道就开多宽
+    if (cur && cur.stage === 'width') {
+      const p = pointAt(e.clientX, e.clientY)
+      if (p) commitDraft({ ...cur, c: p })
+      return
+    }
     const p = pointAt(e.clientX, e.clientY)
     if (!p) return
     e.preventDefault()
     setSelected(null)
-    setDraft({ type: tool, a: p, b: p })
-  }, [tool, pointAt, insideMainGrid])
+    setDraft({ type: tool, a: p, b: p, stage: 'base' })
+  }, [tool, pointAt, insideMainGrid, editing, commitDraft])
 
   useEffect(() => {
     if (!draft) return
     const move = (e: MouseEvent) => {
       const p = pointAt(e.clientX, e.clientY)
-      if (p) setDraft(d => (d ? { ...d, b: p } : d))
+      if (p) setDraft(d => (d ? { ...d, b: p, c: d.stage === 'width' ? p : d.c } : d))
     }
     const up = () => {
       const d = stateRef.current.draft
-      setDraft(null)
       if (!d) return
-      // 水平线"点一下就成"; 其余要有拖动距离才算, 防手滑点出一个点
-      if (d.type !== 'hline' && pixelDist(d.a, d.b) < 6) return
-      const next: Drawing = {
-        id: newDrawingId(), type: d.type, a: d.a, b: d.b, ctx,
-        color: DRAW_COLORS[d.type],
+      if (d.stage === 'width') return   // 宽度那一步由点击提交, 松手不算
+      // 点一下就成的工具不用判距离; 其余要有拖动距离才算, 防手滑点出一个点
+      if (!SINGLE_CLICK_TOOLS.includes(d.type) && pixelDist(d.a, d.b) < 6) {
+        setDraft(null)
+        return
       }
-      setSelected(next.id)
-      onChange([...stateRef.current.drawings, next])
+      if (d.type === 'channel') {
+        setDraft({ ...d, stage: 'width', c: d.b })
+        return
+      }
+      commitDraft(d)
     }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', up)
@@ -209,7 +259,18 @@ export function ChartDrawingLayer({
       window.removeEventListener('mousemove', move)
       window.removeEventListener('mouseup', up)
     }
-  }, [draft, pointAt, pixelDist, onChange, ctx])
+  }, [draft, pointAt, pixelDist, commitDraft])
+
+  // Esc: 取消画到一半的图形 / 取消拖动。画错了不用非得画完再删。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (stateRef.current.draft) setDraft(null)
+      if (stateRef.current.edit) setEdit(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // ===== 编辑(拖端点 / 整条平移) =====
   useEffect(() => {
@@ -236,9 +297,13 @@ export function ChartDrawingLayer({
       setEdit(null)
       if (!ed) return
       const cur = stateRef.current.drawings
-      if (ed.a.price === ed.origin.a.price && ed.b.price === ed.origin.b.price
-          && ed.a.date === ed.origin.a.date && ed.b.date === ed.origin.b.date) return
-      onChange(cur.map(d => (d.id === ed.id ? { ...d, a: ed.a, b: ed.b } : d)))
+      const d = cur.find(x => x.id === ed.id)
+      // 垂直线只有"在哪一天"有意义 —— 拖动时价格跟着变会在图上跳, 所以只挪日期
+      const a = d?.type === 'vline' ? { date: ed.a.date, price: ed.origin.a.price } : ed.a
+      const b = d?.type === 'vline' ? { date: ed.b.date, price: ed.origin.b.price } : ed.b
+      if (a.price === ed.origin.a.price && b.price === ed.origin.b.price
+          && a.date === ed.origin.a.date && b.date === ed.origin.b.date) return
+      onChange(cur.map(x => (x.id === ed.id ? { ...x, a, b } : x)))
     }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', up)
@@ -276,6 +341,17 @@ export function ChartDrawingLayer({
     const start = pointAt(e.clientX, e.clientY) ?? d.a
     setEdit({ id: d.id, part, origin: { a: d.a, b: d.b }, start, a: d.a, b: d.b })
   }
+
+  // ===== 文字标注的就地编辑 =====
+  const finishText = useCallback(() => {
+    const ed = editing
+    if (!ed) return
+    setEditing(null)
+    const val = ed.value.trim()
+    const cur = stateRef.current.drawings
+    if (!val) { onChange(cur.filter(d => d.id !== ed.id)); return }
+    onChange(cur.map(d => (d.id === ed.id ? { ...d, text: val } : d)))
+  }, [editing, onChange])
 
   const renderHandle = (p: DrawPoint, onDown: (e: React.MouseEvent) => void) => {
     const px = toPixel(p.date, p.price)
@@ -325,20 +401,113 @@ export function ChartDrawingLayer({
       )
     }
 
+    if (d.type === 'vline') {
+      const x = pa[0]
+      const label = String(d.a.date).slice(0, 10)
+      return (
+        <g key={d.id}>
+          <line x1={x} x2={x} y1={0} y2={size.h} stroke={color} strokeWidth={sw} strokeDasharray="5 4"
+                className="cursor-ew-resize" onMouseDown={e => startEdit(e, d, 'body')} />
+          <rect x={x - 26} y={1} width={52} height={14} rx={2} fill={color} opacity={0.92} />
+          <text x={x} y={11} fontSize={9.5} textAnchor="middle" fill="#0b1020"
+                fontFamily="ui-monospace,monospace">
+            {label}
+          </text>
+          {isSel && (
+            <g>
+              {renderHandle(d.a, e => startEdit(e, d, 'body'))}
+              {renderX(x, 26, d.id)}
+            </g>
+          )}
+        </g>
+      )
+    }
+
+    if (d.type === 'text') {
+      const t = d.text ?? ''
+      const w = Math.max(18, t.length * 12 + 12)
+      return (
+        <g key={d.id} className="cursor-move"
+           onMouseDown={e => startEdit(e, d, 'body')}
+           onDoubleClick={e => { e.stopPropagation(); setEditing({ id: d.id, value: t }) }}>
+          <rect x={pa[0]} y={pa[1] - 9} width={w} height={17} rx={2}
+                fill={color} opacity={isSel ? 0.95 : 0.86} />
+          <text x={pa[0] + 6} y={pa[1] + 3} fontSize={11} fill="#0b1020">{t}</text>
+          {isSel && (
+            <g>
+              {renderHandle(d.a, e => startEdit(e, d, 'body'))}
+              {renderX(pa[0] + w + 8, pa[1], d.id)}
+            </g>
+          )}
+        </g>
+      )
+    }
+
     if (d.type === 'rect') {
       const x0 = Math.min(pa[0], pb[0]); const x1 = Math.max(pa[0], pb[0])
       const y0 = Math.min(pa[1], pb[1]); const y1 = Math.max(pa[1], pb[1])
+      const hi = Math.max(d.a.price, d.b.price)
+      const lo = Math.min(d.a.price, d.b.price)
+      const amp = lo > 0 ? (hi / lo - 1) * 100 : 0
+      const bars = barSpan(idxOf(d.a.date), idxOf(d.b.date))
       return (
         <g key={d.id}>
           <rect x={x0} y={y0} width={Math.max(x1 - x0, 0)} height={Math.max(y1 - y0, 0)}
                 fill={color} fillOpacity={0.14} stroke={color} strokeWidth={sw}
                 strokeDasharray={isSel ? '4 3' : undefined} className="cursor-move"
                 onMouseDown={e => startEdit(e, d, 'body')} />
+          {/* 框住的区间到底多宽、多少根 —— 直接写在框上, 不用再去数格子 */}
+          <text x={x0 + 3} y={y0 - 3} fontSize={9.5} fill={color}
+                fontFamily="ui-monospace,monospace">
+            {bars > 0 ? `${bars}根 · ` : ''}振幅 {amp.toFixed(1)}%
+          </text>
           {isSel && (
             <g>
               {renderHandle(d.a, e => startEdit(e, d, 'a'))}
               {renderHandle(d.b, e => startEdit(e, d, 'b'))}
               {renderX(x1, y0, d.id)}
+            </g>
+          )}
+        </g>
+      )
+    }
+
+    if (d.type === 'channel' && d.c) {
+      const pc = toPixel(d.c.date, d.c.price)
+      if (!pc) return null
+      const dx = pb[0] - pa[0]
+      const dy = pb[1] - pa[1]
+      const slopePx = dx === 0 ? 0 : dy / dx
+      const y2 = dx === 0 ? pa[1] : pa[1] + (right - pa[0]) * slopePx
+      // 平行 = 竖直平移(价格轴是线性的, 恒定的像素偏移就是恒定的价差)
+      const offset = pc[1] - (pa[1] + (pc[0] - pa[0]) * slopePx)
+      const widthPrice = channelWidth(d.a, d.b, d.c,
+        idxOf(d.a.date), idxOf(d.b.date), idxOf(d.c.date))
+      const mid = (d.a.price + d.b.price) / 2
+      const pct = mid > 0 ? (Math.abs(widthPrice) / mid) * 100 : 0
+      return (
+        <g key={d.id} className="cursor-move" onMouseDown={e => startEdit(e, d, 'body')}>
+          <polygon
+            points={`${pa[0]},${pa[1]} ${right},${y2} ${right},${y2 + offset} ${pa[0]},${pa[1] + offset}`}
+            fill={color} fillOpacity={0.09} />
+          {/* 上轨: 过第三点且与基准线平行 */}
+          <line x1={pa[0]} y1={pa[1] + offset} x2={right} y2={y2 + offset}
+                stroke={color} strokeWidth={sw} />
+          {/* 基准(下轨) */}
+          <line x1={pa[0]} y1={pa[1]} x2={right} y2={y2} stroke={color} strokeWidth={sw} />
+          {/* 中线: 等距, 常拿来当下轨不破的中枢 */}
+          <line x1={pa[0]} y1={pa[1] + offset / 2} x2={right} y2={y2 + offset / 2}
+                stroke={color} strokeWidth={1} strokeDasharray="4 4" opacity={0.6} />
+          <text x={pc[0] + 4} y={pc[1] - 3} fontSize={9.5} fill={color}
+                fontFamily="ui-monospace,monospace">
+            通道 {Math.abs(widthPrice).toFixed(2)} · {pct.toFixed(1)}%
+          </text>
+          {isSel && (
+            <g>
+              {renderHandle(d.a, e => startEdit(e, d, 'a'))}
+              {renderHandle(d.b, e => startEdit(e, d, 'b'))}
+              {renderHandle(d.c, e => startEdit(e, d, 'body'))}
+              {renderX(pc[0] + 12, pc[1] + 12, d.id)}
             </g>
           )}
         </g>
@@ -384,15 +553,21 @@ export function ChartDrawingLayer({
     const dy = pb[1] - pa[1]
     const x2 = dx === 0 ? pb[0] : right
     const y2 = dx === 0 ? pb[1] : pb[1] + (right - pb[0]) * (dy / dx)
+    const pct = d.a.price > 0 ? (d.b.price / d.a.price - 1) * 100 : 0
     return (
       <g key={d.id}>
         <line x1={pa[0]} y1={pa[1]} x2={x2} y2={y2} stroke={color} strokeWidth={sw}
               className="cursor-move" onMouseDown={e => startEdit(e, d, 'body')} />
+        {/* 这段线本身的涨跌 —— 免得还要自己拿两个价位去除 */}
+        <text x={pb[0] + 4} y={pb[1] - 3} fontSize={9.5} fill={color}
+              fontFamily="ui-monospace,monospace">
+          {pct >= 0 ? '+' : ''}{pct.toFixed(1)}%
+        </text>
         {isSel && (
           <g>
             {renderHandle(d.a, e => startEdit(e, d, 'a'))}
             {renderHandle(d.b, e => startEdit(e, d, 'b'))}
-            {renderX(pb[0] + 10, pb[1], d.id)}
+            {renderX(pb[0] + 10, pb[1] + 12, d.id)}
           </g>
         )}
       </g>
@@ -406,8 +581,13 @@ export function ChartDrawingLayer({
     const pb = toPixel(draft.b.date, draft.b.price)
     if (!pa || !pb) return null
     const color = DRAW_COLORS[draft.type]
+    const right = Math.max(size.w - 4, 0)
     if (draft.type === 'hline') {
       return <line x1={0} x2={size.w} y1={pa[1]} y2={pa[1]} stroke={color}
+                   strokeWidth={1.4} strokeDasharray="5 4" opacity={0.8} />
+    }
+    if (draft.type === 'vline') {
+      return <line x1={pa[0]} x2={pa[0]} y1={0} y2={size.h} stroke={color}
                    strokeWidth={1.4} strokeDasharray="5 4" opacity={0.8} />
     }
     if (draft.type === 'rect') {
@@ -417,6 +597,30 @@ export function ChartDrawingLayer({
               fill={color} fillOpacity={0.12} stroke={color} strokeWidth={1.2} strokeDasharray="4 3" />
       )
     }
+    if (draft.type === 'channel') {
+      const dx = pb[0] - pa[0]
+      const dy = pb[1] - pa[1]
+      const slopePx = dx === 0 ? 0 : dy / dx
+      const y2 = dx === 0 ? pa[1] : pa[1] + (right - pa[0]) * slopePx
+      const c = draft.c && toPixel(draft.c.date, draft.c.price)
+      const offset = c ? c[1] - (pa[1] + (c[0] - pa[0]) * slopePx) : 0
+      return (
+        <g>
+          <line x1={pa[0]} y1={pa[1]} x2={right} y2={y2} stroke={color} strokeWidth={1.4} opacity={0.85} />
+          {draft.stage === 'width' && c && (
+            <>
+              <polygon
+                points={`${pa[0]},${pa[1]} ${right},${y2} ${right},${y2 + offset} ${pa[0]},${pa[1] + offset}`}
+                fill={color} fillOpacity={0.08} />
+              <line x1={pa[0]} y1={pa[1] + offset} x2={right} y2={y2 + offset}
+                    stroke={color} strokeWidth={1.4} opacity={0.85} />
+              <line x1={pa[0]} y1={pa[1] + offset / 2} x2={right} y2={y2 + offset / 2}
+                    stroke={color} strokeWidth={1} strokeDasharray="4 4" opacity={0.55} />
+            </>
+          )}
+        </g>
+      )
+    }
     if (draft.type === 'fib') {
       const x0 = Math.min(pa[0], pb[0])
       return fibLevels(draft.a.price, draft.b.price).map(({ ratio, price }) => {
@@ -424,7 +628,7 @@ export function ChartDrawingLayer({
         if (!p) return null
         return (
           <g key={ratio}>
-            <line x1={x0} x2={Math.max(size.w - 4, 0)} y1={p[1]} y2={p[1]} stroke={color}
+            <line x1={x0} x2={right} y1={p[1]} y2={p[1]} stroke={color}
                   strokeWidth={ratio === 0.5 ? 1.4 : 1} opacity={0.75} strokeDasharray="4 4" />
             <text x={x0 + 3} y={p[1] - 2} fontSize={9.5} fill={color}
                   fontFamily="ui-monospace,monospace">
@@ -436,12 +640,18 @@ export function ChartDrawingLayer({
     }
     const dx = pb[0] - pa[0]
     const dy = pb[1] - pa[1]
-    const x2 = dx === 0 ? pb[0] : Math.max(size.w - 4, 0)
+    const x2 = dx === 0 ? pb[0] : right
     const y2 = dx === 0 ? pb[1] : pb[1] + (x2 - pb[0]) * (dy / dx)
     return <line x1={pa[0]} y1={pa[1]} x2={x2} y2={y2} stroke={color} strokeWidth={1.4} opacity={0.85} />
   }
 
   const cursorCls = tool && tool !== 'cursor' ? 'cursor-crosshair' : 'cursor-default'
+  const editingPx = editing
+    ? (() => {
+        const d = drawings.find(x => x.id === editing.id)
+        return d ? toPixel(d.a.date, d.a.price) : null
+      })()
+    : null
 
   return (
     <div
@@ -459,9 +669,30 @@ export function ChartDrawingLayer({
           : d))}
         {renderDraft()}
       </svg>
+
+      {/* 文字标注的输入框: 就落在画布上那个位置, 不是弹窗 */}
+      {editingPx && (
+        <input
+          autoFocus
+          value={editing!.value}
+          placeholder="输入标注…"
+          onChange={e => setEditing({ id: editing!.id, value: e.target.value })}
+          onMouseDown={e => e.stopPropagation()}
+          onKeyDown={e => {
+            e.stopPropagation()
+            if (e.key === 'Enter' || e.key === 'Escape') finishText()
+          }}
+          onBlur={finishText}
+          className="absolute z-10 w-40 rounded border border-amber-400/70 bg-bg px-1.5 py-0.5 text-[11px] text-fg shadow outline-none"
+          style={{ left: Math.max(0, editingPx[0]), top: Math.max(0, editingPx[1] - 10) }}
+        />
+      )}
+
       {tool && tool !== 'cursor' && (
         <div className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded bg-fg/85 px-2 py-0.5 text-[10px] text-bg">
-          {DRAW_TOOLS.find(t => t.value === tool)?.hint}
+          {draft?.stage === 'width'
+            ? '再点一下定通道宽度（Esc 取消）'
+            : DRAW_TOOLS.find(t => t.value === tool)?.hint}
         </div>
       )}
     </div>

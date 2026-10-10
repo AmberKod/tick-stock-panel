@@ -123,6 +123,8 @@ interface Props {
   drawTool?: DrawTool | null
   drawCtx?: string
   onDrawingsChange?: (next: Drawing[]) => void
+  /** 画完一次性标注(文字)后让页面退回"选择"模式 */
+  onDrawToolChange?: (t: DrawTool) => void
 }
 
 function isValidRow(r: any): boolean {
@@ -215,6 +217,7 @@ export function StockDailyKChart({
   drawTool = null,
   drawCtx,
   onDrawingsChange,
+  onDrawToolChange,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   // 可见区间由 EChartsCandlestick 在缩放/平移后回传 —— 成交量分布必须按**当前
@@ -446,6 +449,7 @@ export function StockDailyKChart({
           drawTool={drawTool}
           drawCtx={drawCtx}
           onDrawingsChange={onDrawingsChange}
+          onDrawToolChange={onDrawToolChange}
         />
       )}
     </div>
