@@ -1300,3 +1300,111 @@ def test_api_adjratio_new_stock(client, monkeypatch):
     body = client.get("/api/astock/adjratio/688825.SH?mode=qfq").json()
     assert body["available"] is True, body
     assert body["data"]["has_adjust"] is False
+
+
+# ════════════════════════════════════════════════════════════════════
+# 指数日K(对比页基准) —— GET /api/astock/index/{code}
+# ════════════════════════════════════════════════════════════════════
+
+# [日期, 开, 收, 高, 低, 量] —— 与个股日K同口径: 第 2 列是**收**
+_IDX_ROWS = [
+    ["2026-09-28", "4500.00", "4510.00", "4520.00", "4490.00", "120000.00"],
+    ["2026-09-29", "4510.00", "4530.00", "4540.00", "4500.00", "130000.00"],
+    ["2026-09-30", "4530.00", "0", "4540.00", "4500.00", "130000.00"],   # 收盘为 0 → 丢弃
+]
+
+
+def _patch_index(monkeypatch, rows=None, qt=None):
+    def fake_json(url, data=None, headers=None, timeout=None):
+        sym = url.split("param=")[-1].split("%2C")[0]
+        return {"code": 0, "data": {sym: {"qt": {sym: qt or ["1", "沪深300"]},
+                                          "day": rows if rows is not None else _IDX_ROWS}}}
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    monkeypatch.setattr(prov, "_request_text", lambda *a, **k: 'v_sh000300="1~沪深300~000300~"')
+    prov._CACHE.clear()
+
+
+def test_index_sh_prefix_for_hs300(monkeypatch):
+    """🔴 沪深300 是 0 开头但属于**沪市** —— 按个股规则(0→sz)会拼成 sz000300,
+    腾讯返回空。指数必须走单独的符号规则。"""
+    assert prov._tx_index_symbol("000300.SH") == "sh000300"
+    assert prov._tx_index_symbol("000001.SH") == "sh000001"
+    assert prov._tx_index_symbol("000905.SH") == "sh000905"
+    assert prov._tx_index_symbol("399006.SZ") == "sz399006"
+    assert prov._tx_index_symbol("399001.SZ") == "sz399001"
+
+
+def test_index_uses_tencent_kline(monkeypatch):
+    seen: list[str] = []
+    def fake_json(url, data=None, headers=None, timeout=None):
+        seen.append(url)
+        return {"code": 0, "data": {"sh000300": {"day": _IDX_ROWS}}}
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    monkeypatch.setattr(prov, "_request_text", lambda *a, **k: "")
+    prov._CACHE.clear()
+    prov.index_daily("000300.SH", 60)
+    assert seen and "kline/kline" in seen[0] and "sh000300%2Cday" in seen[0]
+
+
+def test_index_open_close_order(monkeypatch):
+    """行内第 2 列是开、第 3 列是收(不是 OHLC 顺序) —— 取反了基准线就错了。"""
+    _patch_index(monkeypatch)
+    row = prov.index_daily("000300.SH")["data"]["rows"][0]
+    assert row["open"] == 4500.0 and row["close"] == 4510.0
+    assert row["high"] == 4520.0 and row["low"] == 4490.0
+
+
+def test_index_drops_zero_close(monkeypatch):
+    """收盘价 0 的行直接丢 —— 归一化/对数收益遇到 0 会算出 Inf。"""
+    _patch_index(monkeypatch)
+    rows = prov.index_daily("000300.SH")["data"]["rows"]
+    assert [r["date"] for r in rows] == ["2026-09-28", "2026-09-29"]
+
+
+def test_index_volume_in_shares(monkeypatch):
+    """腾讯给的是手, 统一成股(与个股口径一致)。"""
+    _patch_index(monkeypatch)
+    assert prov.index_daily("000300.SH")["data"]["rows"][0]["volume"] == 12_000_000.0
+
+
+def test_index_source_is_real_and_name(monkeypatch):
+    _patch_index(monkeypatch)
+    r = prov.index_daily("000300.SH")
+    assert r["source"] == "live-tencent"
+    assert r["data"]["name"] == "沪深300"
+    from app.services.source_gate import is_real
+    assert is_real(r)
+
+
+def test_index_empty_raises(monkeypatch):
+    _patch_index(monkeypatch, rows=[])
+    with pytest.raises(ValueError):
+        prov.index_daily("000300.SH")
+
+
+def test_index_limit_bounded(monkeypatch):
+    """3年档要 750 根, 上限给到 1000(实测腾讯 day 能给到 1000)。"""
+    _patch_index(monkeypatch)
+    prov.index_daily("000300.SH", 5000)     # 不应报错
+    with pytest.raises(ValueError):
+        _patch_index(monkeypatch, rows=[])
+        prov.index_daily("000300.SH")
+
+
+def test_api_index_bad_code(client):
+    body = client.get("/api/astock/index/abc").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_index_bad_limit(client):
+    body = client.get("/api/astock/index/000300.SH?limit=5").json()
+    assert body["available"] is False and "bad_limit" in body["reason"]
+
+
+def test_api_index_ok(client, monkeypatch):
+    _patch_index(monkeypatch)
+    body = client.get("/api/astock/index/000300.SH?limit=320").json()
+    assert body["available"] is True, body
+    assert body["source"] == "live-tencent"
+    assert body["data"]["code"] == "000300"
+    assert len(body["data"]["rows"]) == 2
