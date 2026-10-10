@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 r"""OpenBB 深度数据层 —— 实时盘口 / 三大报表 / SEC 报送（九章融合 P1）。
 
 摘取自九章量化终端 (jiuzhang-algor) 的 ``openbb_client.py``（MIT License,

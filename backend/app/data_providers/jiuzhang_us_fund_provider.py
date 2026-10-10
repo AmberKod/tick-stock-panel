@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """美股基本面数据层 —— SEC EDGAR XBRL（官方、免费、无需 API Key）。
 
 摘取自九章量化终端 (jiuzhang-algor) 的 ``us_fund.py``（MIT License,
