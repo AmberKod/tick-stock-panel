@@ -11,6 +11,7 @@ import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSi
 import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import { computeChips } from '@/lib/chips'
 import { ChipDistributionPanel } from '@/components/ChipDistributionPanel'
+import { EstimateTag } from '@/components/EstimateNotice'
 import {
   MAIN_CHART_TYPES,
   StockDailyKChart,
@@ -761,6 +762,7 @@ export function StockDetail() {
                     : 'border-border text-fg-muted hover:text-fg-secondary')}
               >
                 成交量
+                <EstimateTag className="ml-0.5" title="行情源不提供日内逐笔成交的价格分布, 单根 K 的量在 [low, high] 内按价格均摊 —— 是分摊假设, 不是逐笔真实分布">均摊</EstimateTag>
               </button>
               <button
                 type="button"
@@ -772,6 +774,7 @@ export function StockDetail() {
                     : 'border-border text-fg-muted hover:text-fg-secondary')}
               >
                 筹码
+                <EstimateTag className="ml-0.5" title="筹码分布是模型估算: 交易所不公开各价位持仓量, 图是用日K量价 + 流通股本反推的, 不是真实持仓成本">估算</EstimateTag>
               </button>
             </>
           )}
@@ -840,26 +843,40 @@ export function StockDetail() {
             </div>
           )
         ) : (
-          <StockDailyKChart
-            symbol={symbol}
-            height={430}
-            dateRange={dateRange}
-            showMA={showMA}
-            visibleBars={visibleBars}
-            period={kPeriod}
-            mklinePeriod={mkPeriod ?? undefined}
-            mainType={mainType}
-            showVolumeProfile={showVP}
-            adjust={adjust}
-            onAdjustInfo={setAdjustInfo}
-            markers={signalMarkers}
-            priceLines={priceLines}
-            onPriceDoubleClick={(price) => persistPriceLines([
-              ...priceLines,
-              { value: price, label: price.toFixed(2), color: '#F59E0B' },
-            ])}
-            onDataChange={setKline}
-          />
+          <>
+            {/* 图上右侧那条分布带容易被当成"逐笔成交堆出来的真实分布" —— 在图表正上方
+                写清它的分摊假设, 别让人默认它比实际更精确。 */}
+            {showVP && (
+              <div className="mb-1 flex items-start gap-1.5 px-1 text-[10.5px] leading-relaxed text-fg-muted">
+                <EstimateTag title="行情源不提供日内逐笔成交的价格分布">均摊口径</EstimateTag>
+                <span>
+                  K 线右侧的成交量分布：把可见区间每根 K 的成交量在 [low, high]
+                  内<b className="text-fg-secondary">按价格均摊</b>后统计（行情源只给日内的开高低收和总量，不给逐笔分布）。
+                  均摊是不引入额外假设的那一种，但仍是分摊而非真实分布。
+                </span>
+              </div>
+            )}
+            <StockDailyKChart
+              symbol={symbol}
+              height={430}
+              dateRange={dateRange}
+              showMA={showMA}
+              visibleBars={visibleBars}
+              period={kPeriod}
+              mklinePeriod={mkPeriod ?? undefined}
+              mainType={mainType}
+              showVolumeProfile={showVP}
+              adjust={adjust}
+              onAdjustInfo={setAdjustInfo}
+              markers={signalMarkers}
+              priceLines={priceLines}
+              onPriceDoubleClick={(price) => persistPriceLines([
+                ...priceLines,
+                { value: price, label: price.toFixed(2), color: '#F59E0B' },
+              ])}
+              onDataChange={setKline}
+            />
+          </>
         )}
       </div>
 

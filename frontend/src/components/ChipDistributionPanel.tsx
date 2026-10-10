@@ -7,6 +7,7 @@
  */
 import type { ChipResult } from '@/lib/chips'
 import { cn } from '@/lib/cn'
+import { EstimateBanner, EstimateTag, EstimateWatermark } from '@/components/EstimateNotice'
 
 interface Props {
   result: ChipResult
@@ -48,12 +49,39 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
       <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="text-[12px] font-medium text-fg">筹码分布</span>
         {name && <span className="text-[11px] text-fg-muted">{name}</span>}
-        <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-500">
-          模型估算 · 非交易所持仓数据
-        </span>
+        <EstimateTag title="交易所/行情源都不公开「每个价位的持仓量」, 这张图是用公开价量数据反推的模型结果">模型估算</EstimateTag>
         <span className="text-[10px] text-fg-muted">
           {result.from} ~ {result.to} · {result.bars}根 · 衰减 {result.decay}
         </span>
+      </div>
+
+      {/* 定性 + 口径 + 使用边界, 三行一次性说清。刻意不做「我知道了」的关闭按钮:
+          这行字每次看图都该看到, 关掉一次就再也回不来了。 */}
+      <EstimateBanner
+        className="mb-1.5"
+        title="⚠ 模型估算 —— 不是交易所公布的真实持仓 / 成本数据"
+        how={
+          <>
+            交易所与行情源都不公开「每个价位有多少筹码」。这张图是输入<span className="text-fg">日K的 high/low/close/volume（真数据）</span>
+            {' '}与<span className="text-fg">流通股本 {(result.floatShares / 1e8).toFixed(2)} 亿股（行情源股本字段）</span>，
+            按「每日换手率 = 成交量 / 流通股本 → 当日新筹码在 [low, high] 呈三角形分布 → 老筹码按 (1 - 换手率 × {result.decay}) 逐日衰减」推出来的。
+          </>
+        }
+        limit={
+          <>
+            它描述的是「这个模型下的成本分布形态」，不等于任何一个人的实际持仓成本，也不是主力/庄家的筹码；
+            窗口内累计换手仅 {result.turnoverSum.toFixed(2)}× ——{' '}
+            {result.turnoverSum < 1
+              ? '不足一轮，上市以来的老筹码仍留在图里，结果偏「历史」。'
+              : '越往后的区间越接近当期换手沉淀的结果。'}
+            仅供形态参考，不构成投资依据。
+          </>
+        }
+      />
+
+      <div className="mb-1 flex items-center gap-1 text-[10px] text-fg-muted">
+        <EstimateTag>估算值</EstimateTag>
+        <span>以下 6 个指标全部由上面的模型算出，不是交易所披露值</span>
       </div>
 
       <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-6">
@@ -97,6 +125,8 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
 
         {/* 筹码柱: 顶端 = 最高价, 底端 = 最低价 */}
         <div className="relative flex-1 overflow-hidden rounded border border-border/60 bg-elevated/40" style={{ height: 230 }}>
+          {/* 截图/转发时也带着这个前提 */}
+          <EstimateWatermark text="模型估算 · 非真实持仓" />
           {rows.map((r, i) => (
             <div
               key={i}
@@ -121,10 +151,10 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
 
       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-fg-muted">
         <span className="inline-flex items-center gap-1">
-          <span className="h-2 w-3 bg-[rgba(240,68,56,0.62)]" /> 获利盘(成本低于现价)
+          <span className="h-2 w-3 bg-[rgba(240,68,56,0.62)]" /> 获利盘(估算成本低于现价)
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="h-2 w-3 bg-[rgba(59,130,246,0.45)]" /> 套牢盘(成本高于现价)
+          <span className="h-2 w-3 bg-[rgba(59,130,246,0.45)]" /> 套牢盘(估算成本高于现价)
         </span>
         <span>
           口径: 每日换手率 = 成交量 / 流通股本({(result.floatShares / 1e8).toFixed(2)}亿股);
