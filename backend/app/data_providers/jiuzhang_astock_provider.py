@@ -929,6 +929,14 @@ def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
     payload = _request_json(url)
     node = ((payload or {}).get("data") or {}).get(sym)
     rows = (node or {}).get(key) if isinstance(node, dict) else None
+
+    # ⚠️ 没有除权记录的股票(如新股 688825), 腾讯**不给 qfqday/hfqday 键**, 只回 day。
+    # 这不是失败 —— 恰恰是最权威的"该股无需复权"信号: 三档数值本就相等。
+    # 若在这里 raise, 个股页的复权档对这些票会整档 available:false(假的取不到)。
+    no_adjustment_event = False
+    if mode != "none" and (not isinstance(rows, list) or not rows):
+        rows = (node or {}).get("day") if isinstance(node, dict) else None
+        no_adjustment_event = True
     if not isinstance(rows, list) or not rows:
         raise ValueError(f"腾讯未返回日K({mode}): {sym}")
 
@@ -950,7 +958,9 @@ def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
 
     # 不复权时 ratios 全 1; 其余档位再取一次原始序列做逐日比值
     raw_closes = list(closes)
-    if mode != "none":
+    if no_adjustment_event:
+        raw_closes = list(closes)     # 腾讯只给了 day(本来就是不复权) → 比值恒 1
+    elif mode != "none":
         raw_url = _TENCENT_KLINE_URL + "?" + urllib.parse.urlencode(
             {"param": f"{sym},day,,,{limit}"})
         raw_cache_key = f"raw|{raw_url}"

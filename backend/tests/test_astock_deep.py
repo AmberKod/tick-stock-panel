@@ -1273,3 +1273,30 @@ def test_api_adjratio_none_after_qfq(client, monkeypatch):
     body = client.get("/api/astock/adjratio/600519?mode=none").json()
     assert body["available"] is True, body
     assert all(x["ratio"] == 1.0 for x in body["data"]["ratios"])
+
+
+def test_adjratio_falls_back_when_no_qfq_key(monkeypatch):
+    """🔴 没除权记录的股票(如新股 688825)腾讯**只回 day、不给 qfqday**。
+    这不是失败, 是最权威的"无需复权"信号 —— 必须降级成 ratio 全 1,
+    不能 raise(否则个股页复权档对这些票整档 available:false)。"""
+    def fake_json(url, data=None, headers=None, timeout=None):
+        sym = url.split("param=")[-1].split("%2C")[0]
+        # 无论要哪个档位, 都只给 day
+        return {"code": 0, "data": {sym: {"qt": {sym: _ADJ_QT}, "day": _ADJ_RAW}}}
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    prov._CACHE.clear()
+    d = prov.adjust_ratios("688825", mode="qfq")["data"]
+    assert [x["date"] for x in d["ratios"]] == ["2026-06-24", "2026-06-25", "2026-06-26"]
+    assert all(x["ratio"] == 1.0 for x in d["ratios"])
+    assert d["has_adjust"] is False
+
+
+def test_api_adjratio_new_stock(client, monkeypatch):
+    monkeypatch.setattr(prov, "_request_json", lambda url, data=None, headers=None, timeout=None:
+                        {"code": 0, "data": {"sh688825": {"qt": {"sh688825": _ADJ_QT},
+                                                          "day": _ADJ_RAW}}})
+    prov._CACHE.clear()
+    body = client.get("/api/astock/adjratio/688825.SH?mode=qfq").json()
+    assert body["available"] is True, body
+    assert body["data"]["has_adjust"] is False
