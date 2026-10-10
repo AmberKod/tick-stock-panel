@@ -52,6 +52,22 @@ export interface ChartPriceLine {
   end?: string
 }
 
+/**
+ * 主图类型。四种画法画的**是同一份 OHLC**, 只是视觉编码不同 —— 不存在"换了个数据源"。
+ * - candle: 实心蜡烛(涨红跌绿实心, 通达信默认)
+ * - hollow: 空心蜡烛(涨空心/跌实心 —— 上涨日更醒目, 密集区不糊成一团)
+ * - ohlc:   美国线(竖线=高低, 左横=开, 右横=收; 蜡烛太密时比蜡烛干净)
+ * - line:   收盘线(只看收盘价走势, 叠加 MA 最清爽)
+ */
+export type MainChartType = 'candle' | 'hollow' | 'ohlc' | 'line'
+
+export const MAIN_CHART_TYPES: { label: string; value: MainChartType; hint: string }[] = [
+  { label: '蜡烛', value: 'candle', hint: '实心蜡烛(涨红跌绿)' },
+  { label: '空心', value: 'hollow', hint: '空心蜡烛: 涨空心, 跌实心' },
+  { label: '美国线', value: 'ohlc', hint: '美国线: 竖线高低, 左开右收' },
+  { label: '收盘线', value: 'line', hint: '收盘线: 只连收盘价' },
+]
+
 export interface StockInfo {
   name?: string
   total_shares?: number
@@ -339,6 +355,8 @@ interface Props {
   activeIndicators?: string[]
   /** 成交量柱相对前 N 个交易日均量的显示设置 */
   volumeCompare?: VolumeCompareConfig
+  /** 主图画法: 蜡烛 / 空心蜡烛 / 美国线 / 收盘线。默认 candle。 */
+  mainType?: MainChartType
 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/文字等主题相关色走 CT() 动态取
@@ -356,6 +374,38 @@ const THEME = {
 
 /** 当前主题的图表调色板 (buildOption/信息栏在渲染时调用; 主题切换由组件 effect 触发重建)。 */
 const CT = () => chartTheme(getTheme())
+
+/**
+ * 美国线(OHLC bar)的 custom renderItem。
+ * ECharts 没有内置 OHLC 类型，只能自己画: 竖线贯穿 low~high，
+ * 左短横=开盘、右短横=收盘; 涨跌由 close>=open 判定，颜色与蜡烛一致。
+ * data 项形如 [index, open, close, low, high]。
+ */
+function renderOhlcItem(_params: any, api: any) {
+  const idx = api.value(0)
+  const open = api.value(1)
+  const close = api.value(2)
+  const low = api.value(3)
+  const high = api.value(4)
+  const x = api.coord([idx, low])[0]
+  const yLow = api.coord([idx, low])[1]
+  const yHigh = api.coord([idx, high])[1]
+  const yOpen = api.coord([idx, open])[1]
+  const yClose = api.coord([idx, close])[1]
+  // 一根 bar 占 60% 的类目宽度, 左右各伸出一半
+  const halfW = Math.max(1, (api.size([1, 0])[0] || 6) * 0.3)
+  const up = close >= open
+  const stroke = up ? THEME.bull : THEME.bear
+  const style = { stroke, lineWidth: 1 }
+  return {
+    type: 'group',
+    children: [
+      { type: 'line', shape: { x1: x, y1: yLow, x2: x, y2: yHigh }, style },
+      { type: 'line', shape: { x1: x - halfW, y1: yOpen, x2: x, y2: yOpen }, style },
+      { type: 'line', shape: { x1: x, y1: yClose, x2: x + halfW, y2: yClose }, style },
+    ],
+  }
+}
 
 /** 可见蜡烛超过此数量时，涨停/炸板标签切换为小圆点。 */
 const COMPACT_THRESHOLD = 60
@@ -473,6 +523,7 @@ function buildOption(
   infoIdx: number,
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
+  mainType: MainChartType,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -666,18 +717,54 @@ function buildOption(
     })
   }
 
-  series.push({
-    name: 'K', type: 'candlestick', data: candleData,
-    animation: false,
-    itemStyle: {
-      color: THEME.bull, color0: THEME.bear,
-      borderColor: THEME.bull, borderColor0: THEME.bear,
-      cursor: 'pointer',
-    },
+  // 标注/区间/价格线挂在主图上 —— 四种画法共用同一组 markPoint/markArea/markLine,
+  // series 名字统一叫 'K'(增量更新 markPoint 时按 name 匹配, 见 updateCompactPresentation)。
+  const markExtras = {
     markPoint: markPointData.length > 0 ? { data: markPointData, animation: false } : undefined,
     markArea: markAreaData.length > 0 ? { silent: true, data: markAreaData } : undefined,
     markLine: markLineData.length > 0 ? { silent: true, symbol: 'none', data: markLineData, animation: false } : undefined,
-  })
+  }
+
+  if (mainType === 'line') {
+    // 收盘线: 单条折线。triggerLineEvent 让"点击看当日分时"在线型下依然可用
+    // (默认只有点中 symbol 才触发, symbol 关掉后整条线都点不中)。
+    series.push({
+      name: 'K', type: 'line',
+      data: data.map(d => d.close),
+      smooth: false, symbol: 'none', triggerLineEvent: true,
+      animation: false,
+      lineStyle: { width: 1.4, color: THEME.ma10 },
+      itemStyle: { color: THEME.ma10 },
+      ...markExtras,
+    })
+  } else if (mainType === 'ohlc') {
+    series.push({
+      name: 'K', type: 'custom',
+      data: data.map((d, i) => [i, d.open, d.close, d.low, d.high]),
+      // 四个价格维度都登记进 y, 否则 y 轴不会把影线范围算进极值
+      encode: { x: 0, y: [1, 2, 3, 4] },
+      renderItem: renderOhlcItem,
+      clip: true,
+      animation: false,
+      ...markExtras,
+    })
+  } else {
+    const hollow = mainType === 'hollow'
+    series.push({
+      name: 'K', type: 'candlestick', data: candleData,
+      animation: false,
+      itemStyle: {
+        // 空心: 上涨日只留边框(填充透明), 下跌日实心 —— 与实心蜡烛相反的处理
+        color: hollow ? 'transparent' : THEME.bull,
+        color0: THEME.bear,
+        borderColor: THEME.bull,
+        borderColor0: THEME.bear,
+        borderWidth: hollow ? 1.2 : 1,
+        cursor: 'pointer',
+      },
+      ...markExtras,
+    })
+  }
 
   if (hasMA) {
     const maLine = (key: keyof OHLC, color: string, name: string) => ({
@@ -816,7 +903,11 @@ export function EChartsCandlestick({
   visibleBars = 60,
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
+  mainType = 'candle',
 }: Props) {
+  // mainType 只影响画法; 放进 ref 是为了 updateCompactPresentation 里也能读到最新值
+  const mainTypeRef = useRef(mainType)
+  mainTypeRef.current = mainType
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const dataRef = useRef(data)
@@ -1133,6 +1224,7 @@ export function EChartsCandlestick({
       infoIdxRef.current,
       linkedPrice,
       volumeCompare,
+      mainTypeRef.current,
     )
 
     chart.setOption(option, true)
@@ -1150,7 +1242,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, mainType, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

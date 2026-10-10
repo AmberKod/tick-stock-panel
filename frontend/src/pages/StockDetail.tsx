@@ -8,7 +8,13 @@ import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
-import { StockDailyKChart, type MklinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import {
+  MAIN_CHART_TYPES,
+  StockDailyKChart,
+  type MainChartType,
+  type MklinePeriod,
+  type StockDailyKChartResult,
+} from '@/components/StockDailyKChart'
 import type { ChartPriceLine } from '@/components/EChartsCandlestick'
 import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
@@ -378,6 +384,19 @@ export function StockDetail() {
    * 默认只开「放量」—— 全开会把 K 线糊住, 而且标注不是建议, 别喧宾夺主。
    */
   const [signals, setSignals] = useState<Set<SignalKey>>(() => new Set<SignalKey>(['volume']))
+  /**
+   * 主图画法(蜡烛/空心/美国线/收盘线)。画的是同一份 OHLC, 纯视觉编码差异。
+   * 记本地 —— 这是长期口味偏好, 每次进页面都要重选很烦。
+   */
+  const [mainType, setMainType] = useState<MainChartType>(() => {
+    const raw = localStorage.getItem('stockDetail:mainType')
+    const ok = MAIN_CHART_TYPES.some(t => t.value === raw)
+    return ok ? (raw as MainChartType) : 'candle'
+  })
+  const changeMainType = useCallback((next: MainChartType) => {
+    setMainType(next)
+    try { localStorage.setItem('stockDetail:mainType', next) } catch { /* 忽略 */ }
+  }, [])
   /** 双击图表加的水平价格线(本地持久化, 按标的隔离)。 */
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>(() => {
     try {
@@ -610,6 +629,30 @@ export function StockDetail() {
             </>
           )}
 
+          {/* ── 主图画法 ──
+              四种画法共用同一份 OHLC, 换的只是视觉编码(实心/空心/美国线/收盘线)。
+              分时档是独立组件(固定画法), 所以这里只在 K 线档出现。 */}
+          {kPeriod !== 'minute' && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
+              <span className="text-fg-muted">主图</span>
+              <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
+                {MAIN_CHART_TYPES.map(t => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => changeMainType(t.value)}
+                    title={t.hint}
+                    className={cn('rounded px-2 py-0.5 transition-colors',
+                      mainType === t.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
           {/* ── K线内标注 ──
               全部由当前那串 K 线**确定性派生**(放量/新高/新低/MACD交叉), 不是打分、
               不是买卖建议。口径写在 title 里, 免得被当成某种"信号推荐"。 */}
@@ -682,6 +725,7 @@ export function StockDetail() {
             visibleBars={visibleBars}
             period={kPeriod}
             mklinePeriod={mkPeriod ?? undefined}
+            mainType={mainType}
             markers={signalMarkers}
             priceLines={priceLines}
             onPriceDoubleClick={(price) => persistPriceLines([

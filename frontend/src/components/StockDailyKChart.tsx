@@ -11,6 +11,7 @@ import {
   type ChartMarker,
   type ChartPriceLine,
   type ChartRange,
+  type MainChartType,
   type OHLC,
   type StockInfo,
   type VolumeCompareConfig,
@@ -18,6 +19,10 @@ import {
 
 /** 分钟档位。与后端 _MKLINE_PERIODS 一致。 */
 export type MklinePeriod = 'm1' | 'm5' | 'm15' | 'm30' | 'm60'
+
+// 主图画法的类型与选项表定义在 EChartsCandlestick, 这里原样转发 —— 页面只需 import 一处
+export type { MainChartType } from '@/components/EChartsCandlestick'
+export { MAIN_CHART_TYPES } from '@/components/EChartsCandlestick'
 
 export const MK_PERIODS: { label: string; value: MklinePeriod }[] = [
   { label: '1分', value: 'm1' },
@@ -102,6 +107,8 @@ interface Props {
   onDataChange?: (result: StockDailyKChartResult) => void
   /** 扩展数据列参数（逗号分隔 config_id.field_name），透传给 klineDaily 接口 */
   extColumns?: string
+  /** 主图画法: 蜡烛 / 空心蜡烛 / 美国线 / 收盘线 */
+  mainType?: MainChartType
 }
 
 function isValidRow(r: any): boolean {
@@ -186,6 +193,7 @@ export function StockDailyKChart({
   onPriceDoubleClick,
   onDataChange,
   extColumns,
+  mainType = 'candle',
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -363,6 +371,7 @@ export function StockDailyKChart({
           visibleBars={visibleBars}
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
+          mainType={mainType}
         />
       )}
     </div>
