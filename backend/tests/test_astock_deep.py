@@ -832,3 +832,19 @@ def test_api_sectors_ok(client, monkeypatch):
 def test_api_sectors_bad_code(client):
     body = client.get("/api/astock/sectors/AAOI").json()
     assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_sectors_core_boards_first(monkeypatch):
+    """核心题材必须排前 —— 东财的多列排序(sortColumns=IS_PRECISE,BOARD_RANK)
+    实测不生效, 所以排序在 provider 本地做, 这里用乱序输入锁死。"""
+    shuffled = [
+        {"BOARD_NAME": "高市净率", "IS_PRECISE": "0", "BOARD_RANK": 6,
+         "NEW_BOARD_CODE": "BK0888", "SELECTED_BOARD_REASON": None},
+        {"BOARD_NAME": "算力概念", "IS_PRECISE": "1", "BOARD_RANK": 33,
+         "NEW_BOARD_CODE": "BK0901", "SELECTED_BOARD_REASON": None},
+        {"BOARD_NAME": "通信技术", "IS_PRECISE": "1", "BOARD_RANK": 31,
+         "NEW_BOARD_CODE": "BK0812", "SELECTED_BOARD_REASON": "半年报显示"},
+    ]
+    _patch_f10(monkeypatch, boards=shuffled)
+    d = prov.stock_sectors("300308")["data"]
+    assert [b["name"] for b in d["boards"]] == ["通信技术", "算力概念", "高市净率"]

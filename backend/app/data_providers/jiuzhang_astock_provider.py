@@ -782,10 +782,11 @@ def stock_sectors(code: str, limit: int = 24) -> dict:
             industry["csrc"] = csrc
             industry["csrc_parts"] = [p for p in csrc.split("-") if p]
 
+    # 排序只让东财按 BOARD_RANK 升序(它认这一列); IS_PRECISE 的多列排序实测
+    # 不生效(sortTypes 按整串解析), 核心题材优先在下面本地排 —— 结果可控。
     boards: list[dict] = []
     for row in _datacenter(_REPORT_F10_BOARD, filt, page_size=50,
-                           sort_columns="IS_PRECISE,BOARD_RANK",
-                           sort_types="-1,1"):
+                           sort_columns="BOARD_RANK", sort_types="1"):
         bname = str(row.get("BOARD_NAME") or "").strip()
         if not bname:
             continue
@@ -805,6 +806,9 @@ def stock_sectors(code: str, limit: int = 24) -> dict:
         # 两个报表都没数据 —— 这是"取不到", 不是"该股没有板块"。上抛让上游
         # 走 available:false, 绝不返回空壳冒充成功。
         raise ValueError(f"东财 F10 未返回该股板块数据: {code}")
+
+    # 核心题材(IS_PRECISE=1)排前, 同级按东财 BOARD_RANK 升序。
+    boards.sort(key=lambda b: (not b["precise"], b["rank"] if b["rank"] is not None else 9999))
 
     return {
         "source": SOURCE_EM_F10,
