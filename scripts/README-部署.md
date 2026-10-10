@@ -30,7 +30,7 @@
 | 3/6 | `docker compose build` 重新打包镜像 |
 | 4/6 | `docker compose up -d --force-recreate` 重建容器上线 |
 | 5/6 | 轮询 `http://127.0.0.1:<port>/health`，**失败自动回滚到上一版镜像** |
-| 6/6 | 清理磁盘：保留最近 5 个镜像 tag + 回收悬空镜像 `<none>` + 构建缓存压回上限（默认 12GB） |
+| 6/6 | 清理磁盘：保留最近 5 个镜像 tag + 回收**本项目**的悬空镜像 `<none>`（构建缓存默认只提示，不自动清） |
 
 跑完会打印前端访问地址，以及 sec_relay / OpenBB 两个**宿主常驻依赖**的状态。
 
@@ -124,7 +124,8 @@
 | `-HealthTimeoutSec 90` | 健康检查总超时 |
 | `-BusyWindowSec 60` | 「正在写数据」判定窗口（秒） |
 | `-KeepImages 5` | 清理时保留最近几个镜像 tag（每个旧 tag 约占 0.4GB 独有层） |
-| `-KeepBuildCache 12GB` | buildx 构建缓存保留上限；设为 `0` 表示不清理缓存（磁盘换构建速度） |
+| `-PruneBuildCache` | **默认不开**。显式允许清理 buildx 构建缓存 —— 它是跨项目共享资源，清它会连带影响别的项目 |
+| `-KeepBuildCache 12GB` | 配合 `-PruneBuildCache` 的构建缓存保留上限 |
 
 ### 回滚
 
@@ -156,7 +157,15 @@
 
 - 清理策略（两段，缺一不可）：
   1. **旧 tag**：只处理 Repository 等于本项目镜像名的行，**不会误删其他项目的镜像**；`latest` 与 `<none>` 不纳入统计且 `latest` 永不删除；当前版本与上一版本受保护；其余保留最近 5 个，删除前会先打印清单。
-  2. **悬空镜像 + 构建缓存**（2026-10-10 补）：`docker rmi` 只是**摘 tag**，镜像实体会变成 `<none>` 留下来，实测能攒到 2GB+；而 buildx 构建缓存不清理会一路涨到 16GB+。所以补了 `docker image prune -f`（只删 `<none>`，**不带 `-a`**，绝不碰任何还带 tag 的镜像）和 `docker builder prune --max-used-space`（压回上限而非全清，全清会让下次构建退化成冷启动）。
+  2. **本项目悬空镜像 `<none>`**（2026-10-10 补）：`docker rmi` 只是**摘 tag**，镜像实体会以 `<none>` 留在磁盘上，实测能攒到 2GB+。
+
+     🔴 **边界：只清本项目构建的镜像，一个别的项目的镜像都不能动。** 所以刻意**不用** `docker image prune` —— 它是全局的，会连同别的项目一起删。判定归属的方式：
+     - **主判据**：`com.docker.compose.project` label。compose 构建时会把项目名烙进镜像 Labels（本项目实测为 `tsp-fresh`），悬空镜像丢了 Repository 但 Labels 还在，label 值相等才认；
+     - **兜底**：该 label 不存在时，退回配置指纹（WorkingDir / Cmd / Entrypoint / Labels 全等）比对；
+     - 两者都不匹配的悬空镜像一律**跳过并打印**，绝不删除。
+
+     另外，旧 tag 摘掉后会按**镜像 ID** 精确删实体（仅在已无任何 tag 指向它时），ID 不属于本项目的镜像一步都不碰。
+  3. **构建缓存**（跨项目共享，**默认不自动清**）：buildx 的缓存是 `desktop-linux` 这个 builder 上所有项目共享的一份资源，不属于任何单个项目的镜像。默认只打印占用与回收命令；确认要回收时手动执行 `docker builder prune -f --max-used-space 12GB`，或在部署命令上加 `-PruneBuildCache`。
 
 ---
 

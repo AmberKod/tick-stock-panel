@@ -1086,8 +1086,108 @@ function Remove-OldDeployImages {
         catch {
             # 镜像被容器占用时 docker rmi 会失败, 这不影响部署结果
             Write-WarnMsg ('删除 ' + $ImageName + ':' + $item.Tag + ' 失败(可能仍在被容器使用), 已跳过: ' + $_.Exception.Message)
+            continue
+        }
+
+        # ── 关键补充: rmi 只是"摘 tag", 镜像实体会以 <none> 留在磁盘上 ──
+        # 摘完 tag 后按 **镜像 ID** 精确删实体, 且只在"已经没有任何 tag 指向它"
+        # 时才删。按 ID 删而不是 prune, 是因为 prune 是全局的, 会连别的项目
+        # 的悬空镜像一起删 —— 这里一步都不碰 ID 不属于本项目的镜像。
+        if (Test-ImageHasNoTag -ImageId $item.ImageId) {
+            try {
+                $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('rmi', $item.ImageId) -Description ('删除已无 tag 的镜像实体 ' + $item.ImageId) -DryRun:$DryRun
+                Write-OkMsg ('已回收镜像实体 ' + $item.ImageId + '(原 ' + $ImageName + ':' + $item.Tag + ')')
+            }
+            catch {
+                # 还在被容器/其他 tag 引用时删不掉, 不影响部署结果
+                Write-WarnMsg ('回收镜像实体 ' + $item.ImageId + ' 失败(仍在被引用), 已跳过: ' + $_.Exception.Message)
+            }
         }
     }
+}
+
+function Test-ImageHasNoTag {
+    <#
+    .SYNOPSIS 判断某个镜像 ID 现在是否还有任何 tag 指向它(无 tag = 悬空, 可回收)。
+
+    .DESCRIPTION
+        docker images 输出的是 12 位短 ID, 所以按前缀匹配。只看 ID 是否还带 tag,
+        不看 Repository —— <none>:<none> 不算 tag。
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ImageId
+    )
+
+    $rows = Invoke-ExternalCapture -Exe 'docker' -Arguments @('images', '--format', '{{.ID}}|{{.Tag}}') -Silent
+    if ($null -eq $rows) {
+        return $false
+    }
+    $target = $ImageId.Trim()
+    foreach ($row in $rows) {
+        $parts = ([string]$row) -split '\|'
+        if ($parts.Count -lt 2) {
+            continue
+        }
+        if (-not $parts[0].Trim().StartsWith($target)) {
+            continue
+        }
+        $tag = $parts[1].Trim()
+        if ($tag -and $tag -ne '<none>') {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-ImageComposeProjectLabel {
+    <#
+    .SYNOPSIS 取镜像 Labels 里的 com.docker.compose.project 值。
+
+    .DESCRIPTION
+        docker compose 构建时会把项目名烙进镜像 Labels(实测本项目的镜像都带
+        {"com.docker.compose.project":"tsp-fresh", ...})。这是判断"这个镜像属于
+        哪个项目"的**硬证据**, 比比对 Cmd/工作目录可靠得多 —— 悬空镜像虽然丢了
+        Repository, 但 Labels 还在。
+        没有这个 label 时返回 $null, 由调用方退回指纹比对。
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ImageRef
+    )
+
+    $rows = Invoke-ExternalCapture -Exe 'docker' -Arguments @('image', 'inspect', '--format', '{{json .Config.Labels}}', $ImageRef) -Silent
+    if ($null -eq $rows -or $rows.Count -eq 0) {
+        return $null
+    }
+    $text = ([string]$rows[0]).Trim()
+    $m = [regex]::Match($text, '"com\.docker\.compose\.project"\s*:\s*"([^"]+)"')
+    if (-not $m.Success) {
+        return $null
+    }
+    return $m.Groups[1].Value
+}
+
+function Get-ImageConfigFingerprint {
+    <#
+    .SYNOPSIS 取镜像的"配置指纹"(工作目录 / Cmd / Entrypoint / Labels)。
+
+    .DESCRIPTION
+        悬空镜像没有 Repository, 没法按名字判断归属。但同一个 Dockerfile 构建出来的
+        镜像, 这些配置项是一致的 —— 用它当作"这个 <none> 是我们项目构建的"的依据,
+        比全局 prune 安全: 指纹不匹配的悬空镜像一律不动。
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ImageRef
+    )
+
+    $format = '{{.Config.WorkingDir}}||{{json .Config.Cmd}}||{{json .Config.Entrypoint}}||{{json .Config.Labels}}'
+    $rows = Invoke-ExternalCapture -Exe 'docker' -Arguments @('image', 'inspect', '--format', $format, $ImageRef) -Silent
+    if ($null -eq $rows -or $rows.Count -eq 0) {
+        return $null
+    }
+    return ([string]$rows[0]).Trim()
 }
 
 function Get-DockerReclaimable {
@@ -1113,26 +1213,30 @@ function Get-DockerReclaimable {
 
 function Invoke-DockerDiskCleanup {
     <#
-    .SYNOPSIS 清理悬空镜像(<none>)与构建缓存 —— Remove-OldDeployImages 管不到的那部分磁盘。
+    .SYNOPSIS 回收本项目遗留的悬空镜像(<none>) —— 严格限定在本项目镜像范围内。
 
     .DESCRIPTION
-        Remove-OldDeployImages 只做 `docker rmi <repo>:<tag>`, 它有两个盲区:
-          1. 被 untag 的镜像会变成 <none>(悬空)。讽刺的是它正是这里的清理动作
-             自己造出来的: rmi 把 tag 摘掉后镜像实体还在, 实测能攒到 2GB+,
-             而 <none> 又被统计逻辑显式跳过, 于是永远不会被清。
-          2. 每次 build 产生的 buildx 构建缓存不会自动回收, 实测涨到 16GB+。
-        这里补两步:
-          - `docker image prune -f`: 只删悬空镜像, **绝不碰任何还带 tag 的镜像**
-            (不带 -a), 所以其他项目的镜像不受影响;
-          - `docker builder prune --max-used-space <上限>`: 把缓存压回上限而不是
-            全清 —— 全清会让下一次构建退化成冷启动(实测多花 1~2 分钟)。
+        🔴 边界(用户明确要求): **只清本项目构建的镜像, 一个别的项目的镜像都不能动。**
+        所以这里刻意**不用** `docker image prune` —— 它是全局的, 会连同别的项目
+        的悬空镜像一起删。
 
-    .PARAMETER KeepBuildCache
-        构建缓存保留上限, 默认 12GB。设为 0 表示跳过缓存清理。
+        判定归属(悬空镜像没有 Repository, 但有 Labels 和 Config):
+          1. 主判据: `com.docker.compose.project` label。compose 构建时会把项目名
+             烙进镜像(本项目实测为 tsp-fresh), 悬空镜像丢了 Repository 但 Labels 还在,
+             所以这是硬证据 —— label 值相等才认。
+          2. 兜底: 该 label 不存在时, 退回配置指纹(WorkingDir / Cmd / Entrypoint /
+             Labels 全等)比对。
+        两者都不匹配的悬空镜像一律跳过并打印, 绝不删除。
+
+    .PARAMETER BuildCacheHint
+        是否打印构建缓存提示。buildx 的构建缓存是**所有项目共享**的一份资源,
+        不属于任何单个项目的镜像, 因此默认只提示不清理; 需要回收时按提示的命令
+        手动执行(-PruneBuildCache 开关会在 deploy.ps1 里显式打开)。
     #>
     [CmdletBinding()]
     param(
-        [string]$KeepBuildCache = '12GB',
+        [Parameter(Mandatory = $true)][string]$ImageName,
+        [Parameter(Mandatory = $true)][string]$ReferenceTag,
         [switch]$DryRun
     )
 
@@ -1144,25 +1248,86 @@ function Invoke-DockerDiskCleanup {
         }
     }
 
-    # 悬空镜像: 只删 <none>, 不影响任何带 tag 的镜像
-    try {
-        $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('image', 'prune', '-f') `
-            -Description '清理悬空镜像(<none>, 不触碰带 tag 的镜像)' -DryRun:$DryRun
-        Write-OkMsg '悬空镜像清理完成。'
+    # ── 本项目镜像的"身份证明": compose 项目名 label 优先, 否则用配置指纹 ──
+    $ref = $ImageName + ':' + $ReferenceTag
+    $projectLabel = Get-ImageComposeProjectLabel -ImageRef $ref
+    $projectFingerprint = Get-ImageConfigFingerprint -ImageRef $ref
+
+    if (-not $projectLabel -and [string]::IsNullOrWhiteSpace($projectFingerprint)) {
+        Write-WarnMsg ('读不到 ' + $ref + ' 的任何归属依据(label/指纹), 跳过悬空镜像回收(不做无把握的删除)。')
+        return
     }
-    catch {
-        Write-WarnMsg ('悬空镜像清理失败(不影响部署结果): ' + $_.Exception.Message)
+    if ($projectLabel) {
+        Write-InfoMsg ('本项目 compose 项目名: ' + $projectLabel + ' —— 只回收带同名 label 的悬空镜像。')
+    }
+    else {
+        Write-InfoMsg '本项目镜像没有 compose 项目名 label, 退回配置指纹比对。'
     }
 
-    # 构建缓存: 压回上限, 保留最近的以维持构建速度
-    if ($KeepBuildCache -and $KeepBuildCache -ne '0') {
+    $dangling = Invoke-ExternalCapture -Exe 'docker' -Arguments @('images', '--filter', 'dangling=true', '--format', '{{.ID}}|{{.Size}}') -Silent
+    if ($null -eq $dangling -or $dangling.Count -eq 0) {
+        Write-OkMsg '没有悬空镜像(<none>), 无需回收。'
+        return
+    }
+
+    $ours = @()
+    $others = @()
+    foreach ($row in $dangling) {
+        $parts = ([string]$row) -split '\|'
+        if ($parts.Count -lt 1) {
+            continue
+        }
+        $id = $parts[0].Trim()
+        if ([string]::IsNullOrWhiteSpace($id)) {
+            continue
+        }
+        $size = if ($parts.Count -ge 2) { $parts[1].Trim() } else { '?' }
+
+        $isOurs = $false
+        if ($projectLabel) {
+            # 主判据: compose 项目名 label 相等
+            $isOurs = ((Get-ImageComposeProjectLabel -ImageRef $id) -eq $projectLabel)
+        }
+        else {
+            # 兜底: 配置指纹全等
+            $fp = Get-ImageConfigFingerprint -ImageRef $id
+            $isOurs = ($fp -and $fp -eq $projectFingerprint)
+        }
+
+        if ($isOurs) {
+            $ours += [pscustomobject]@{ Id = $id; Size = $size }
+        }
+        else {
+            $others += [pscustomobject]@{ Id = $id; Size = $size }
+        }
+    }
+
+    if ($others.Count -gt 0) {
+        Write-InfoMsg ('另有 ' + $others.Count + ' 个悬空镜像不属于本项目, 保持不动:')
+        foreach ($item in $others) {
+            Write-InfoMsg ('  跳过 ' + $item.Id + '  (' + $item.Size + ')')
+        }
+    }
+
+    if ($ours.Count -eq 0) {
+        Write-OkMsg '没有属于本项目的悬空镜像, 无需回收。'
+        return
+    }
+
+    Write-Host ''
+    Write-WarnMsg ('准备回收以下 ' + $ours.Count + ' 个本项目悬空镜像(归属与 ' + $ref + ' 一致):')
+    foreach ($item in $ours) {
+        Write-Host ('       - ' + $item.Id + '  (' + $item.Size + ')') -ForegroundColor Yellow
+    }
+
+    foreach ($item in $ours) {
         try {
-            $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('builder', 'prune', '-f', '--max-used-space', $KeepBuildCache) `
-                -Description ('构建缓存压回上限 ' + $KeepBuildCache) -DryRun:$DryRun
-            Write-OkMsg ('构建缓存已压回 ' + $KeepBuildCache + ' 以内。')
+            $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('rmi', $item.Id) `
+                -Description ('回收本项目悬空镜像 ' + $item.Id) -DryRun:$DryRun
+            Write-OkMsg ('已回收 ' + $item.Id)
         }
         catch {
-            Write-WarnMsg ('构建缓存清理失败(不影响部署结果): ' + $_.Exception.Message)
+            Write-WarnMsg ('回收 ' + $item.Id + ' 失败(可能仍在被容器使用), 已跳过: ' + $_.Exception.Message)
         }
     }
 
@@ -1172,6 +1337,60 @@ function Invoke-DockerDiskCleanup {
         foreach ($key in ($after.Keys | Sort-Object)) {
             Write-InfoMsg ('  ' + $key + ' 可回收 ' + $after[$key])
         }
+    }
+}
+
+function Write-BuildCacheHint {
+    <#
+    .SYNOPSIS 提示 buildx 构建缓存占用, 但**不自动清理**。
+
+    .DESCRIPTION
+        构建缓存是 buildx builder 上**所有项目共享**的一份资源(默认 builder
+        desktop-linux), 它不属于任何一个项目的镜像。按"只清本项目"的边界,
+        这里默认只提示、不动手; 用户确认后可用 -PruneBuildCache 显式打开。
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$WarnAbove = '10GB'
+    )
+
+    $rows = Invoke-ExternalCapture -Exe 'docker' -Arguments @('system', 'df', '--format', '{{.Type}}|{{.Size}}|{{.Reclaimable}}') -Silent
+    if ($null -eq $rows) {
+        return
+    }
+    foreach ($row in $rows) {
+        $parts = ([string]$row) -split '\|'
+        if ($parts.Count -lt 3) {
+            continue
+        }
+        if ($parts[0].Trim() -ne 'Build Cache') {
+            continue
+        }
+        Write-InfoMsg ('构建缓存 ' + $parts[1].Trim() + ' (可回收 ' + $parts[2].Trim() + ')')
+        Write-InfoMsg '  ↑ buildx 构建缓存是所有项目共享的, 不属于本项目镜像, 默认不动。'
+        Write-InfoMsg '    需要回收时显式执行: docker builder prune -f --max-used-space 12GB'
+        Write-InfoMsg '    或在部署命令上加 -PruneBuildCache(会连带清掉别的项目共享的缓存条目)。'
+        return
+    }
+}
+
+function Invoke-BuildCachePrune {
+    <#
+    .SYNOPSIS 显式回收 buildx 构建缓存(需用户主动开启, 因为它是跨项目共享资源)。
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$KeepBuildCache = '12GB',
+        [switch]$DryRun
+    )
+
+    try {
+        $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('builder', 'prune', '-f', '--max-used-space', $KeepBuildCache) `
+            -Description ('构建缓存压回上限 ' + $KeepBuildCache + '(注意: 跨项目共享)') -DryRun:$DryRun
+        Write-OkMsg ('构建缓存已压回 ' + $KeepBuildCache + ' 以内。')
+    }
+    catch {
+        Write-WarnMsg ('构建缓存清理失败(不影响部署结果): ' + $_.Exception.Message)
     }
 }
 
