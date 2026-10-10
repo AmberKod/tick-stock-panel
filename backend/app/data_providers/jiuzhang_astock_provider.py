@@ -674,6 +674,103 @@ def _tx_symbol(code: str) -> str:
     return "sz" + c
 
 
+def _tx_index_symbol(code: str) -> str:
+    """指数 6 位代码 → 腾讯符号(sh000300 / sz399006 / bj899050)。
+
+    ⚠️ 不能复用 ``_tx_symbol``: 那是**个股**规则(0 开头 → sz), 而沪市指数恰恰是
+    0 开头(000300 沪深300 / 000001 上证指数)却属于 sh。按个股规则会把沪深300
+    拼成 sz000300, 腾讯返回空 —— 这类"拼错也能跑通"的错误最难查。
+    规则: 3/399 开头(深证/创业板)→ sz, 8 开头(北证)→ bj, 其余 → sh。
+    """
+    c = _norm_code(code)
+    if c.startswith("399"):
+        return "sz" + c
+    if c[0] == "8":
+        return "bj" + c
+    return "sh" + c
+
+
+def index_daily(code: str, limit: int = 320) -> dict:
+    """指数日K(腾讯 kline/kline) —— 对比页「基准指数」的真源。
+
+    为什么单独开一个函数(而不是复用 adjust_ratios / 本地 index_daily 库):
+      - **指数不需要复权**: 指数是点位, 不存在除权, 走 kline/kline 拿 day 即可;
+      - **本地 index 库不全**: 实测本地只有 399006(创业板指), 沪深300/上证指数
+        都没有 —— 若只认本地库, 最常用的两个基准就直接"取不到"了。
+        腾讯直连可达, 是真源, 所以走它(与个股日K/分钟K同源同标记)。
+
+    ⚠️ 字段口径与个股日K一致: 行 = ``[日期, 开, 收, 高, 低, 量]`` ——
+       **第 2 列是收**, 不是常见 OHLC 顺序的收在最后。指数没有成交额列,
+       量是成交量(手), 只用于参考, 对比页算相对强弱只用 close。
+    """
+    code = _norm_code(code)
+    sym = _tx_index_symbol(code)
+    # 上限比个股复权那档宽(1000): 对比页最长看 3 年(750 交易日), 基准若只给 640
+    # 根, 三年档会被截成两年半 —— 实测腾讯 day 序列给到 1000 根没问题。
+    limit = max(20, min(int(limit or 320), 1000))
+
+    url = _TENCENT_KLINE_URL + "?" + urllib.parse.urlencode(
+        {"param": f"{sym},day,,,{limit}"})
+    cache_key = f"idx|{url}"
+    cached = _cache_get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    payload = _request_json(url)
+    node = ((payload or {}).get("data") or {}).get(sym)
+    rows = (node or {}).get("day") if isinstance(node, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"腾讯未返回指数日K: {sym}")
+
+    def _col(r: list, i: int) -> float | None:
+        return _num(r[i]) if isinstance(r, (list, tuple)) and len(r) > i else None
+
+    out: list[dict] = []
+    for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 5:
+            continue
+        d = str(r[0]).strip()[:10]
+        o = _col(r, 1)      # 开
+        c = _col(r, 2)      # 收
+        h = _col(r, 3)      # 高
+        lo = _col(r, 4)     # 低
+        v = _col(r, 5)
+        if not d or c is None or c <= 0:
+            continue
+        out.append({
+            "date": d, "open": o, "close": c, "high": h, "low": lo,
+            "volume": None if v is None else round(v * 100, 0),   # 手 → 股
+        })
+    if not out:
+        raise ValueError(f"腾讯指数日K无法解析: {sym}")
+
+    # 名称: 顺手打一次行情接口拿(GBK)。拿不到就退成代码, 不编名字。
+    name = None
+    try:
+        raw = _request_text(_TENCENT_QUOTE_URL + sym, encoding="gbk")
+        m = re.search(rf'v_{re.escape(sym)}="([^"]*)"', raw)
+        if m:
+            p = m.group(1).split("~")
+            if len(p) > 1 and p[1].strip():
+                name = p[1].strip()
+    except Exception:
+        name = None
+
+    result = {
+        "source": SOURCE_TENCENT,
+        "data": {
+            "code": code,
+            "symbol": sym,
+            "name": name,
+            "rows": out,
+            "coverage": {"from": out[0]["date"], "to": out[-1]["date"], "bars": len(out)},
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(cache_key, result, _TENCENT_ADJ_TTL_S)
+    return result
+
+
 def realtime_quote(code: str) -> dict:
     """A股实时行情(腾讯) —— 补齐行情条被东财 push2 卡住的那一半字段。
 

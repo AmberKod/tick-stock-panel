@@ -11,6 +11,8 @@
 - GET /api/astock/adjratio/{code}: 日K复权系数(腾讯; qfq/hfq/none) —— 只给系数,
   由调用方乘到自己的价格列上(复权是价格缩放, 不是换数据源)
 - GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
+- GET /api/astock/index/{code}: 指数日K(腾讯) —— 对比页基准指数(沪深300/上证指数…
+  本地 index 库不全, 走腾讯真源)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
 失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
@@ -39,6 +41,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     dragon_tiger,
     financials,
     fund_flow,
+    index_daily,
     minute_bars,
     minute_kline,
     realtime_quote,
@@ -202,8 +205,8 @@ def get_minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
         return {"available": False,
                 "reason": f"bad_period: {period!r} (m1/m5/m15/m30/m60)",
                 "source": SOURCE_TENCENT}
-    if limit < 20 or limit > 640:
-        return {"available": False, "reason": f"bad_limit: {limit} (20..640)",
+    if limit < 20 or limit > 1000:
+        return {"available": False, "reason": f"bad_limit: {limit} (20..1000)",
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: minute_kline(norm, period=period, limit=limit),
                     required_key="rows", source=SOURCE_TENCENT)
@@ -267,3 +270,25 @@ def get_financials(code: str, periods: int = 8) -> dict:
                 "source": SOURCE_AKSHARE}
     return _respond(norm, lambda: financials(norm, periods=periods),
                     required_key="indicators", source=SOURCE_AKSHARE)
+
+
+@router.get("/index/{code}")
+def get_index_daily(code: str, limit: int = 320) -> dict:
+    """指数日K(腾讯) —— 多股对比页的「基准指数」用。
+
+    本地 ``kline_index`` 库实测只有 399006(创业板指), 沪深300 / 上证指数都没有,
+    所以基准走腾讯真源(与个股日K、分钟K 同源, source=live-tencent)。
+
+    ⚠️ 代码规则与个股不同: 沪市指数是 **0 开头但属于 sh**(000300 沪深300、
+    000001 上证指数), provider 里 ``_tx_index_symbol`` 单独处理 —— 按个股规则
+    拼成 sz000300 会拿到空数据, 那是"返回成功但没东西"的假成功。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是指数代码",
+                "source": SOURCE_TENCENT}
+    if limit < 20 or limit > 1000:
+        return {"available": False, "reason": f"bad_limit: {limit} (20..1000)",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: index_daily(norm, limit=limit),
+                    required_key="rows", source=SOURCE_TENCENT)

@@ -2427,6 +2427,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
+  /**
+   * 指数日K(腾讯) —— 对比页的「基准指数」。
+   * 本地 index 库实测只有创业板指, 沪深300/上证指数都没有, 所以走这个真源端点;
+   * 取不到时后端给 available:false, 前端据此**不画基准线**, 不拿别的指数顶替。
+   */
+  astockIndexDaily: (code: string, limit = 320) =>
+    request<{
+      available: boolean
+      reason?: string
+      source?: string
+      data?: {
+        code: string
+        symbol: string
+        name?: string | null
+        rows: { date: string; open: number | null; close: number; high: number | null; low: number | null; volume: number | null }[]
+        coverage?: { from: string; to: string; bars: number }
+      }
+    }>(`/api/astock/index/${encodeURIComponent(code)}?limit=${limit}`),
   klineMinuteBatch: (symbols: string[], date?: string) =>
     request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
       method: 'POST',

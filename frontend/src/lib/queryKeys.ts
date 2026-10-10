@@ -120,6 +120,8 @@ export const QK = {
   astockMkline:         (code: string, period: string) => ['astock-mkline', code, period] as const,
   /** A股日K复权系数(腾讯) —— 按 mode 分 key, 切档位会重新取。 */
   astockAdjRatio:       (code: string, mode: string) => ['astock-adjratio', code, mode] as const,
+  /** 指数日K(腾讯) —— 对比页基准。按代码 + 根数分 key。 */
+  astockIndexDaily:     (code: string, limit: number) => ['astock-index-daily', code, limit] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

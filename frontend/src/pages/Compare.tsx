@@ -9,6 +9,9 @@
  *    实际用了多少根、哪只被剔除了多少天。
  *  - 指标(区间收益/最大回撤/年化波动/相关性)全部基于**对齐后的同一段日期**算,
  *    否则不同标的用的不是同一区间, 数字之间不可比。
+ *  - **基准指数**(默认沪深300)走腾讯真源: 本地 index 库实测只有创业板指一只,
+ *    沪深300/上证指数都没有, 所以基准不认本地库。基准与个股一样参与**日期交集**
+ *    —— 基准缺哪天, 那天整体不算, 而不是给基准插一个点位出来。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -19,6 +22,7 @@ import { Loader2, Plus, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { QK } from '@/lib/queryKeys'
+import { BENCHMARKS, DEFAULT_BENCHMARK, benchmarkLabel } from '@/lib/benchmarks'
 import { PageHeader } from '@/components/PageHeader'
 
 const RANGES = [
@@ -36,6 +40,10 @@ const SERIES_COLORS = [
 ]
 
 const MAX_SYMBOLS = 8
+
+/** 基准在对齐结构里的"伪标的 key"。它跟个股一起参与日期交集, 但不算在 symList 里。 */
+const BENCH_KEY = '__bench__'
+const BENCH_COLOR = '#94A3B8'
 
 interface Aligned {
   dates: string[]
@@ -125,6 +133,35 @@ function correlation(a: number[], b: number[]): number {
   return num / Math.sqrt(da * db)
 }
 
+/**
+ * Beta = cov(个股日收益, 基准日收益) / var(基准日收益)。
+ * 这是**确定性统计量**, 不是模型估计 —— 输入就是两段对齐后的收盘价。
+ * 基准日收益方差为 0(区间内基准纹丝不动)时无定义, 返回 NaN 由前端显示 '—'。
+ */
+function beta(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length)
+  if (n < 4) return NaN
+  const ra: number[] = []
+  const rb: number[] = []
+  for (let i = 1; i < n; i++) {
+    if (a[i - 1] > 0 && b[i - 1] > 0) {
+      ra.push(Math.log(a[i] / a[i - 1]))
+      rb.push(Math.log(b[i] / b[i - 1]))
+    }
+  }
+  if (ra.length < 3) return NaN
+  const ma = ra.reduce((s, v) => s + v, 0) / ra.length
+  const mb = rb.reduce((s, v) => s + v, 0) / rb.length
+  let cov = 0
+  let vb = 0
+  for (let i = 0; i < ra.length; i++) {
+    cov += (ra[i] - ma) * (rb[i] - mb)
+    vb += (rb[i] - mb) ** 2
+  }
+  if (vb <= 0) return NaN
+  return cov / vb
+}
+
 export function Compare() {
   const [params, setParams] = useSearchParams()
   const [days, setDays] = useState<number>(() => {
@@ -135,20 +172,25 @@ export function Compare() {
     (params.get('symbols') ?? '').split(',').map(s => s.trim()).filter(Boolean).slice(0, MAX_SYMBOLS),
   )
   const [draft, setDraft] = useState('')
-  /** 'norm' = 首日=100; 'abs' = 绝对价格 */
-  const [mode, setMode] = useState<'norm' | 'abs'>('norm')
+  /** 'norm' = 首日=100; 'abs' = 绝对价格; 'rel' = 相对基准的超额收益(百分点) */
+  const [mode, setMode] = useState<'norm' | 'abs' | 'rel'>('norm')
+  /** 基准指数代码, 空串 = 不要基准 */
+  const [bench, setBench] = useState<string>(
+    () => (params.get('bench') ?? DEFAULT_BENCHMARK),
+  )
 
   // URL 与 state 双向同步 —— 对比结果要能直接把链接发给别人
-  const syncUrl = useCallback((nextSymbols: string[], nextDays: number) => {
+  const syncUrl = useCallback((nextSymbols: string[], nextDays: number, nextBench: string) => {
     const p = new URLSearchParams()
     if (nextSymbols.length > 0) p.set('symbols', nextSymbols.join(','))
     p.set('days', String(nextDays))
+    if (nextBench) p.set('bench', nextBench)
     setParams(p, { replace: true })
   }, [setParams])
 
   useEffect(() => {
-    syncUrl(symbols, days)
-  }, [symbols, days, syncUrl])
+    syncUrl(symbols, days, bench)
+  }, [symbols, days, bench, syncUrl])
 
   const addSymbol = useCallback(() => {
     const raw = draft.trim()
@@ -172,6 +214,17 @@ export function Compare() {
     placeholderData: prev => prev,
   })
 
+  /** 基准指数(腾讯真源)。取不到就 available:false —— 页面不画基准线, 不拿别的指数顶替。 */
+  const benchQuery = useQuery({
+    queryKey: QK.astockIndexDaily(bench || 'none', Math.min(1000, Math.max(320, days + 40))),
+    queryFn: () => api.astockIndexDaily(bench, Math.min(1000, Math.max(320, days + 40))),
+    enabled: !!bench && symbols.length > 0,
+    staleTime: 600_000,
+    placeholderData: prev => prev,
+  })
+  const benchData = benchQuery.data?.available ? benchQuery.data.data : null
+  const benchName = benchData?.name || benchmarkLabel(bench)
+
   const aligned = useMemo(() => {
     const data = query.data?.data
     if (!data || Object.keys(data).length === 0) return null
@@ -182,8 +235,17 @@ export function Compare() {
         close: Number(r.close),
       }))
     }
-    return alignSeries(norm, query.data?.names ?? {})
-  }, [query.data])
+    const names = { ...(query.data?.names ?? {}) }
+    // 基准当一只"标的"一起对齐: 它缺哪天, 那天整体不算(不插点位)
+    if (benchData?.rows?.length) {
+      norm[BENCH_KEY] = benchData.rows.map(r => ({
+        date: String(r.date).slice(0, 10),
+        close: Number(r.close),
+      }))
+      names[BENCH_KEY] = benchName
+    }
+    return alignSeries(norm, names)
+  }, [query.data, benchData, benchName])
 
   const symList = useMemo(() => symbols.filter(s => aligned?.prices[s]?.length), [symbols, aligned])
 
@@ -191,23 +253,37 @@ export function Compare() {
   const boxRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<echarts.ECharts | null>(null)
 
+  /** 基准序列(已与其它标的对齐到同一批日期) */
+  const benchRaw = useMemo(
+    () => (aligned?.prices[BENCH_KEY]?.length ? aligned.prices[BENCH_KEY] : null),
+    [aligned],
+  )
+  const benchNorm = useMemo(
+    () => (benchRaw && benchRaw[0] > 0 ? benchRaw.map(v => (v / benchRaw[0]) * 100) : null),
+    [benchRaw],
+  )
+
   const seriesData = useMemo(() => {
     if (!aligned) return null
     return symList.map((sym, i) => {
       const raw = aligned.prices[sym]
       const base = raw[0]
-      const vals = mode === 'norm'
-        ? raw.map(v => (base > 0 ? (v / base) * 100 : 100))
-        : raw
+      const norm = raw.map(v => (base > 0 ? (v / base) * 100 : 100))
+      // rel: 各标的归一化值 - 基准归一化值 = 相对基准的超额(百分点)。
+      // 没有基准时 rel 无意义, 退回归一化(按钮此时也置灰)。
+      const vals = mode === 'abs' ? raw
+        : mode === 'rel' && benchNorm ? norm.map((v, j) => v - benchNorm[j])
+        : norm
       return {
         symbol: sym,
         name: aligned.names[sym] ?? sym,
         color: SERIES_COLORS[i % SERIES_COLORS.length],
         values: vals,
         raw,
+        norm,
       }
     })
-  }, [aligned, symList, mode])
+  }, [aligned, symList, mode, benchNorm])
 
   useEffect(() => {
     const el = boxRef.current
@@ -253,34 +329,49 @@ export function Compare() {
         axisLabel: {
           color: '#94A3B8',
           fontSize: 10,
-          formatter: (v: number) => (mode === 'norm' ? v.toFixed(0) : v.toFixed(2)),
+          formatter: (v: number) => (mode === 'abs' ? v.toFixed(2) : v.toFixed(0)),
         },
       },
-      series: seriesData.map((s, i) => ({
-        name: `${s.name} ${s.symbol}`,
-        type: 'line',
-        data: s.values,
-        smooth: false,
-        symbol: 'none',
-        lineStyle: { width: 1.6, color: s.color },
-        itemStyle: { color: s.color },
-        // 归一化模式下首日全是 100 —— 把这条基准线画出来,
-        // 否则"所有线都从同一点出发"会被误读成某种共同起点规律。
-        markLine: mode === 'norm' && i === 0
-          ? {
-              silent: true, symbol: 'none', animation: false,
-              data: [{ yAxis: 100 }],
-              lineStyle: { color: 'rgba(148,163,184,0.55)', type: 'dashed', width: 1 },
-              label: {
-                show: true, formatter: '基准 100', position: 'insideStartTop',
-                color: '#94A3B8', fontSize: 10,
+      series: [
+        ...seriesData.map(s => ({
+          name: `${s.name} ${s.symbol}`,
+          type: 'line',
+          data: s.values,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { width: 1.6, color: s.color },
+          itemStyle: { color: s.color },
+        })),
+        // 基准: 归一化模式下与个股同坐标系(首日也是 100); 相对收益模式下是恒为 0
+        // 的那条线; 绝对价格模式下量纲不同, 不画(画了会压扁个股曲线)。
+        ...((mode === 'norm' && benchNorm) || (mode === 'rel' && benchNorm)
+          ? [{
+              name: `基准 ${benchName}`,
+              type: 'line',
+              data: mode === 'rel' ? benchNorm.map(() => 0) : benchNorm,
+              smooth: false,
+              symbol: 'none',
+              lineStyle: { width: 1.4, color: BENCH_COLOR, type: 'dashed' as const },
+              itemStyle: { color: BENCH_COLOR },
+              // 归一化模式下首日全是 100 —— 把这条基准线画出来,
+              // 否则"所有线都从同一点出发"会被误读成某种共同起点规律。
+              markLine: {
+                silent: true, symbol: 'none', animation: false,
+                data: [{ yAxis: mode === 'rel' ? 0 : 100 }],
+                lineStyle: { color: 'rgba(148,163,184,0.55)', type: 'dashed' as const, width: 1 },
+                label: {
+                  show: true,
+                  formatter: mode === 'rel' ? '持平基准' : '基准 100',
+                  position: 'insideStartTop',
+                  color: '#94A3B8', fontSize: 10,
+                },
               },
-            }
-          : undefined,
-      })),
+            }]
+          : []),
+      ],
     }, true)
     chart.resize()
-  }, [seriesData, aligned, mode, symList.length])
+  }, [seriesData, aligned, mode, symList.length, benchNorm, benchName])
 
   useEffect(() => {
     const el = boxRef.current
@@ -344,19 +435,62 @@ export function Compare() {
           <span className="mx-1 h-4 w-px bg-border" />
           <span className="text-[11px] text-fg-muted">纵轴</span>
           <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
-            {([['norm', '归一化'], ['abs', '绝对价格']] as const).map(([v, label]) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setMode(v)}
-                className={cn('rounded px-2 py-0.5 text-[11px] transition-colors',
-                  mode === v ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
-              >
-                {label}
-              </button>
-            ))}
+            {([['norm', '归一化'], ['rel', '相对基准'], ['abs', '绝对价格']] as const).map(([v, label]) => {
+              // 没有基准时"相对基准"无从谈起 —— 置灰而不是画一条错的 0 线
+              const disabled = v === 'rel' && !benchNorm
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setMode(v)}
+                  title={disabled ? '需要先拿到基准指数才谈得上相对收益' : undefined}
+                  className={cn('rounded px-2 py-0.5 text-[11px] transition-colors',
+                    disabled && 'cursor-not-allowed opacity-40',
+                    mode === v ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                >
+                  {label}
+                </button>
+              )
+            })}
           </div>
           {query.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-fg-muted" />}
+        </div>
+
+        {/* ── 基准指数 ──
+            默认沪深300。全部走腾讯真源(本地 index 库只有创业板指一只);
+            取不到就明说, 不拿别的指数顶替, 也不画一条"看起来像基准"的线。 */}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-fg-muted">基准</span>
+          {BENCHMARKS.map(b => (
+            <button
+              key={b.code}
+              type="button"
+              onClick={() => setBench(b.code)}
+              title={b.hint}
+              className={cn('rounded border px-1.5 py-0.5 text-[11px] transition-colors',
+                bench === b.code
+                  ? 'border-slate-400/50 bg-slate-400/10 text-fg'
+                  : 'border-border text-fg-muted hover:text-fg-secondary')}
+            >
+              {b.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => { setBench(''); if (mode === 'rel') setMode('norm') }}
+            title="不加基准: 只看这几只之间的相对走势"
+            className={cn('rounded border px-1.5 py-0.5 text-[11px] transition-colors',
+              !bench ? 'border-border bg-elevated text-fg' : 'border-border text-fg-muted hover:text-fg-secondary')}
+          >
+            无
+          </button>
+          {bench && benchQuery.isFetching && <Loader2 className="h-3 w-3 animate-spin text-fg-muted" />}
+          {bench && benchQuery.data && !benchQuery.data.available && (
+            <span className="text-[11px] text-amber-500">
+              基准取不到（{benchQuery.data.reason ?? '未知原因'}）—— 不画基准线
+            </span>
+          )}
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -407,6 +541,20 @@ export function Compare() {
             )}
           </div>
         )}
+        {/* 基准的来源与口径: 图上那条灰虚线到底是哪来的, 必须写在同一屏 */}
+        {bench && benchData && (
+          <div className="px-1 pt-1 text-[11px] text-fg-muted">
+            基准 <span className="text-fg-secondary">{benchName}</span>
+            <span className="font-mono"> {benchData.code}</span>
+            {' '}· 腾讯实时源 <span className="font-mono">live-tencent</span>
+            {' '}· 覆盖 {benchData.coverage?.from} ~ {benchData.coverage?.to}（{benchData.coverage?.bars}根）
+            {mode === 'rel'
+              ? ' · 纵轴 = 各标的归一化值 − 基准归一化值，即**相对基准的超额收益（百分点）**，0 = 与基准持平'
+              : mode === 'abs'
+                ? ' · 绝对价格模式下量纲不同，基准线不画（画了会把个股曲线压平）'
+                : ' · 基准与个股一样以区间首日 = 100 归一化'}
+          </div>
+        )}
         {missing.length > 0 && (
           <div className="px-1 pt-1 text-[11px] text-amber-500">
             库里没有这些标的的日K，已从图中排除：
@@ -430,6 +578,13 @@ export function Compare() {
                 <th className="px-3 py-1.5 text-right font-normal">区间收益</th>
                 <th className="px-3 py-1.5 text-right font-normal">最大回撤</th>
                 <th className="px-3 py-1.5 text-right font-normal">年化波动</th>
+                {benchRaw && (
+                  <>
+                    <th className="px-3 py-1.5 text-right font-normal" title="个股区间收益 − 基准区间收益。>0 = 跑赢基准">超额收益</th>
+                    <th className="px-3 py-1.5 text-right font-normal" title="Beta = cov(个股日收益, 基准日收益) / var(基准日收益)。>1 = 波动比基准大">β</th>
+                    <th className="px-3 py-1.5 text-right font-normal" title="与基准的日对数收益相关系数">与基准相关</th>
+                  </>
+                )}
                 <th className="px-3 py-1.5 text-right font-normal">最新</th>
               </tr>
             </thead>
@@ -438,6 +593,12 @@ export function Compare() {
                 const last = s.raw[s.raw.length - 1]
                 const first = s.raw[0]
                 const ret = first > 0 ? last / first - 1 : 0
+                const bRet = benchRaw && benchRaw[0] > 0
+                  ? benchRaw[benchRaw.length - 1] / benchRaw[0] - 1
+                  : null
+                const excess = bRet == null ? null : ret - bRet
+                const b = benchRaw ? beta(s.raw, benchRaw) : NaN
+                const c = benchRaw ? correlation(s.raw, benchRaw) : NaN
                 return (
                   <tr key={s.symbol} className="border-b border-border/60 last:border-0">
                     <td className="px-3 py-1.5">
@@ -457,14 +618,65 @@ export function Compare() {
                     <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
                       {(annualVol(s.raw) * 100).toFixed(1)}%
                     </td>
+                    {benchRaw && (
+                      <>
+                        <td className={cn('px-3 py-1.5 text-right font-mono',
+                          excess == null ? 'text-fg-muted'
+                            : excess >= 0 ? 'text-[#C74040]' : 'text-[#2D9B65]')}>
+                          {excess == null ? '—' : `${excess >= 0 ? '+' : ''}${(excess * 100).toFixed(2)}pp`}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                          {Number.isFinite(b) ? b.toFixed(2) : '—'}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                          {Number.isFinite(c) ? c.toFixed(2) : '—'}
+                        </td>
+                      </>
+                    )}
                     <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
                       {last.toFixed(2)}
                     </td>
                   </tr>
                 )
               })}
+              {/* 基准自己也是一行 —— 不然"跑赢多少"没有参照 */}
+              {benchRaw && (
+                <tr className="border-t border-border bg-elevated/40">
+                  <td className="px-3 py-1.5">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full" style={{ background: BENCH_COLOR }} />
+                      <span className="text-fg-secondary">基准 {benchName}</span>
+                      <span className="font-mono text-[11px] text-fg-muted">{benchData?.code ?? bench}</span>
+                    </span>
+                  </td>
+                  <td className={cn('px-3 py-1.5 text-right font-mono',
+                    (benchRaw[benchRaw.length - 1] / benchRaw[0] - 1) >= 0
+                      ? 'text-[#C74040]' : 'text-[#2D9B65]')}>
+                    {pct(benchRaw[benchRaw.length - 1] / benchRaw[0] - 1)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    -{(maxDrawdown(benchRaw) * 100).toFixed(2)}%
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    {(annualVol(benchRaw) * 100).toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">—</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">1.00</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">1.00</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    {benchRaw[benchRaw.length - 1].toFixed(2)}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
+          {benchRaw && (
+            <div className="border-t border-border px-3 py-1.5 text-[10px] leading-relaxed text-fg-muted">
+              超额收益 = 个股区间收益 − 基准区间收益（pp = 百分点，不是相对百分比）。
+              β 与相关系数都基于对齐区间内的**日对数收益**算，是确定性统计量，不是模型估计；
+              基准自身的超额/β 那两格恒为 0 / 1，写出来是为了让表格对齐可读。
+            </div>
+          )}
         </div>
       )}
 
