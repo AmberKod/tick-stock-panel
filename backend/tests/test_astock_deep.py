@@ -1251,3 +1251,25 @@ def test_api_adjratio_ok(client, monkeypatch):
     assert body["available"] is True and body["source"] == "live-tencent"
     assert body["data"]["name"] == "贵州茅台"
     assert len(body["data"]["ratios"]) == 3
+
+
+def test_adjratio_cache_key_not_polluted(monkeypatch):
+    """🔴 不复权档与"取基准"用的是同一个 url(kline/kline?param=sym,day,,,n),
+    但两处存的东西不同(结果 dict vs 腾讯原始响应)。共用裸 url 会互相覆盖,
+    表现为 mode=none 返回 source_gate_rejected —— 缓存键必须带前缀。"""
+    _patch_adj(monkeypatch)
+    first = prov.adjust_ratios("600519", mode="qfq")   # 先把原始响应写进共用 url 的缓存
+    assert first["source"] == "live-tencent"
+    second = prov.adjust_ratios("600519", mode="none")  # 若被污染, 这里拿到的不是结果 dict
+    assert second["source"] == "live-tencent"
+    assert all(x["ratio"] == 1.0 for x in second["data"]["ratios"])
+    assert second["data"]["has_adjust"] is False
+
+
+def test_api_adjratio_none_after_qfq(client, monkeypatch):
+    """同一个进程里先问 qfq 再问 none —— none 必须仍然 available(不被缓存污染)。"""
+    _patch_adj(monkeypatch)
+    assert client.get("/api/astock/adjratio/600519?mode=qfq").json()["available"] is True
+    body = client.get("/api/astock/adjratio/600519?mode=none").json()
+    assert body["available"] is True, body
+    assert all(x["ratio"] == 1.0 for x in body["data"]["ratios"])

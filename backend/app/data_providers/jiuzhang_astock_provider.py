@@ -917,7 +917,12 @@ def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
             {"param": f"{sym},day,,,{limit},{mode}"})
         key = f"{mode}day"
 
-    cached = _cache_get(url)
+    # ⚠️ 缓存键必须带前缀: 上面这支 url 与下面取"不复权基准"的 url 是同一个
+    # (kline/kline?param=sym,day,,,n), 而两处存的东西不一样(这里存结果 dict,
+    # 那里存腾讯原始响应)。共用裸 url 会互相覆盖, 表现为 mode=none 返回
+    # source_gate_rejected(拿到的是原始响应, 没有 source 字段)。
+    cache_key = f"adj|{mode}|{url}"
+    cached = _cache_get(cache_key)
     if isinstance(cached, dict):
         return cached
 
@@ -948,10 +953,11 @@ def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
     if mode != "none":
         raw_url = _TENCENT_KLINE_URL + "?" + urllib.parse.urlencode(
             {"param": f"{sym},day,,,{limit}"})
-        raw_payload = _cache_get(raw_url)
+        raw_cache_key = f"raw|{raw_url}"
+        raw_payload = _cache_get(raw_cache_key)
         if not isinstance(raw_payload, dict):
             raw_payload = _request_json(raw_url)
-            _cache_put(raw_url, raw_payload, _TENCENT_ADJ_TTL_S)
+            _cache_put(raw_cache_key, raw_payload, _TENCENT_ADJ_TTL_S)
         raw_node = ((raw_payload or {}).get("data") or {}).get(sym)
         raw_rows = (raw_node or {}).get("day") if isinstance(raw_node, dict) else None
         if not isinstance(raw_rows, list) or not raw_rows:
@@ -996,7 +1002,7 @@ def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
     }
-    _cache_put(url, result, _TENCENT_ADJ_TTL_S)
+    _cache_put(cache_key, result, _TENCENT_ADJ_TTL_S)
     return result
 
 
