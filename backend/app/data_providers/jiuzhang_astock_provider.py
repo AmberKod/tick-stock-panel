@@ -51,6 +51,10 @@ SOURCE_CNINFO = "live-cninfo"
 #: 两个标记都已在 source_gate 白名单内。
 SOURCE_SINA = "sina"
 SOURCE_AKSHARE = "akshare"
+#: 腾讯财经实时行情(qt.gtimg.cn)。用它补齐东财 push2(被墙)拿不到的字段:
+#: 成交额 / 换手率 / 振幅 / PE(TTM) / PB / 总市值 / 流通市值 / 涨停跌停。
+#: 九章个股页的行情条也走这个源。标记已在 source_gate 白名单内。
+SOURCE_TENCENT = "live-tencent"
 
 #: 东财 datacenter 统一入口。与 push2.eastmoney.com 是不同域名(后者被墙)。
 _DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
@@ -69,6 +73,11 @@ _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TSP-Research"
 #: 新浪资金流(东财 push2/push2his 在我方网络被墙, 见 fund_flow 注释)。
 _SINA_FUNDFLOW_URL = ("https://vip.stock.finance.sina.com.cn/quotes_service/"
                       "api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs")
+
+#: 腾讯实时行情。返回体是 GBK 编码的 `v_sz300308="...";`, 按 `~` 切字段。
+_TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+#: 盘中行情短缓存(秒)。个股页每次渲染都打一次会明显拖慢首屏。
+_TENCENT_QUOTE_TTL_S = 10.0
 
 #: 「机构专用」席位的营业部代码。实测 002317 买入席位中三条机构席位均为 "0"。
 _INSTITUTION_DEPT_CODE = "0"
@@ -140,6 +149,18 @@ def _request_json(url: str, data: bytes | None = None,
     req = urllib.request.Request(url, data=data, headers=hdr)
     with opener.open(req, timeout=timeout or _timeout()) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _request_text(url: str, encoding: str = "utf-8",
+                  headers: dict[str, str] | None = None,
+                  timeout: float | None = None) -> str:
+    """GET 一个非 JSON 的文本接口(腾讯行情是 GBK)。异常直接上抛。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    hdr = {"User-Agent": _UA}
+    hdr.update(headers or {})
+    req = urllib.request.Request(url, headers=hdr)
+    with opener.open(req, timeout=timeout or _timeout()) as resp:
+        return resp.read().decode(encoding, errors="replace")
 
 
 def _datacenter(report_name: str, filter_str: str = "", page_size: int = 50,
@@ -609,6 +630,98 @@ def financials(code: str, periods: int = 8) -> dict:
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
     }
+
+
+def _tx_symbol(code: str) -> str:
+    """A股 6 位代码 → 腾讯符号(sz300308 / sh600000 / bj830799)。
+
+    沪深北规则: 6/9 开头与 5 开头(沪市基金)归 sh, 4/8 开头(北交所)归 bj, 其余归 sz。
+    """
+    c = _norm_code(code)
+    if c[0] in ("4", "8"):
+        return "bj" + c
+    if c[0] in ("6", "9") or c.startswith("5"):
+        return "sh" + c
+    return "sz" + c
+
+
+def realtime_quote(code: str) -> dict:
+    """A股实时行情(腾讯) —— 补齐行情条被东财 push2 卡住的那一半字段。
+
+    九章的行情条显示 今开/昨收/最高/最低/成交量/成交额/换手/PE/PB/总市值,
+    其中后五项它靠腾讯拿。我方东财 push2 被墙, 但腾讯直连可达, 所以同样的
+    真数据我方也拿得到 —— 不需要为了"对齐"而显示假数字。
+
+    ⚠️ 字段下标口径(实测 sz300308, 88 个字段):
+        1 名称 / 3 现价 / 4 昨收 / 5 今开 / 6 成交量(手) / 30 行情时间 /
+        31 涨跌额 / 32 涨跌幅% / 33 最高 / 34 最低 / 37 成交额(万) /
+        38 换手率% / 39 PE(TTM) / 43 振幅% / 44 流通市值(亿) / 45 总市值(亿) /
+        46 PB / 47 涨停价 / 48 跌停价
+    🔴 **44 是流通市值、45 是总市值** —— 九章 `tx_quote()` 把这两个写反了
+       (它 p[44]→total_cap、p[45]→float_cap), 导致个股页"总市值"显示的是流通市值。
+       这里按实测口径修过来, 并用测试锁死。
+
+    单位: 金额类返回**元**(前端自行换算), 比例类返回百分数。
+    """
+    code = _norm_code(code)
+    sym = _tx_symbol(code)
+
+    url = _TENCENT_QUOTE_URL + sym
+    cached = _cache_get(url)
+    if isinstance(cached, dict):
+        return cached
+
+    raw = _request_text(url, encoding="gbk")
+
+    m = re.search(rf'v_{re.escape(sym)}="([^"]*)"', raw)
+    if not m:
+        raise ValueError(f"腾讯未返回行情: {sym}")
+    p = m.group(1).split("~")
+    if len(p) < 47:
+        raise ValueError(f"腾讯行情字段不足({len(p)}): {sym}")
+
+    def at(i: int) -> str | None:
+        v = p[i].strip() if i < len(p) else ""
+        return v or None
+
+    price = _num(at(3))
+    if price is None:
+        raise ValueError(f"腾讯行情无价格: {sym}")
+
+    # 金额单位: 37 是万元, 44/45 是亿元 —— 统一折算成元
+    amount = _num(at(37))
+    float_cap = _num(at(44))
+    total_cap = _num(at(45))
+
+    payload = {
+        "code": code,
+        "symbol": sym,
+        "name": at(1),
+        "price": price,
+        "prev_close": _num(at(4)),
+        "open": _num(at(5)),
+        "high": _num(at(33)),
+        "low": _num(at(34)),
+        "change": _num(at(31)),
+        "change_pct": _num(at(32)),
+        # 6 是手 → 股
+        "volume": None if _num(at(6)) is None else round((_num(at(6)) or 0) * 100, 0),
+        "amount": None if amount is None else round(amount * _WAN, 2),
+        "turnover_pct": _num(at(38)),
+        "amplitude_pct": _num(at(43)),
+        "pe_ttm": _num(at(39)),
+        "pb": _num(at(46)),
+        "float_cap": None if float_cap is None else round(float_cap * 1e8, 2),
+        "total_cap": None if total_cap is None else round(total_cap * 1e8, 2),
+        "limit_up": _num(at(47)),
+        "limit_down": _num(at(48)),
+        "quote_time": at(30),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    result = {"source": SOURCE_TENCENT, "data": payload}
+    _cache_put(url, result, _TENCENT_QUOTE_TTL_S)
+    return result
 
 
 def warmup() -> None:

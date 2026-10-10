@@ -606,3 +606,116 @@ def test_api_financials_ok(client, monkeypatch):
 def test_api_financials_bad_periods(client):
     body = client.get("/api/astock/financials/300308?periods=99").json()
     assert body["available"] is False and "bad_periods" in body["reason"]
+
+
+# ---------------------------------------------------------------- 6. 实时行情(腾讯)
+
+# 实测 sz300308 中际旭创 2026-10-09 收盘的原始字段(GBK 解码后, 按 ~ 切分)。
+# 顺序与 provider 注释里的下标口径一一对应。
+_TX_ROW = (
+    "51~中际旭创~300308~775.29~783.00~775.64~279337~139069~140268~775.29~65~775.28~9~"
+    "775.27~1~775.25~2~775.24~2~775.30~10~775.49~1~775.50~11~775.58~1~775.60~9~~"
+    "20261009161454~-7.71~-0.98~780.00~730.00~775.29/279337/21091586583~279337~2109159~"
+    "2.52~44.65~~780.00~730.00~6.39~8605.23~9132.22~22.91~939.60~626.40~1.30~47~755.06~"
+    "33.45~84.58~~~2.30~2109158.6583~387.6450~50~ A A~GP-A-CYB~27.31~-13.46~0.17~51.31~"
+    "32.01~1416.88~336.00~-13.47~-4.64~-35.12~1109937003~1177909641~42.34~25.33~"
+    "1109937003~~~95.09~0.27~~CNY~0~~775.20~108~"
+)
+
+
+def _patch_tencent(monkeypatch, body=None):
+    sent: dict[str, object] = {}
+
+    def fake(url, encoding="utf-8", headers=None, timeout=None):
+        sent["url"] = url
+        sent["encoding"] = encoding
+        # 回包里的 key 必须与请求符号一致, 否则 provider 的正则匹配不到
+        sym = url.rsplit("=", 1)[-1]
+        return f'v_{sym}="{body if body is not None else _TX_ROW}";'
+
+    monkeypatch.setattr(prov, "_request_text", fake)
+    return sent
+
+
+def test_quote_uses_tencent_and_gbk(monkeypatch):
+    """走腾讯(东财 push2 被墙); 腾讯返回 GBK, 解码错了中文名会乱码。"""
+    sent = _patch_tencent(monkeypatch)
+    prov.realtime_quote("300308")
+    assert "qt.gtimg.cn" in sent["url"], sent["url"]
+    assert sent["encoding"] == "gbk"
+
+
+def test_quote_market_prefix(monkeypatch):
+    """6/9/5 开头沪市, 4/8 北交所, 其余深市。"""
+    sent = _patch_tencent(monkeypatch)
+    prov.realtime_quote("600519")
+    assert sent["url"].endswith("=sh600519"), sent["url"]
+
+
+def test_quote_fields_and_units(monkeypatch):
+    """金额统一折成元; 比例是百分数; 成交量手→股。"""
+    _patch_tencent(monkeypatch)
+    d = prov.realtime_quote("300308")["data"]
+
+    assert d["name"] == "中际旭创"
+    assert d["price"] == pytest.approx(775.29)
+    assert d["prev_close"] == pytest.approx(783.00)
+    assert d["change"] == pytest.approx(-7.71)
+    assert d["change_pct"] == pytest.approx(-0.98)
+    # 37 是万元 → 元
+    assert d["amount"] == pytest.approx(21091590000.0, rel=1e-3)
+    assert d["turnover_pct"] == pytest.approx(2.52)
+    assert d["amplitude_pct"] == pytest.approx(6.39)
+    assert d["pe_ttm"] == pytest.approx(44.65)
+    assert d["pb"] == pytest.approx(22.91)
+    # 6 是手 → 股
+    assert d["volume"] == pytest.approx(27933700)
+    assert d["limit_up"] == pytest.approx(939.60)
+    assert d["limit_down"] == pytest.approx(626.40)
+
+
+def test_quote_cap_is_not_swapped(monkeypatch):
+    """🔴 九章 tx_quote 把 44/45 写反了: 44=流通市值, 45=总市值。
+
+    总市值必须 >= 流通市值。若照抄参考实现(total=p[44], float=p[45])会得到
+    总市值 8605 亿 < 流通市值 9132 亿 —— 一眼假。这里锁死正确口径。
+    """
+    _patch_tencent(monkeypatch)
+    d = prov.realtime_quote("300308")["data"]
+
+    # 44=8605.23亿(流通) 45=9132.22亿(总)
+    assert d["float_cap"] == pytest.approx(860523000000.0, rel=1e-3)
+    assert d["total_cap"] == pytest.approx(913222000000.0, rel=1e-3)
+    assert d["total_cap"] > d["float_cap"], "总市值/流通市值写反了(照抄了九章的 bug)"
+    # 显式排除被写反的取值
+    assert d["total_cap"] != pytest.approx(860523000000.0, rel=1e-3)
+
+
+def test_quote_source_is_real(monkeypatch):
+    from app.services.source_gate import is_real
+    _patch_tencent(monkeypatch)
+    payload = prov.realtime_quote("300308")
+    assert payload["source"] == "live-tencent"
+    assert is_real(payload) is True, "live-tencent 未登记进 source_gate 白名单"
+
+
+def test_quote_missing_payload_raises(monkeypatch):
+    """腾讯没返回该符号 / 字段不足 → 上抛, 绝不返回空壳。"""
+    _patch_tencent(monkeypatch, body="")
+    with pytest.raises(ValueError):
+        prov.realtime_quote("300308")
+    _patch_tencent(monkeypatch, body="~".join(["x"] * 10))
+    with pytest.raises(ValueError):
+        prov.realtime_quote("300308")
+
+
+def test_api_quote_bad_code(client):
+    body = client.get("/api/astock/quote/AAOI").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_quote_ok(client, monkeypatch):
+    _patch_tencent(monkeypatch)
+    body = client.get("/api/astock/quote/300308").json()
+    assert body["available"] is True and body["source"] == "live-tencent"
+    assert body["data"]["name"] == "中际旭创"

@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, Loader2, Maximize2, Minus, Newspaper, Plus, RotateCcw } from 'lucide-react'
 
-import { api } from '@/lib/api'
+import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { StockDailyKChart, type StockDailyKChartResult } from '@/components/StockDailyKChart'
@@ -37,6 +37,36 @@ const PERIODS = [
   { label: '3年', months: 36 },
 ] as const
 
+/** 实时行情契约(与后端 app/api/astock_deep.py 的 realtime_quote 对齐)。 */
+interface AstockQuoteResp {
+  available: boolean
+  source: string
+  reason?: string
+  data?: {
+    code: string
+    name: string | null
+    price: number | null
+    prev_close: number | null
+    open: number | null
+    high: number | null
+    low: number | null
+    change: number | null
+    change_pct: number | null
+    volume: number | null      // 股
+    amount: number | null      // 元
+    turnover_pct: number | null
+    amplitude_pct: number | null
+    pe_ttm: number | null
+    pb: number | null
+    float_cap: number | null   // 元(流通市值)
+    total_cap: number | null   // 元(总市值)
+    limit_up: number | null
+    limit_down: number | null
+    quote_time: string | null
+    updated_at: string
+  }
+}
+
 type DeepTab = 'fundflow' | 'dragon' | 'research' | 'announcements' | 'financials'
 
 const DEEP_TABS: { key: DeepTab; label: string }[] = [
@@ -63,34 +93,73 @@ function fmtBig(v: number | null | undefined, digits = 2): string {
   return v.toFixed(digits)
 }
 
-/** 头部一行行情: 项数有限, 只放日K真实有的字段(无 PE/PB/市值/换手源 → 不显示)。 */
-function QuoteStrip({ kline }: { kline: StockDailyKChartResult | null }) {
+/**
+ * 头部一行行情 —— 对齐九章行情条(今开/昨收/最高/最低/成交量/成交额/换手/PE/PB/总市值)
+ * 并多给两项(振幅/流通市值/涨跌额)。
+ *
+ * 数据优先级: 腾讯实时行情 > 日K末行。实时源拿不到时**留空而不是编造** ——
+ * 九章那些 PE/PB/市值在真源失败时会退化成 random 兜底(见它 server.py demo_quote),
+ * 我们不这么做。
+ *
+ * 🔴 九章 tx_quote 把腾讯 44/45 字段写反, 它的"总市值"实际是流通市值。
+ * 后端已按正确口径返回(44=流通 / 45=总), 前端照用即可。
+ */
+function QuoteStrip({ kline, quote }: {
+  kline: StockDailyKChartResult | null
+  quote?: AstockQuoteResp
+}) {
   const rows = kline?.rawRows ?? []
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
-  if (!last) return null
+  const q = quote?.available ? quote.data : undefined
+  if (!last && !q) return null
 
-  const prevClose = prev?.close ?? NaN
-  const changeAmt = last.close - prevClose
-  const amplitude = prevClose ? ((last.high - last.low) / prevClose) * 100 : NaN
+  const kPrevClose = prev?.close ?? NaN
+  const kChangeAmt = last ? last.close - kPrevClose : NaN
+  const kAmplitude = kPrevClose ? ((last!.high - last!.low) / kPrevClose) * 100 : NaN
+
+  const num = (v: number | null | undefined, d = 2) =>
+    v == null || Number.isNaN(v) ? '—' : v.toFixed(d)
 
   const items: [string, string][] = [
-    ['今开', last.open?.toFixed(2) ?? '—'],
-    ['昨收', Number.isFinite(prevClose) ? prevClose.toFixed(2) : '—'],
-    ['最高', last.high?.toFixed(2) ?? '—'],
-    ['最低', last.low?.toFixed(2) ?? '—'],
-    ['振幅', Number.isFinite(amplitude) ? `${amplitude.toFixed(2)}%` : '—'],
-    ['成交量', fmtBig(last.volume, 0)],
-    ['涨跌额', Number.isFinite(changeAmt) ? `${changeAmt > 0 ? '+' : ''}${changeAmt.toFixed(2)}` : '—'],
+    ['今开', num(q?.open ?? last?.open)],
+    ['昨收', num(q?.prev_close ?? (Number.isFinite(kPrevClose) ? kPrevClose : null))],
+    ['最高', num(q?.high ?? last?.high)],
+    ['最低', num(q?.low ?? last?.low)],
+    ['振幅', q?.amplitude_pct != null ? `${num(q.amplitude_pct)}%`
+      : Number.isFinite(kAmplitude) ? `${kAmplitude.toFixed(2)}%` : '—'],
+    ['成交量', q?.volume != null ? fmtBig(q.volume, 0) : last ? fmtBig(last.volume, 0) : '—'],
+    ['成交额', q?.amount != null ? fmtBig(q.amount) : '—'],
+    ['换手', q?.turnover_pct != null ? `${num(q.turnover_pct)}%` : '—'],
+    ['PE(TTM)', num(q?.pe_ttm)],
+    ['PB', num(q?.pb)],
+    ['总市值', q?.total_cap != null ? fmtBig(q.total_cap) : '—'],
+    ['流通市值', q?.float_cap != null ? fmtBig(q.float_cap) : '—'],
+    ['涨跌额', q?.change != null
+      ? `${q.change > 0 ? '+' : ''}${num(q.change)}`
+      : Number.isFinite(kChangeAmt) ? `${kChangeAmt > 0 ? '+' : ''}${kChangeAmt.toFixed(2)}` : '—'],
   ]
 
   return (
-    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 rounded border border-border bg-surface px-4 py-2 text-xs">
-      {items.map(([k, v]) => (
-        <span key={k} className="text-fg-muted">
-          {k} <b className="font-mono text-fg">{v}</b>
-        </span>
-      ))}
+    <div className="rounded border border-border bg-surface px-4 py-2">
+      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-xs">
+        {items.map(([k, v]) => (
+          <span key={k} className="text-fg-muted">
+            {k} <b className="font-mono text-fg">{v}</b>
+          </span>
+        ))}
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-fg-muted">
+        {q?.limit_up != null && q?.limit_down != null && (
+          <span>涨停 <b className="font-mono text-fg">{num(q.limit_up)}</b> · 跌停{' '}
+            <b className="font-mono text-fg">{num(q.limit_down)}</b></span>
+        )}
+        {quote?.available ? (
+          <span>行情源 {quote.source} · {q?.quote_time ? `快照 ${q.quote_time.slice(0, 8)} ${q.quote_time.slice(8, 10)}:${q.quote_time.slice(10, 12)}` : q?.updated_at}</span>
+        ) : quote?.reason ? (
+          <span className="text-amber-500">实时行情不可用（{quote.reason}）— 上方仅日K末行数据</span>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -152,11 +221,23 @@ export function StockDetail() {
 
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
 
+  // 实时行情(腾讯) —— 补齐日K里没有的 成交额/换手/PE/PB/市值。10s 短缓存。
+  const quoteQuery = useQuery({
+    queryKey: ['astock', 'quote', symbol],
+    queryFn: () => request<AstockQuoteResp>(`/api/astock/quote/${encodeURIComponent(symbol)}`),
+    staleTime: 10_000,
+    retry: false,
+  })
+  const quote = quoteQuery.data
+  const rt = quote?.available ? quote.data : undefined
+
   const rows = kline?.rawRows ?? []
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
-  const changePct = last?.change_pct ?? null
-  const changeAmt = last && prev ? last.close - prev.close : null
+  // 头部价格优先用实时行情(盘中会跳动), 拿不到才退回日K末行
+  const headPrice = rt?.price ?? last?.close ?? null
+  const changePct = rt?.change_pct ?? last?.change_pct ?? null
+  const changeAmt = rt?.change ?? (last && prev ? last.close - prev.close : null)
 
   if (!symbol) {
     return (
@@ -173,12 +254,12 @@ export function StockDetail() {
         <Link to="/" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg">
           <ArrowLeft className="h-3.5 w-3.5" /> 返回
         </Link>
-        <h1 className="text-xl font-semibold text-fg">{kline?.name || symbol}</h1>
+        <h1 className="text-xl font-semibold text-fg">{rt?.name || kline?.name || symbol}</h1>
         <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-xs text-fg-secondary">{symbol}</span>
-        {last && (
+        {headPrice != null && (
           <>
             <span className={cn('text-2xl font-bold tabular-nums', priceColorClass(changePct))}>
-              {last.close?.toFixed(2)}
+              {headPrice.toFixed(2)}
             </span>
             <span className={cn('text-sm tabular-nums', priceColorClass(changePct))}>
               {changeAmt != null ? `${changeAmt > 0 ? '+' : ''}${changeAmt.toFixed(2)}` : ''}
@@ -193,7 +274,7 @@ export function StockDetail() {
       </div>
 
       {/* ── 行情条 ── */}
-      <QuoteStrip kline={kline} />
+      <QuoteStrip kline={kline} quote={quote} />
 
       {/* ── K 线 + 工具栏 ── */}
       <div className="rounded-lg border border-border bg-surface p-3 space-y-2">

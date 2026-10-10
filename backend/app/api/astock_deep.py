@@ -5,6 +5,7 @@
 - GET /api/astock/announcements/{code}: 个股公告(巨潮 cninfo 全文检索)
 - GET /api/astock/fundflow/{code}: 资金流向(新浪; 东财 push2/push2his 被墙)
 - GET /api/astock/financials/{code}: 财务摘要(akshare 东财财务指标, 7 组 80 指标)
+- GET /api/astock/quote/{code}: 实时行情(腾讯, 补齐成交额/换手/PE/PB/市值)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
 失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
@@ -26,10 +27,12 @@ from app.data_providers.jiuzhang_astock_provider import (
     SOURCE_AKSHARE,
     SOURCE_CNINFO,
     SOURCE_SINA,
+    SOURCE_TENCENT,
     announcements,
     dragon_tiger,
     financials,
     fund_flow,
+    realtime_quote,
     research_reports,
 )
 from app.services.source_gate import is_real
@@ -132,6 +135,24 @@ def get_fund_flow(code: str, days: int = 20) -> dict:
         return {"available": False, "reason": f"bad_days: {days} (1..120)", "source": SOURCE_SINA}
     return _respond(norm, lambda: fund_flow(norm, days=days),
                     required_key="rows", source=SOURCE_SINA)
+
+
+@router.get("/quote/{code}")
+def get_quote(code: str) -> dict:
+    """A股实时行情(腾讯 qt.gtimg.cn)。
+
+    补齐行情条上东财 push2(被墙)拿不到的那一半: 成交额 / 换手率 / 振幅 /
+    PE(TTM) / PB / 总市值 / 流通市值 / 涨停跌停。全部真源, 与九章同源。
+
+    🔴 九章 ``tx_quote()`` 把腾讯 44/45 两个字段写反了(44 实为流通市值、
+    45 实为总市值), 它的"总市值"显示的是流通市值。这里按实测口径修正。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: realtime_quote(norm),
+                    required_key="price", source=SOURCE_TENCENT)
 
 
 @router.get("/financials/{code}")
