@@ -115,6 +115,8 @@ export const QK = {
   astockMinute:         (code: string) => ['astock-minute', code] as const,
   /** A股分钟K(腾讯 mkline) —— 1/5/15/30/60 分, 与本地 kline-minute 不是一个源。 */
   astockMkline:         (code: string, period: string) => ['astock-mkline', code, period] as const,
+  /** A股日K复权系数(腾讯) —— 按 mode 分 key, 切档位会重新取。 */
+  astockAdjRatio:       (code: string, mode: string) => ['astock-adjratio', code, mode] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

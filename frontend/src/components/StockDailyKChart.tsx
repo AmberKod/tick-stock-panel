@@ -4,6 +4,7 @@ import { api, request, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { aggregateKline, computeIndicators, type KPeriod } from '@/lib/klinePeriod'
+import { applyAdjust, isAdjustableCode, type AdjustMode, type AdjRatioResp } from '@/lib/adjust'
 import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
@@ -109,6 +110,10 @@ interface Props {
   extColumns?: string
   /** 主图画法: 蜡烛 / 空心蜡烛 / 美国线 / 收盘线 */
   mainType?: MainChartType
+  /** 复权档。仅对**日K及由其聚合出的周/月/年**有效; 分钟K/分时无复权概念。 */
+  adjust?: AdjustMode
+  /** 复权系数取不到时的说明回调(让页面能提示"该股无除权记录")。 */
+  onAdjustInfo?: (info: { mode: AdjustMode; hasAdjust: boolean; available: boolean }) => void
 }
 
 function isValidRow(r: any): boolean {
@@ -194,6 +199,8 @@ export function StockDailyKChart({
   onDataChange,
   extColumns,
   mainType = 'candle',
+  adjust = 'qfq',
+  onAdjustInfo,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -222,7 +229,25 @@ export function StockDailyKChart({
     placeholderData: (prev) => prev,
   })
 
-  const dayRows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  // 复权系数(腾讯 fqkline)。只在**日K链路**要 —— 分钟K/分时没有复权概念。
+  // 不复权档不打接口: 本地 enriched 本来就是不复权价(后端 adj_factor 为空), 乘 1 无意义。
+  const isAdjustable = !mklinePeriod && adjust !== 'none'
+  const adjRatio = useQuery({
+    queryKey: QK.astockAdjRatio(symbol, isAdjustable ? adjust : 'none'),
+    queryFn: () => request<AdjRatioResp>(
+      `/api/astock/adjratio/${encodeURIComponent(symbol)}?mode=${adjust}&limit=640`),
+    enabled: !!symbol && isAdjustable && isAdjustableCode(symbol),
+    staleTime: 600_000,   // 日K复权一天内不会变(除权日除外)
+    placeholderData: (prev) => prev,
+  })
+
+  const dayRowsRaw = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  // 复权后的日K: 系数乘到价格列, 再**在新序列上重算指标**(沿用旧指标值 = 失真)
+  const dayRows = useMemo(() => {
+    const ratios = adjRatio.data?.data?.ratios
+    if (!isAdjustable || !ratios || ratios.length === 0) return dayRowsRaw
+    return computeIndicators(applyAdjust(dayRowsRaw, ratios))
+  }, [dayRowsRaw, adjRatio.data?.data?.ratios, isAdjustable])
   // 分钟K: 后端只给 OHLCV, 指标必须在这串分钟 bar 上重算(不能沿用日K的指标值)。
   const mkRows = useMemo(
     () => mklinePeriod ? computeIndicators(toOHLCMinute(mkline.data?.data?.rows ?? [])) : [],
@@ -263,6 +288,20 @@ export function StockDailyKChart({
   useEffect(() => {
     onDataChange?.({ rows, rawRows: kline.data?.rows ?? [], stockInfo, name: kline.data?.name })
   }, [kline.data?.name, kline.data?.rows, onDataChange, rows, stockInfo])
+
+  // 把"这一档到底有没有真的复权过"告诉页面 —— 没除权事件时三档结果一致,
+  // 不说明的话用户会以为开关坏了。
+  useEffect(() => {
+    if (!isAdjustable) {
+      onAdjustInfo?.({ mode: adjust, hasAdjust: false, available: true })
+      return
+    }
+    onAdjustInfo?.({
+      mode: adjust,
+      hasAdjust: adjRatio.data?.data?.has_adjust === true,
+      available: adjRatio.data?.available !== false,
+    })
+  }, [adjRatio.data?.available, adjRatio.data?.data?.has_adjust, adjust, isAdjustable, onAdjustInfo])
 
   if (!symbol) return null
 

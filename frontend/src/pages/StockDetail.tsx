@@ -8,6 +8,7 @@ import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
+import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import {
   MAIN_CHART_TYPES,
   StockDailyKChart,
@@ -388,6 +389,23 @@ export function StockDetail() {
    * 主图画法(蜡烛/空心/美国线/收盘线)。画的是同一份 OHLC, 纯视觉编码差异。
    * 记本地 —— 这是长期口味偏好, 每次进页面都要重选很烦。
    */
+  /**
+   * 复权档。默认前复权(看长期趋势的标准口径)。
+   * ⚠️ 注意: 本地 enriched 存的是**不复权价**(TickFlow 除权因子返回 0 行,
+   * compute_enriched 的复权是空转), 所以"前复权/后复权"要乘腾讯给的系数才是真的。
+   */
+  const [adjust, setAdjust] = useState<AdjustMode>(() => {
+    const raw = localStorage.getItem('stockDetail:adjust')
+    const ok = ADJUST_MODES.some(t => t.value === raw)
+    return ok ? (raw as AdjustMode) : 'qfq'
+  })
+  const changeAdjust = useCallback((next: AdjustMode) => {
+    setAdjust(next)
+    try { localStorage.setItem('stockDetail:adjust', next) } catch { /* 忽略 */ }
+  }, [])
+  /** 当前档位是否真的发生过复权(没除权事件时三档一致, 需要说明一下)。 */
+  const [adjustInfo, setAdjustInfo] = useState<{ mode: AdjustMode; hasAdjust: boolean; available: boolean } | null>(null)
+
   const [mainType, setMainType] = useState<MainChartType>(() => {
     const raw = localStorage.getItem('stockDetail:mainType')
     const ok = MAIN_CHART_TYPES.some(t => t.value === raw)
@@ -629,6 +647,35 @@ export function StockDetail() {
             </>
           )}
 
+          {/* ── 复权 ──
+              只作用于日K(以及由日K聚合出的周/月/年)。分钟K与分时没有复权概念
+              (腾讯 mkline/分时端点不提供复权序列), 所以这两档下不渲染。 */}
+          {kPeriod !== 'minute' && !mkPeriod && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
+              <span className="text-fg-muted">复权</span>
+              <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
+                {ADJUST_MODES.map(t => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => changeAdjust(t.value)}
+                    title={t.hint}
+                    className={cn('rounded px-2 py-0.5 transition-colors',
+                      adjust === t.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              {adjustInfo && !adjustInfo.hasAdjust && adjustInfo.available && adjust !== 'none' && (
+                <span className="text-[11px] text-fg-muted" title="该股在腾讯返回的区间内没有除权事件, 所以三档数值一致 —— 不是开关坏了">
+                  (无除权记录)
+                </span>
+              )}
+            </>
+          )}
+
           {/* ── 主图画法 ──
               四种画法共用同一份 OHLC, 换的只是视觉编码(实心/空心/美国线/收盘线)。
               分时档是独立组件(固定画法), 所以这里只在 K 线档出现。 */}
@@ -726,6 +773,8 @@ export function StockDetail() {
             period={kPeriod}
             mklinePeriod={mkPeriod ?? undefined}
             mainType={mainType}
+            adjust={adjust}
+            onAdjustInfo={setAdjustInfo}
             markers={signalMarkers}
             priceLines={priceLines}
             onPriceDoubleClick={(price) => persistPriceLines([

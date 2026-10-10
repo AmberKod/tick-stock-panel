@@ -8,6 +8,8 @@
 - GET /api/astock/quote/{code}: 实时行情(腾讯, 补齐成交额/换手/PE/PB/市值)
 - GET /api/astock/minute/{code}: 当日分时(腾讯; 分时线/均价线/分时量)
 - GET /api/astock/mkline/{code}: 分钟K(腾讯; 1/5/15/30/60 分)
+- GET /api/astock/adjratio/{code}: 日K复权系数(腾讯; qfq/hfq/none) —— 只给系数,
+  由调用方乘到自己的价格列上(复权是价格缩放, 不是换数据源)
 - GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
@@ -32,6 +34,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     SOURCE_EM_F10,
     SOURCE_SINA,
     SOURCE_TENCENT,
+    adjust_ratios,
     announcements,
     dragon_tiger,
     financials,
@@ -204,6 +207,31 @@ def get_minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: minute_kline(norm, period=period, limit=limit),
                     required_key="rows", source=SOURCE_TENCENT)
+
+
+@router.get("/adjratio/{code}")
+def get_adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
+    """A股日K复权系数(腾讯 fqkline): qfq 前复权 / hfq 后复权 / none 不复权。
+
+    返回的是**系数**而不是整串复权K —— 本地 enriched 里还挂着指标/涨跌停信号/
+    成交额/换手/ext 列, 整串换掉会一起丢。调用方把 ratio 乘到自己那串 K 的价格列上即可。
+
+    ⚠️ 背景: 本地 ``adj_factor`` 表是空的(TickFlow ex_factors 对本账号返回 0 行),
+       所以 enriched 里存的实际是**不复权价** —— 想看前复权必须从这里拿系数。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TENCENT}
+    mode = (mode or "").strip().lower()
+    if mode not in ("qfq", "hfq", "none"):
+        return {"available": False, "reason": f"bad_mode: {mode!r} (qfq/hfq/none)",
+                "source": SOURCE_TENCENT}
+    if limit < 60 or limit > 640:
+        return {"available": False, "reason": f"bad_limit: {limit} (60..640)",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: adjust_ratios(norm, mode=mode, limit=limit),
+                    required_key="ratios", source=SOURCE_TENCENT)
 
 
 @router.get("/sectors/{code}")

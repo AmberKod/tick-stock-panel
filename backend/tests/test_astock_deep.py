@@ -1137,3 +1137,117 @@ def test_sectors_core_boards_first(monkeypatch):
     _patch_f10(monkeypatch, boards=shuffled)
     d = prov.stock_sectors("300308")["data"]
     assert [b["name"] for b in d["boards"]] == ["通信技术", "算力概念", "高市净率"]
+
+
+# ---------------------------------------------------------------- 6.7 日K复权系数(腾讯 fqkline)
+
+# 实测 sh600519: 2026-06-26 除权。之前 raw=1207.68 / qfq=1179.656,
+# 除权日之后两者相等(最新价不动)。行 = [日期, 开, 收, 高, 低, 量]。
+_ADJ_RAW = [
+    ["2026-06-24", "1222.65", "1207.68", "1241.87", "1207.51", "20000.00"],
+    ["2026-06-25", "1205.00", "1199.00", "1210.00", "1190.00", "18000.00"],
+    ["2026-06-26", "1168.63", "1168.63", "1180.00", "1160.00", "25000.00"],
+]
+_ADJ_QFQ = [
+    ["2026-06-24", "1194.00", "1179.656", "1212.75", "1179.49", "20000.00"],
+    ["2026-06-25", "1177.87", "1171.99", "1182.79", "1163.20", "18000.00"],
+    ["2026-06-26", "1168.63", "1168.63", "1180.00", "1160.00", "25000.00"],
+]
+_ADJ_HFQ = [
+    ["2026-06-24", "9000.00", "8890.00", "9140.00", "8888.00", "20000.00"],
+    ["2026-06-25", "8872.00", "8826.00", "8908.00", "8760.00", "18000.00"],
+    ["2026-06-26", "8600.00", "8600.00", "8684.00", "8536.00", "25000.00"],
+]
+_ADJ_QT = ["1", "贵州茅台", "600519", "1263.00", "1255.42", "1255.42", "35111", "",
+           "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+           "", "", "", "", "", "", "", "", "", "", "", "4414"]
+
+
+def _patch_adj(monkeypatch, qfq=None, hfq=None, raw=None):
+    """按 url 里的 param 返回对应档位的序列 —— 复权档要打两次(自己 + 不复权基准)。"""
+    sent: dict[str, object] = {}
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        sent.setdefault("urls", []).append(url)
+        param = url.split("param=")[-1]
+        parts = param.split("%2C")
+        sym = parts[0]
+        fq = parts[5] if len(parts) > 5 else ""
+        payload = {"qt": {sym: _ADJ_QT}}
+        if fq == "qfq":
+            payload["qfqday"] = qfq if qfq is not None else _ADJ_QFQ
+        elif fq == "hfq":
+            payload["hfqday"] = hfq if hfq is not None else _ADJ_HFQ
+        else:
+            payload["day"] = raw if raw is not None else _ADJ_RAW
+        # fqkline 响应里也带一份 day(腾讯实际如此), 但基准一律用 kline/kline 端点
+        return {"code": 0, "data": {sym: payload}}
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    prov._CACHE.clear()
+    return sent
+
+
+def test_adjratio_qfq_is_ratio_to_raw(monkeypatch):
+    """ratio = 复权收盘 / 不复权收盘; 最新一日两者相等 → ratio == 1。"""
+    sent = _patch_adj(monkeypatch)
+    d = prov.adjust_ratios("600519", mode="qfq")["data"]
+    r = {x["date"]: x["ratio"] for x in d["ratios"]}
+    assert r["2026-06-24"] == pytest.approx(1179.656 / 1207.68)
+    assert r["2026-06-26"] == pytest.approx(1.0)      # 除权日之后不动
+    assert d["has_adjust"] is True
+    # 复权档要额外取一次不复权序列做基准
+    assert sum("kline/kline" in u for u in sent["urls"]) == 1
+
+
+def test_adjratio_hfq_scales_up(monkeypatch):
+    """后复权比值 > 1(把历史价往上抬, 最早一日不动)。"""
+    _patch_adj(monkeypatch)
+    d = prov.adjust_ratios("600519", mode="hfq")["data"]
+    r = {x["date"]: x["ratio"] for x in d["ratios"]}
+    assert r["2026-06-24"] > 1.0
+    assert r["2026-06-24"] == pytest.approx(8890.00 / 1207.68)
+
+
+def test_adjratio_none_is_all_ones(monkeypatch):
+    """不复权档不打第二次请求, ratio 恒 1, has_adjust=False。"""
+    sent = _patch_adj(monkeypatch)
+    d = prov.adjust_ratios("600519", mode="none")["data"]
+    assert all(x["ratio"] == 1.0 for x in d["ratios"])
+    assert d["has_adjust"] is False
+    assert len(sent["urls"]) == 1
+
+
+def test_adjratio_no_ex_rights_has_adjust_false(monkeypatch):
+    """没有除权事件时三档结果一致 → has_adjust=False, 前端据此说明"不是开关坏了"。"""
+    same = [["2026-06-24", "10.00", "10.10", "10.20", "9.90", "100.00"]]
+    _patch_adj(monkeypatch, qfq=same, hfq=same, raw=same)
+    d = prov.adjust_ratios("600519", mode="qfq")["data"]
+    assert d["has_adjust"] is False
+
+
+def test_adjratio_bad_mode(monkeypatch):
+    _patch_adj(monkeypatch)
+    with pytest.raises(ValueError):
+        prov.adjust_ratios("600519", mode="bfq")
+
+
+def test_adjratio_only_overlapping_dates(monkeypatch):
+    """复权序列与基准序列只取交集日期 —— 缺一边就不给系数(不猜)。"""
+    partial = [["2026-06-25", "1177.87", "1171.99", "1182.79", "1163.20", "18000.00"]]
+    _patch_adj(monkeypatch, qfq=partial)
+    d = prov.adjust_ratios("600519", mode="qfq")["data"]
+    assert [x["date"] for x in d["ratios"]] == ["2026-06-25"]
+
+
+def test_api_adjratio_bad_mode(client):
+    body = client.get("/api/astock/adjratio/600519?mode=bfq").json()
+    assert body["available"] is False and "bad_mode" in body["reason"]
+
+
+def test_api_adjratio_ok(client, monkeypatch):
+    _patch_adj(monkeypatch)
+    body = client.get("/api/astock/adjratio/600519?mode=qfq").json()
+    assert body["available"] is True and body["source"] == "live-tencent"
+    assert body["data"]["name"] == "贵州茅台"
+    assert len(body["data"]["ratios"]) == 3

@@ -97,6 +97,17 @@ _TENCENT_MKLINE_TTL_S = 30.0
 #: 支持的分钟档位。腾讯不提供 120 分钟, 别让调用方乱传。
 _MKLINE_PERIODS = ("m1", "m5", "m15", "m30", "m60")
 
+#: 复权日K(腾讯 fqkline)。与 mkline 同域(ifzq), 分 qfq/hfq 两个分支;
+#: **不复权**走另一个端点 appstock/app/kline/kline, 它只认不带 fq 的 param。
+_TENCENT_FQKLINE_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
+_TENCENT_KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/kline"
+#: 复权档位。none = 不复权(原始成交价)。
+_ADJUST_MODES = ("qfq", "hfq", "none")
+#: 日K复权结果一天内不会变(除权日除外), 缓存 10 分钟足够。
+_TENCENT_ADJ_TTL_S = 600.0
+#: 腾讯 fqkline 单次最多能要多少根(实测 640 可行, 800 会被截断)。
+_ADJ_MAX_LIMIT = 640
+
 #: 「机构专用」席位的营业部代码。实测 002317 买入席位中三条机构席位均为 "0"。
 _INSTITUTION_DEPT_CODE = "0"
 
@@ -866,6 +877,126 @@ def minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
         },
     }
     _cache_put(url, result, _TENCENT_MKLINE_TTL_S)
+    return result
+
+
+def adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
+    """A股日K**复权系数**(腾讯 fqkline) —— 前复权 / 后复权 / 不复权三档的真源。
+
+    为什么是"系数"而不是直接返回复权后的整串 K:
+        本地 enriched 里除了 OHLC 还挂着指标/涨跌停信号/成交额/换手/ext 列, 整串换掉
+        会把这些一起丢掉。这里只给 ``ratio = 复权价 / 不复权价``, 调用方乘到自己那串
+        K 的价格列上 —— 复权是**价格缩放**, 不是换数据源。
+
+    ⚠️ 为什么必须自己算系数(而不是用本地除权因子):
+        本地 ``adj_factor`` 表是空的 —— TickFlow 的 ``ex_factors`` 对本账号返回 0 行
+        (实测 600519/600000/000001 全空), 所以 ``compute_enriched`` 的"前复权"实际是
+        空转, enriched 里存的是**不复权价**。继续拿它当前复权用就是错的。
+
+    ⚠️ 字段口径(实测 sh600519, 250 根):
+        行 = ``[日期(YYYY-MM-DD), 开, 收, 高, 低, 量]`` —— 与日K接口一致, **第 2 列开、
+        第 3 列收**。三个档位分别取响应里的 ``qfqday`` / ``hfqday`` / ``day`` 键。
+        实测 600519: 2026-06-26 除权, 之前 raw=1207.68 / qfq=1179.656 / hfq 更大,
+        除权日之后三者相等(最新价不动) —— 符合前/后复权定义。
+
+    ratio 精度: 保留 8 位小数。价格本身 2~3 位, 乘完再 round 到 2 位, 不会累积误差。
+    """
+    code = _norm_code(code)
+    sym = _tx_symbol(code)
+    mode = (mode or "qfq").strip().lower()
+    if mode not in _ADJUST_MODES:
+        raise ValueError(f"mode 必须是 {_ADJUST_MODES} 之一: {mode!r}")
+    limit = max(60, min(int(limit or 640), _ADJ_MAX_LIMIT))
+
+    if mode == "none":
+        # 不复权: ratio 恒为 1, 不需要打腾讯 —— 但为了拿到名称/覆盖区间仍取一次 day
+        url = _TENCENT_KLINE_URL + "?" + urllib.parse.urlencode({"param": f"{sym},day,,,{limit}"})
+        key = "day"
+    else:
+        url = _TENCENT_FQKLINE_URL + "?" + urllib.parse.urlencode(
+            {"param": f"{sym},day,,,{limit},{mode}"})
+        key = f"{mode}day"
+
+    cached = _cache_get(url)
+    if isinstance(cached, dict):
+        return cached
+
+    payload = _request_json(url)
+    node = ((payload or {}).get("data") or {}).get(sym)
+    rows = (node or {}).get(key) if isinstance(node, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"腾讯未返回日K({mode}): {sym}")
+
+    def _col(r: list, i: int) -> float | None:
+        return _num(r[i]) if isinstance(r, (list, tuple)) and len(r) > i else None
+
+    dates: list[str] = []
+    closes: list[float] = []
+    for r in rows:
+        d = str(r[0]).strip() if isinstance(r, (list, tuple)) and r else ""
+        c = _col(r, 2)  # 第 3 列 = 收盘
+        if not d or c is None or c <= 0:
+            continue
+        dates.append(d[:10])
+        closes.append(c)
+
+    if not dates:
+        raise ValueError(f"腾讯日K无法解析({mode}): {sym}")
+
+    # 不复权时 ratios 全 1; 其余档位再取一次原始序列做逐日比值
+    raw_closes = list(closes)
+    if mode != "none":
+        raw_url = _TENCENT_KLINE_URL + "?" + urllib.parse.urlencode(
+            {"param": f"{sym},day,,,{limit}"})
+        raw_payload = _cache_get(raw_url)
+        if not isinstance(raw_payload, dict):
+            raw_payload = _request_json(raw_url)
+            _cache_put(raw_url, raw_payload, _TENCENT_ADJ_TTL_S)
+        raw_node = ((raw_payload or {}).get("data") or {}).get(sym)
+        raw_rows = (raw_node or {}).get("day") if isinstance(raw_node, dict) else None
+        if not isinstance(raw_rows, list) or not raw_rows:
+            raise ValueError(f"腾讯未返回不复权日K(用于算复权系数): {sym}")
+        raw_map: dict[str, float] = {}
+        for r in raw_rows:
+            if not isinstance(r, (list, tuple)) or len(r) < 3:
+                continue
+            c = _col(r, 2)
+            if c is None or c <= 0:
+                continue
+            raw_map[str(r[0]).strip()[:10]] = c
+        if not raw_map:
+            raise ValueError(f"腾讯不复权日K无法解析: {sym}")
+        # 只在两边都有的日期上出系数; 缺一边就不给(宁可该日不缩放, 也不猜)
+        pairs = [(d, c, raw_map[d]) for d, c in zip(dates, closes, strict=False) if d in raw_map]
+        if not pairs:
+            raise ValueError(f"复权序列与不复权序列无重叠日期: {sym}")
+        dates = [p[0] for p in pairs]
+        closes = [p[1] for p in pairs]
+        raw_closes = [p[2] for p in pairs]
+
+    ratios = [
+        {"date": d, "ratio": round(c / rc, 8)}
+        for d, c, rc in zip(dates, closes, raw_closes, strict=True)
+    ]
+    # 是否真的发生过除权: 有任何一天 ratio 偏离 1 超过 1e-6 才算。
+    # 前端据此判断"三档结果一致", 免得用户以为开关坏了。
+    has_adjust = any(abs(r["ratio"] - 1.0) > 1e-6 for r in ratios)
+
+    qt = (node.get("qt") or {}).get(sym) if isinstance(node, dict) else None
+    result = {
+        "source": SOURCE_TENCENT,
+        "data": {
+            "code": code,
+            "symbol": sym,
+            "name": qt[1] if isinstance(qt, list) and len(qt) > 1 else None,
+            "mode": mode,
+            "ratios": ratios,
+            "has_adjust": has_adjust,
+            "coverage": {"from": dates[0], "to": dates[-1], "bars": len(dates)},
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(url, result, _TENCENT_ADJ_TTL_S)
     return result
 
 
