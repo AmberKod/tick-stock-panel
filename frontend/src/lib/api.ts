@@ -2422,6 +2422,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
+  klineCompare: (symbols: string[], days = 250) =>
+    request<{ data: Record<string, KlineRow[]>; names: Record<string, string> }>('/api/kline/compare', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, days }),
+    }),
   klineMinuteBatch: (symbols: string[], date?: string) =>
     request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
       method: 'POST',

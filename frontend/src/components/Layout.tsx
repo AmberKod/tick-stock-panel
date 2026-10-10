@@ -53,6 +53,7 @@ import {
   WifiOff,
   PanelLeftClose,
   PanelLeftOpen,
+  GitCompareArrows,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -88,6 +89,7 @@ export const STOCK_NAV = [
   { to: '/backtest',   label: '回测', icon: History },
   { to: '/mining',     label: '挖掘', icon: Pickaxe },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
+  { to: '/compare',           label: '多股对比', icon: GitCompareArrows },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
@@ -108,6 +110,7 @@ const NAV_GROUP_OF: Record<string, string> = {
   '/markets': '行情',
   '/watchlist': '行情',
   '/stock-analysis': '行情',
+  '/compare': '行情',
   '/indices': '行情',
   '/screener': '策略',
   '/backtest': '策略',

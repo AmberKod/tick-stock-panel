@@ -586,6 +586,77 @@ def get_daily_batch(request: Request, body: dict):
     return {"data": result}
 
 
+@router.post("/compare")
+def get_compare(request: Request, body: dict):
+    """多股对比取数: 批量返回多只标的的日K(OHLCV) + 名称。
+
+    与 `/daily-batch` 的分工: daily-batch 是给自选列表的迷你蜡烛用的, 上限 60 根;
+    对比看的是几个月到几年的相对走势, 这里放宽到 1000 根, 并顺带把名称一起返回
+    (前端要显示在图例里, 少一次往返)。
+
+    上限 8 只: 再多图例就糊了, 而且这是纯内存拼接, 标的数上去会拖慢首屏。
+    """
+    raw_symbols = body.get("symbols", []) or []
+    symbols = [str(s).strip() for s in raw_symbols if str(s).strip()][:8]
+    if not symbols:
+        return {"data": {}, "names": {}}
+    try:
+        days = int(body.get("days") or 250)
+    except (TypeError, ValueError):
+        days = 250
+    days = max(5, min(1000, days))
+
+    repo = request.app.state.repo
+    from datetime import timedelta
+
+    import polars as pl
+
+    end = cross_market_today()
+    start = end - timedelta(days=days * 2 + 15)  # 多取一些确保交易日够
+
+    cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
+
+    stock_symbols: list[str] = []
+    etf_symbols: list[str] = []
+    index_symbols: list[str] = []
+    for s in symbols:
+        t = repo.resolve_asset_type(s)
+        if t == "etf":
+            etf_symbols.append(s)
+        elif t == "index":
+            index_symbols.append(s)
+        else:
+            stock_symbols.append(s)
+
+    frames: list[pl.DataFrame] = []
+    if stock_symbols:
+        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
+        if not df_stock.is_empty():
+            frames.append(df_stock)
+    for sym in etf_symbols:
+        sub = repo.get_etf_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+    for sym in index_symbols:
+        sub = repo.get_index_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+
+    if not frames:
+        # 一个都取不到时也把名称带回去, 前端好提示"这些代码库里没有"
+        return {"data": {}, "names": repo.get_name_map(symbols)}
+
+    df = pl.concat(frames, how="diagonal_relaxed")
+
+    result: dict[str, list[dict]] = {}
+    for part in df.partition_by("symbol", maintain_order=True):
+        sub = part.sort("date").tail(days)
+        if not sub.is_empty():
+            result[sub["symbol"][0]] = sub.to_dicts()
+
+    return {"data": result, "names": repo.get_name_map(symbols)}
+
+
 @router.post("/minute-batch")
 def get_minute_batch(request: Request, body: dict):
     """批量获取多只股票某天的分钟K (分时图用)。

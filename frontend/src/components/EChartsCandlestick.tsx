@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
@@ -357,6 +357,31 @@ interface Props {
   volumeCompare?: VolumeCompareConfig
   /** 主图画法: 蜡烛 / 空心蜡烛 / 美国线 / 收盘线。默认 candle。 */
   mainType?: MainChartType
+  /**
+   * 成交量分布(Volume Profile)叠加层。传 null / 不传则不画。
+   * 画在主图**右侧的预留留白里**(不是压在蜡烛上), 与主图共用同一价格标尺。
+   */
+  volumeProfile?: VolumeProfileOverlay | null
+  /**
+   * 缩放/平移后回传当前可见区间(闭区间下标)。调用方据此重算成交量分布 ——
+   * 分布必须跟着可见区间走, 否则缩放后图上柱子还是全区间统计, 与眼睛看到的蜡烛对不上。
+   */
+  onVisibleRangeChange?: (from: number, to: number) => void
+}
+
+/**
+ * 成交量分布叠加层的数据结构。字段与 lib/volumeProfile 的计算结果同源,
+ * 这里重新声明一次只为避开"组件 ↔ lib"的循环 import。
+ */
+export interface VolumeProfileOverlay {
+  bins: { lo: number; hi: number; mid: number; volume: number; pct: number; inValueArea: boolean }[]
+  poc: number
+  vah: number
+  val: number
+  totalVolume: number
+  bars: number
+  from: string
+  to: string
 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/文字等主题相关色走 CT() 动态取
@@ -509,6 +534,56 @@ function buildSubInfoGraphics(
   return graphics
 }
 
+/**
+ * 可见区间内的价格极值(含叠加线与价格线), 并套用与主图一致的上下 3% 边距。
+ *
+ * 只在开成交量分布时用 —— 为了把主图 y 标尺钉成固定值, 好让右侧分布图
+ * (独立 grid, 标尺不会自动同步)与蜡烛严格对齐。
+ */
+function priceExtentFor(
+  data: OHLC[],
+  from: number,
+  to: number,
+  withMA: boolean,
+  withBOLL: boolean,
+  priceLines: ChartPriceLine[] | undefined,
+): { min: number; max: number } {
+  const lo0 = Math.max(0, Math.min(from, data.length - 1))
+  const hi0 = Math.max(lo0, Math.min(to, data.length - 1))
+  let min = Infinity
+  let max = -Infinity
+  const eat = (v: unknown) => {
+    const n = typeof v === 'number' ? v : Number(v)
+    if (Number.isFinite(n)) {
+      if (n < min) min = n
+      if (n > max) max = n
+    }
+  }
+  for (let i = lo0; i <= hi0; i++) {
+    const d = data[i]
+    eat(d.low)
+    eat(d.high)
+    if (withMA) {
+      eat(d.ma5)
+      eat(d.ma10)
+      eat(d.ma20)
+      eat(d.ma60)
+    }
+    if (withBOLL) {
+      eat(d.boll_upper)
+      eat(d.boll_lower)
+    }
+  }
+  for (const line of priceLines ?? []) eat(line.value)
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 1 }
+  if (max - min < 1e-9) {
+    const pad = Math.max(max * 0.001, 0.01)
+    return { min: min - pad, max: max + pad }
+  }
+  const pad = (max - min) * 0.03
+  return { min: min - pad, max: max + pad }
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -524,6 +599,9 @@ function buildOption(
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
   mainType: MainChartType,
+  volumeProfile: VolumeProfileOverlay | null,
+  visibleFrom: number,
+  visibleTo: number,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -597,6 +675,21 @@ function buildOption(
 
   const candleAvail = Math.max(containerHeight - topPad - candleBottomPad - subTotalH, 100)
 
+  // ===== 成交量分布(Volume Profile): 在主图右侧预留一条窄带 =====
+  // 不画在蜡烛上面(会挡住最后几根), 也不另起一个组件(那样价格标尺对不齐)。
+  const PROFILE_W = 92
+  const PROFILE_GAP = 10
+  const showProfile = !!volumeProfile && volumeProfile.bins.length > 0
+  const grid0Right = right + (showProfile ? PROFILE_W + PROFILE_GAP : 0)
+
+  // 开叠加层时主图 y 标尺必须钉死: 分布图在**另一个 grid**里, 两边各自自动缩放
+  // 会差几个像素 —— 表现就是"柱子和蜡烛对不上"。这里按可见区间自己算极值,
+  // 口径对齐 ECharts 的 scale:true + 上下 3% 边距, 且必须把 MA/BOLL/价格线算进去
+  // (只按 OHLC 算会把这些线裁掉)。
+  const pinnedY = showProfile
+    ? priceExtentFor(data, visibleFrom, visibleTo, hasMA, activeIndicators.includes('boll'), priceLines)
+    : null
+
   const grids: any[] = []
   const xAxes: any[] = []
   const yAxes: any[] = []
@@ -622,7 +715,7 @@ function buildOption(
     : undefined
 
   // ===== grid 0: K线主图 =====
-  grids.push({ left, right, top: topPad, height: candleAvail })
+  grids.push({ left, right: grid0Right, top: topPad, height: candleAvail })
   xAxes.push({
     type: 'category', data: dates, boundaryGap: true,
     axisLine: { lineStyle: { color: CT().border } },
@@ -632,8 +725,8 @@ function buildOption(
   })
   yAxes.push({
     scale: true,
-    min: axisMin,
-    max: axisMax,
+    min: pinnedY ? pinnedY.min : axisMin,
+    max: pinnedY ? pinnedY.max : axisMax,
     // 上下各留 3% 边距: 防止最高/最低点的蜡烛贴边, 涨停/炸板标签被遮挡
     boundaryGap: [0.03, 0.03],
     splitArea: { show: false },
@@ -843,6 +936,90 @@ function buildOption(
     curTop += INFO_BAR_H + def.height + SUB_GAP_PX
   })
 
+  // ===== 成交量分布叠加层(独立 grid, 贴在主图右侧预留带内) =====
+  // 用独立 grid 而不是挂在主图 series 上, 是为了绕开 dataZoom 的过滤 ——
+  // 主图 series 会被 dataZoom 按可见区间裁剪, 挂在上面分布图会整片消失。
+  if (showProfile && pinnedY && volumeProfile) {
+    const vp = volumeProfile
+    const gridIdx = grids.length
+    const xAxisIdx = xAxes.length
+    const yAxisIdx = yAxes.length
+    const maxPct = Math.max(...vp.bins.map(b => b.pct), 1e-9)
+
+    grids.push({
+      right, width: PROFILE_W,
+      top: topPad, height: candleAvail,
+      show: false,
+    })
+    xAxes.push({
+      type: 'value', gridIndex: gridIdx, min: 0, max: maxPct,
+      show: false,
+    })
+    yAxes.push({
+      type: 'value', gridIndex: gridIdx,
+      min: pinnedY.min, max: pinnedY.max,
+      show: false,
+    })
+
+    const renderProfileItem = (params: any, api: any) => {
+      const row = params.data as number[]
+      // row = [kind, pct, lo, hi]   kind: 0=量柱 1=POC 2=价值区边界
+      const kind = row[0]
+      const pct = row[1]
+      const lo = row[2]
+      const hi = row[3]
+      const p1 = api.coord([0, hi])
+      const p2 = api.coord([pct, lo])
+      const yTop = Math.min(p1[1], p2[1])
+      const yBot = Math.max(p1[1], p2[1])
+      if (kind === 0) {
+        const inVa = row[4] === 1
+        return {
+          type: 'rect',
+          shape: {
+            x: p1[0],
+            y: yTop,
+            width: Math.max(p2[0] - p1[0], 0.6),
+            height: Math.max(yBot - yTop, 0.8),
+          },
+          style: {
+            fill: inVa ? 'rgba(59,130,246,0.50)' : 'rgba(148,163,184,0.28)',
+          },
+          silent: true,
+        }
+      }
+      const y = api.coord([0, lo])[1]
+      return {
+        type: 'line',
+        shape: { x1: p1[0], y1: y, x2: p1[0] + PROFILE_W, y2: y },
+        style: {
+          stroke: kind === 1 ? '#F59E0B' : 'rgba(148,163,184,0.8)',
+          lineWidth: 1,
+          lineDash: kind === 1 ? undefined : [3, 3],
+        },
+        silent: true,
+      }
+    }
+
+    const vpData: number[][] = vp.bins.map(b => [
+      0, b.pct, b.lo, b.hi, b.inValueArea ? 1 : 0,
+    ])
+    vpData.push([1, maxPct, vp.poc, vp.poc, 0])
+    vpData.push([2, maxPct, vp.vah, vp.vah, 0])
+    vpData.push([2, maxPct, vp.val, vp.val, 0])
+
+    series.push({
+      name: 'VP', type: 'custom',
+      xAxisIndex: xAxisIdx, yAxisIndex: yAxisIdx,
+      data: vpData,
+      renderItem: renderProfileItem,
+      clip: false,
+      silent: true,
+      animation: false,
+      z: 2,
+    })
+  }
+
   // 子图信息栏 graphic
   const subStartTop = topPad + candleAvail + candleBottomPad
   const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare)
@@ -904,7 +1081,25 @@ export function EChartsCandlestick({
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
   mainType = 'candle',
+  volumeProfile = null,
+  onVisibleRangeChange,
 }: Props) {
+  // 可见区间(闭区间下标)。缩放/平移后要重算成交量分布, 否则分布图统计的区间
+  // 与眼睛看到的蜡烛不是同一段 —— 看起来就像"柱子对不上"。
+  const [visRange, setVisRange] = useState(() => ({
+    from: Math.max(0, data.length - Math.max(1, visibleBars)),
+    to: Math.max(0, data.length - 1),
+  }))
+  const onVisRef = useRef(onVisibleRangeChange)
+  onVisRef.current = onVisibleRangeChange
+  const visTimerRef = useRef<number | null>(null)
+  const pendingRangeRef = useRef<{ from: number; to: number } | null>(null)
+  useEffect(() => {
+    onVisRef.current?.(visRange.from, visRange.to)
+  }, [visRange])
+  useEffect(() => () => {
+    if (visTimerRef.current != null) window.clearTimeout(visTimerRef.current)
+  }, [])
   // mainType 只影响画法; 放进 ref 是为了 updateCompactPresentation 里也能读到最新值
   const mainTypeRef = useRef(mainType)
   mainTypeRef.current = mainType
@@ -1125,6 +1320,23 @@ export function EChartsCandlestick({
         compactRef.current = newCompact
         updateCompactPresentation()
       }
+
+      // 可见区间变化 → 通知调用方重算成交量分布。
+      // 节流: 滚轮缩放会连发几十次, 每次都整图 rebuild 会卡; 停手 140ms 后再同步
+      // (期间分布图仍按上一区间画, 松手即对齐)。
+      const fromIdx = Math.max(0, Math.min(total - 1, Math.round((total * zoom.start) / 100)))
+      const toIdx = Math.max(fromIdx, Math.min(total - 1, Math.round((total * zoom.end) / 100) - 1))
+      pendingRangeRef.current = { from: fromIdx, to: toIdx }
+      if (visTimerRef.current == null) {
+        visTimerRef.current = window.setTimeout(() => {
+          visTimerRef.current = null
+          const p = pendingRangeRef.current
+          if (!p) return
+          // 值没变就返回 prev, 让 React 跳过这次渲染 —— 否则
+          // "rebuild → dispatch dataZoom → dataZoom 事件 → setState" 会自激成死循环。
+          setVisRange((prev: { from: number; to: number }) => (prev.from === p.from && prev.to === p.to ? prev : p))
+        }, 140)
+      }
     })
 
     const ro = new ResizeObserver(() => { chart.resize() })
@@ -1225,6 +1437,9 @@ export function EChartsCandlestick({
       linkedPrice,
       volumeCompare,
       mainTypeRef.current,
+      volumeProfile,
+      visRange.from,
+      visRange.to,
     )
 
     chart.setOption(option, true)
@@ -1242,7 +1457,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, mainType, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, mainType, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme, volumeProfile, visRange])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

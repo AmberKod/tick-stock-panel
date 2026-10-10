@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw, X } from 'lucide-react'
+import { ArrowLeft, GitCompare, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw, X } from 'lucide-react'
 
 import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
@@ -9,6 +9,8 @@ import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
 import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
+import { computeChips } from '@/lib/chips'
+import { ChipDistributionPanel } from '@/components/ChipDistributionPanel'
 import {
   MAIN_CHART_TYPES,
   StockDailyKChart,
@@ -415,6 +417,24 @@ export function StockDetail() {
     setMainType(next)
     try { localStorage.setItem('stockDetail:mainType', next) } catch { /* 忽略 */ }
   }, [])
+  /**
+   * 成交量分布(画在 K 线右侧)。按**当前可见区间**统计 —— 缩放后跟着变,
+   * 看的是"眼睛里这一段"的成交密集区, 不是全区间。
+   */
+  const [showVP, setShowVP] = useState<boolean>(() => localStorage.getItem('stockDetail:vp') === '1')
+  const changeVP = useCallback((on: boolean) => {
+    setShowVP(on)
+    try { localStorage.setItem('stockDetail:vp', on ? '1' : '0') } catch { /* 忽略 */ }
+  }, [])
+  /**
+   * 筹码分布。只有拿到流通股本才算得出来 —— 算不出来就不显示(返回 null),
+   * 不用"拍一个股本"凑版面。
+   */
+  const [showChips, setShowChips] = useState<boolean>(() => localStorage.getItem('stockDetail:chips') === '1')
+  const changeChips = useCallback((on: boolean) => {
+    setShowChips(on)
+    try { localStorage.setItem('stockDetail:chips', on ? '1' : '0') } catch { /* 忽略 */ }
+  }, [])
   /** 双击图表加的水平价格线(本地持久化, 按标的隔离)。 */
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>(() => {
     try {
@@ -440,6 +460,23 @@ export function StockDetail() {
     () => buildSignalMarkers(kline?.rows ?? [], signals),
     [kline?.rows, signals],
   )
+
+  /**
+   * 筹码分布。输入全为真数据(日K量价 + 本地 stock_info 的流通股本), 输出是这三者
+   * 之上的确定性模型结果 —— 流通股本取不到就不算, 不拿估算股本凑版面。
+   * 分时档/分钟档不做: 分钟 K 只有最近几百根(几天), 谈不上"筹码沉淀"。
+   */
+  const chips = useMemo(() => {
+    if (!showChips || kPeriod === 'minute' || mkPeriod) return null
+    const shares = kline?.stockInfo?.float_shares
+    if (!shares || shares <= 0) return null
+    const rows = (kline?.rows ?? []).map(r => ({
+      date: r.date, high: r.high, low: r.low, close: r.close, volume: r.volume ?? 0,
+    }))
+    return computeChips(rows, shares)
+  }, [showChips, kline?.rows, kline?.stockInfo, kPeriod, mkPeriod])
+  /** 开了筹码但拿不到流通股本 —— 明确说清楚为什么没有, 而不是空着让人猜。 */
+  const chipsBlocked = showChips && kPeriod !== 'minute' && !mkPeriod && !chips
 
   const persistPriceLines = useCallback((next: ChartPriceLine[]) => {
     setPriceLines(next)
@@ -512,6 +549,13 @@ export function StockDetail() {
         <span className="ml-auto inline-flex items-center gap-2">
           {/* A股不带后缀 → 组件内部按 'cn' 匹配自选, 不传 market */}
           <MarketWatchlistButton symbol={symbol} />
+          <Link
+            to={`/compare?symbols=${encodeURIComponent(symbol)}&days=250`}
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-fg-muted hover:text-fg"
+            title="把这只票带进多股对比页，再添加其他标的做归一化叠加对比"
+          >
+            <GitCompare className="h-3 w-3" /> 对比
+          </Link>
           <button
             type="button"
             onClick={() => setWide(v => { localStorage.setItem('stockDetail:wide', v ? '0' : '1'); return !v })}
@@ -700,6 +744,38 @@ export function StockDetail() {
             </>
           )}
 
+          {/* ── 分布: 成交量分布(画在图上) + 筹码分布(图下面板) ──
+              前者是纯统计(把量按价格重新分组), 后者是**模型估算**(换手衰减),
+              两者的可信度不一样, 所以按钮 title 里分别写清口径。 */}
+          {kPeriod !== 'minute' && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
+              <span className="text-fg-muted">分布</span>
+              <button
+                type="button"
+                onClick={() => changeVP(!showVP)}
+                title="成交量分布(Volume Profile): 把可见区间的成交量按价格重新分组, 画在 K 线右侧。单根 K 的量在 [low, high] 内按价格均摊 —— 行情源不给日内逐笔分布, 均摊是不引入额外假设的那一种"
+                className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                  showVP
+                    ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
+                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+              >
+                成交量
+              </button>
+              <button
+                type="button"
+                onClick={() => changeChips(!showChips)}
+                title="筹码分布: 按'每日换手率 + 三角形分布 + 历史筹码衰减'估算的成本分布。这是模型, 不是交易所真实持仓数据"
+                className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                  showChips
+                    ? 'border-amber-400/40 bg-amber-400/10 text-amber-500'
+                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+              >
+                筹码
+              </button>
+            </>
+          )}
+
           {/* ── K线内标注 ──
               全部由当前那串 K 线**确定性派生**(放量/新高/新低/MACD交叉), 不是打分、
               不是买卖建议。口径写在 title 里, 免得被当成某种"信号推荐"。 */}
@@ -773,6 +849,7 @@ export function StockDetail() {
             period={kPeriod}
             mklinePeriod={mkPeriod ?? undefined}
             mainType={mainType}
+            showVolumeProfile={showVP}
             adjust={adjust}
             onAdjustInfo={setAdjustInfo}
             markers={signalMarkers}
@@ -785,6 +862,19 @@ export function StockDetail() {
           />
         )}
       </div>
+
+      {/* 筹码分布面板 —— 放在图表下方而不是图里: 它跟 K 线不是同一坐标(横轴是价格占比),
+          叠在图上会挤掉蜡烛的地方。 */}
+      {chips && (
+        <ChipDistributionPanel result={chips} name={kline?.name} className="mt-2" />
+      )}
+      {chipsBlocked && (
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+          筹码分布需要「流通股本」才能算（每日换手率 = 成交量 / 流通股本）—— 本地 stock_info 没给到
+          {' '}<span className="font-mono text-fg-secondary">{symbol}</span>{' '}的流通股本，所以这里不做。
+          不拿估算股本凑版面。
+        </div>
+      )}
 
       {/* ── 深度数据 5 tab ──
           这五块的后端(A股深度)只认 A股代码, 港股/美股会 available:false。

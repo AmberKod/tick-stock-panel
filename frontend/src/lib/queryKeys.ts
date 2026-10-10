@@ -111,6 +111,9 @@ export const QK = {
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
                              ['kline-minute-range', symbol, days] as const,
+  /** 多股对比(批量日K) —— 标的列表 + 区间同时入 key。 */
+  klineCompare:         (symbols: string[], days: number) =>
+                             ['kline-compare', symbols.join(','), days] as const,
   /** A股当日分时(腾讯) —— 与 klineMinute(本地分钟库)不是一回事, 单独一个 key。 */
   astockMinute:         (code: string) => ['astock-minute', code] as const,
   /** A股分钟K(腾讯 mkline) —— 1/5/15/30/60 分, 与本地 kline-minute 不是一个源。 */

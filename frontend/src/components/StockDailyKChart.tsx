@@ -5,6 +5,7 @@ import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { aggregateKline, computeIndicators, type KPeriod } from '@/lib/klinePeriod'
 import { applyAdjust, isAdjustableCode, type AdjustMode, type AdjRatioResp } from '@/lib/adjust'
+import { computeVolumeProfile } from '@/lib/volumeProfile'
 import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
@@ -110,6 +111,8 @@ interface Props {
   extColumns?: string
   /** 主图画法: 蜡烛 / 空心蜡烛 / 美国线 / 收盘线 */
   mainType?: MainChartType
+  /** 在 K 线右侧叠加成交量分布(Volume Profile)。分时档无意义, 调用方别传。 */
+  showVolumeProfile?: boolean
   /** 复权档。仅对**日K及由其聚合出的周/月/年**有效; 分钟K/分时无复权概念。 */
   adjust?: AdjustMode
   /** 复权系数取不到时的说明回调(让页面能提示"该股无除权记录")。 */
@@ -201,8 +204,15 @@ export function StockDailyKChart({
   mainType = 'candle',
   adjust = 'qfq',
   onAdjustInfo,
+  showVolumeProfile = false,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
+  // 可见区间由 EChartsCandlestick 在缩放/平移后回传 —— 成交量分布必须按**当前
+  // 眼睛看到的那一段**统计, 否则柱子跟蜡烛不是同一区间, 图就失去意义。
+  const [visRange, setVisRange] = useState<{ from: number; to: number } | null>(null)
+  const onVisRange = useCallback((from: number, to: number) => {
+    setVisRange(prev => (prev && prev.from === from && prev.to === to ? prev : { from, to }))
+  }, [])
   const [showMarkers, setShowMarkers] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
     normalizeVolumeCompare(storage.stockVolumeCompare.get(DEFAULT_VOLUME_COMPARE)),
@@ -258,6 +268,15 @@ export function StockDailyKChart({
     () => mklinePeriod ? mkRows : aggregateKline(dayRows, period),
     [dayRows, period, mklinePeriod, mkRows],
   )
+  // 成交量分布: 按可见区间切片统计。分时档(kPeriod='minute')不走这里 ——
+  // 它是独立的当日分钟组件, 没有蜡烛可对齐。
+  const volumeProfile = useMemo(() => {
+    if (!showVolumeProfile || visRange == null || rows.length === 0) return null
+    const from = Math.max(0, Math.min(visRange.from, rows.length - 1))
+    const to = Math.max(from, Math.min(visRange.to, rows.length - 1))
+    return computeVolumeProfile(rows.slice(from, to + 1))
+  }, [rows, showVolumeProfile, visRange])
+
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [
@@ -411,6 +430,8 @@ export function StockDailyKChart({
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
           mainType={mainType}
+          volumeProfile={volumeProfile}
+          onVisibleRangeChange={onVisRange}
         />
       )}
     </div>
