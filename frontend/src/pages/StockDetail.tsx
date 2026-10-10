@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, Maximize2, Minus, Newspaper, Plus, RotateCcw } from 'lucide-react'
+import { ArrowLeft, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw } from 'lucide-react'
 
 import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
@@ -348,6 +348,11 @@ export function StockDetail() {
   const [showMA, setShowMA] = useState(true)
   const [kline, setKline] = useState<StockDailyKChartResult | null>(null)
   const [deepTab, setDeepTab] = useState<DeepTab>('fundflow')
+  /**
+   * 宽屏铺满 = 页面宽度跟随窗口, 不留左右大白边(默认)。
+   * 只是"阅读舒适度"的取舍, 不是功能约束 —— 想要窄一点随时点右上角切换, 选择记本地。
+   */
+  const [wide, setWide] = useState<boolean>(() => localStorage.getItem('stockDetail:wide') !== '0')
 
   /**
    * A股判定 —— 必须兼容 `688825.SH` 这种带后缀写法(应用内主流格式), 否则深度
@@ -385,9 +390,8 @@ export function StockDetail() {
   }
 
   return (
-    // 宽屏不再居中留两条大白边: 上限放宽到 1800, 且内容用左右分栏填满 ——
-    // 左主列(图表/深度)自适应的同时, 右列把行情/板块/资讯竖排铺满, 不留空槽。
-    <div className="mx-auto w-full max-w-[1800px] space-y-3 px-3 py-3">
+    // 默认铺满整屏(不再有 1800 上限带来的左右白边); 想要窄版可点右上角按钮切回。
+    <div className={cn('w-full space-y-3 px-3 py-3', wide ? '' : 'mx-auto max-w-[1400px]')}>
       {/* ── 头部 ── */}
       <div className="flex flex-wrap items-baseline gap-3">
         <Link to="/" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg">
@@ -411,9 +415,18 @@ export function StockDetail() {
             </span>
           </>
         )}
-        <span className="ml-auto">
+        <span className="ml-auto inline-flex items-center gap-2">
           {/* A股不带后缀 → 组件内部按 'cn' 匹配自选, 不传 market */}
           <MarketWatchlistButton symbol={symbol} />
+          <button
+            type="button"
+            onClick={() => setWide(v => { localStorage.setItem('stockDetail:wide', v ? '0' : '1'); return !v })}
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-fg-muted hover:text-fg"
+            title={wide ? '切回标准宽度（左右留白，阅读更聚焦）' : '宽屏铺满（消除左右留白）'}
+          >
+            {wide ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+            {wide ? '标准宽度' : '铺满'}
+          </button>
         </span>
       </div>
 
