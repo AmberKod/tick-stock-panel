@@ -222,7 +222,10 @@ export function Compare() {
     staleTime: 600_000,
     placeholderData: prev => prev,
   })
-  const benchData = benchQuery.data?.available ? benchQuery.data.data : null
+  // ⚠️ 必须再判一次 bench: 这个 query 带了 placeholderData(换区间时不想闪空),
+  // 而切到"无基准"只是把 enabled 关掉、key 变掉 —— 上一份数据会作为 placeholder
+  // 继续留着。少了这个判断, 点了"无"基准线还挂在图上。
+  const benchData = bench && benchQuery.data?.available ? benchQuery.data.data : null
   const benchName = benchData?.name || benchmarkLabel(bench)
 
   const aligned = useMemo(() => {
