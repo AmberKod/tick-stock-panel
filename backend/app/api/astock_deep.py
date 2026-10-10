@@ -6,6 +6,7 @@
 - GET /api/astock/fundflow/{code}: 资金流向(新浪; 东财 push2/push2his 被墙)
 - GET /api/astock/financials/{code}: 财务摘要(akshare 东财财务指标, 7 组 80 指标)
 - GET /api/astock/quote/{code}: 实时行情(腾讯, 补齐成交额/换手/PE/PB/市值)
+- GET /api/astock/minute/{code}: 当日分时(腾讯; 分时线/均价线/分时量)
 - GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
@@ -34,6 +35,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     dragon_tiger,
     financials,
     fund_flow,
+    minute_bars,
     realtime_quote,
     research_reports,
     stock_sectors,
@@ -156,6 +158,24 @@ def get_quote(code: str) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: realtime_quote(norm),
                     required_key="price", source=SOURCE_TENCENT)
+
+
+@router.get("/minute/{code}")
+def get_minute(code: str) -> dict:
+    """A股当日分时(腾讯 web.ifzq.gtimg.cn) —— 分时线 / 均价线 / 分时量。
+
+    九章「分时」tab 的同源实现。与它的差别: 腾讯第 3/4 列是**全天累计**量额,
+    这里按差分还原成每分钟量额(见 provider 注释), 均价线按 累计额/累计量 算。
+
+    非交易日/尚未开盘时腾讯返回空数组 → 这里如实给 ``available:false``,
+    不补零、不沿用上一交易日数据冒充"今天"。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: minute_bars(norm),
+                    required_key="points", source=SOURCE_TENCENT)
 
 
 @router.get("/sectors/{code}")

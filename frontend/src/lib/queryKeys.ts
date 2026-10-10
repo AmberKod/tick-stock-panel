@@ -111,6 +111,8 @@ export const QK = {
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
                              ['kline-minute-range', symbol, days] as const,
+  /** A股当日分时(腾讯) —— 与 klineMinute(本地分钟库)不是一回事, 单独一个 key。 */
+  astockMinute:         (code: string) => ['astock-minute', code] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

@@ -721,6 +721,143 @@ def test_api_quote_ok(client, monkeypatch):
     assert body["data"]["name"] == "中际旭创"
 
 
+# ---------------------------------------------------------------- 6.5 当日分时(腾讯)
+
+# 实测 sh688825 2026-10-09 前三分钟(裁剪)。第 3/4 列是**全天累计**量/额。
+_MINUTE_ROWS = [
+    "0930 49.81 2423975 120738195.00",
+    "0931 49.65 9495269 472181035.00",
+    "0932 49.45 13666769 679025731.00",
+]
+# 腾讯标准数组: [1]名称 [3]现价 [4]昨收 [5]今开
+_MINUTE_QT = ["1", "长鑫科技", "688825", "51.00", "50.52", "49.81"]
+
+
+def _patch_minute(monkeypatch, rows=None, qt=None, empty=False):
+    sent: dict[str, object] = {}
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        sent["url"] = url
+        sym = url.rsplit("=", 1)[-1]
+        if empty:
+            return {"code": 0, "data": {sym: {"data": {"data": [], "date": "20261009"},
+                                              "qt": {sym: qt if qt is not None else _MINUTE_QT}}}}
+        return {
+            "code": 0,
+            "data": {
+                sym: {
+                    "data": {"data": rows if rows is not None else _MINUTE_ROWS,
+                             "date": "20261009"},
+                    "qt": {sym: qt if qt is not None else _MINUTE_QT},
+                }
+            },
+        }
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    return sent
+
+
+def test_minute_uses_tencent_minute_endpoint(monkeypatch):
+    """当日分时走 web.ifzq.gtimg.cn —— 当日全量, 不需要本地分钟库。"""
+    sent = _patch_minute(monkeypatch)
+    prov.minute_bars("688825")
+    assert "web.ifzq.gtimg.cn" in sent["url"], sent["url"]
+    assert "code=sh688825" in sent["url"], sent["url"]
+
+
+def test_minute_market_prefix(monkeypatch):
+    sent = _patch_minute(monkeypatch)
+    prov.minute_bars("000001")
+    assert sent["url"].endswith("=sz000001"), sent["url"]
+
+
+def test_minute_volume_is_differential_not_cumulative(monkeypatch):
+    """🔴 腾讯第 3/4 列是累计量额, 不是每分钟增量。
+
+    照抄(直接用累计值当分钟量)会得到单调爬升的量柱 —— 图上看着有数据,
+    实际每分钟的成交分布全是错的。这里锁死差分口径。
+    """
+    _patch_minute(monkeypatch)
+    pts = prov.minute_bars("688825")["data"]["points"]
+
+    assert pts[0]["volume"] == pytest.approx(2423975)
+    assert pts[1]["volume"] == pytest.approx(9495269 - 2423975)
+    assert pts[2]["volume"] == pytest.approx(13666769 - 9495269)
+    # 差分之和 == 全天累计量(不差分的话会变成 3 倍累计, 一眼假)
+    d = prov.minute_bars("688825")["data"]
+    assert d["volume"] == pytest.approx(13666769)
+    assert pts[0]["amount"] == pytest.approx(120738195.0)
+    assert d["amount"] == pytest.approx(679025731.0)
+
+
+def test_minute_avg_is_cum_amount_over_cum_volume(monkeypatch):
+    """均价线 = 累计成交额 / 累计成交量(元/股), 与通达信均价同口径。"""
+    _patch_minute(monkeypatch)
+    pts = prov.minute_bars("688825")["data"]["points"]
+
+    # provider 按 3 位小数落库(价格精度), 断言给到 1e-2 容差
+    assert pts[0]["avg"] == pytest.approx(120738195.0 / 2423975, abs=1e-2)
+    assert pts[2]["avg"] == pytest.approx(679025731.0 / 13666769, abs=1e-2)
+    # 均价必须落在当日高低价区间内, 越界说明单位/口径错了
+    d = prov.minute_bars("688825")["data"]
+    assert d["low"] <= pts[2]["avg"] <= d["high"]
+
+
+def test_minute_pct_uses_prev_close_from_qt(monkeypatch):
+    """涨跌幅基准是 qt[4] 昨收(50.52), 不是今开、不是前一点价格。"""
+    _patch_minute(monkeypatch)
+    d = prov.minute_bars("688825")["data"]
+
+    assert d["prev_close"] == pytest.approx(50.52)
+    assert d["points"][0]["pct"] == pytest.approx((49.81 - 50.52) / 50.52 * 100, abs=1e-2)
+    assert d["last_pct"] == pytest.approx((49.45 - 50.52) / 50.52 * 100, abs=1e-2)
+    assert d["open"] == pytest.approx(49.81)
+    assert d["high"] == pytest.approx(49.81) and d["low"] == pytest.approx(49.45)
+
+
+def test_minute_time_is_hh_mm(monkeypatch):
+    _patch_minute(monkeypatch)
+    pts = prov.minute_bars("688825")["data"]["points"]
+    assert [p["t"] for p in pts] == ["09:30", "09:31", "09:32"]
+
+
+def test_minute_no_prev_close_raises(monkeypatch):
+    """没有昨收基准就不画分时 —— 宁可 available:false, 不拿今开冒充昨收。"""
+    _patch_minute(monkeypatch, qt=["1", "长鑫科技", "688825", "51.00", "", "49.81"])
+    # qt 缺昨收时会退回行情接口, 那边也拿不到才上抛
+    monkeypatch.setattr(prov, "_request_text", lambda *a, **k: 'v_sh688825="";')
+    with pytest.raises(ValueError):
+        prov.minute_bars("688825")
+
+
+def test_minute_empty_raises(monkeypatch):
+    """非交易日/未开盘 → 空数组, 上抛; 不补零、不沿用上一交易日。"""
+    _patch_minute(monkeypatch, empty=True)
+    with pytest.raises(ValueError):
+        prov.minute_bars("688825")
+
+
+def test_minute_source_is_real(monkeypatch):
+    from app.services.source_gate import is_real
+    _patch_minute(monkeypatch)
+    payload = prov.minute_bars("688825")
+    assert payload["source"] == "live-tencent"
+    assert is_real(payload) is True
+
+
+def test_api_minute_bad_code(client):
+    body = client.get("/api/astock/minute/AAOI").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_minute_ok(client, monkeypatch):
+    _patch_minute(monkeypatch)
+    body = client.get("/api/astock/minute/688825.SH").json()
+    assert body["available"] is True and body["source"] == "live-tencent"
+    assert body["data"]["name"] == "长鑫科技"
+    assert len(body["data"]["points"]) == 3
+
+
 # ---------------------------------------------------------------- 7. 所属板块/题材(东财 F10)
 
 # 实测 300308 中际旭创 2026-10-10 取自东财 F10, 字段裁剪后。

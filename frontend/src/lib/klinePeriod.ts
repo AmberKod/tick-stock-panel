@@ -14,10 +14,19 @@
  */
 import type { OHLC } from '@/components/EChartsCandlestick'
 
-export type KPeriod = 'day' | 'week' | 'month' | 'year'
+/**
+ * 'minute' 是**当日分时**(独立的腾讯分钟源), 不走本文件的日K聚合 ——
+ * 它跟日/周/月/年不是一个坐标系(分时以昨收为中轴对称, 周月年是 K 线聚合)。
+ */
+export type KPeriod = 'day' | 'week' | 'month' | 'year' | 'minute'
 
-/** 周期 → 该周期默认可见根数(对齐九章 defView, 避免切到年K时还是 60 根)。 */
+/**
+ * 周期 → 该周期默认可见根数(对齐九章 defView, 避免切到年K时还是 60 根)。
+ * `minute` 是当日全量(240+ 点), 不存在"看多少根"的概念, 占位 0 —— 调用方
+ * 拿到 0 应当忽略, 不要拿去 setVisibleBars。
+ */
 export const PERIOD_DEFAULT_BARS: Record<KPeriod, number> = {
+  minute: 0,
   day: 120,
   week: 100,
   month: 90,
@@ -79,7 +88,9 @@ function wilder(values: number[], n: number): number[] {
  * 返回的 date 是该周期**首个交易日**(周K显示周一所在的那一周起点, 月K是 1 号)。
  */
 export function aggregateKline(rows: OHLC[], period: KPeriod): OHLC[] {
-  if (period === 'day') return rows
+  // 'minute' 由 StockMinuteChart 单独渲染, 走到这里说明调用方传错了 —— 原样返回,
+  // 绝不能把当日分时塞进周/月/年聚合分支(会把日线按月截断, 图直接错)。
+  if (period !== 'week' && period !== 'month' && period !== 'year') return rows
   if (rows.length === 0) return rows
 
   const buckets: { key: string; rows: OHLC[] }[] = []

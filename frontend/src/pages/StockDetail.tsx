@@ -8,6 +8,7 @@ import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { StockDailyKChart, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
   AnnouncementsPanel,
@@ -40,10 +41,13 @@ const PERIODS = [
 
 /**
  * K线周期。周/月/年**不是**另一份数据 —— 由日K聚合而来(见 lib/klinePeriod),
- * 每根都能回溯到具体日K区间。这是与九章"周期切换"的同一功能, 但九章的分时/分钟档
- * 需要独立的分钟库支撑, 我方 minute 数据未全量同步前先不做(做了就是空图)。
+ * 每根都能回溯到具体日K区间。
+ *
+ * 「分时」是唯一一个走独立数据源的档位: 腾讯 web.ifzq.gtimg.cn 当日分钟(实测可达),
+ * 不需要本地分钟库 —— 之前判断"没分钟库就做不了"是错的, 那个端点是当日全量回传。
  */
 const K_PERIODS: { label: string; value: KPeriod }[] = [
+  { label: '分时', value: 'minute' },
   { label: '日K', value: 'day' },
   { label: '周K', value: 'week' },
   { label: '月K', value: 'month' },
@@ -455,7 +459,12 @@ export function StockDetail() {
               <button
                 key={p.value}
                 type="button"
-                onClick={() => { setKPeriod(p.value); setVisibleBars(PERIOD_DEFAULT_BARS[p.value]) }}
+                onClick={() => {
+                  setKPeriod(p.value)
+                  // 分时不用根数控制(0 = 不适用), 保持上一次的缩放以免切回日K被重置
+                  const bars = PERIOD_DEFAULT_BARS[p.value]
+                  if (bars > 0) setVisibleBars(bars)
+                }}
                 className={cn('rounded px-2 py-0.5 transition-colors',
                   kPeriod === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
               >
@@ -464,74 +473,94 @@ export function StockDetail() {
             ))}
           </div>
 
-          <span className="mx-1 h-4 w-px bg-border" />
+          {/* 分时档没有「区间/MA/缩放」这三组控件(它固定是当日 09:30~15:00),
+              摆上去点了没反应反而像坏了 —— 直接不渲染。 */}
+          {kPeriod !== 'minute' && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
 
-          <span className="text-fg-muted">区间</span>
-          <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
-            {PERIODS.map(p => (
+              <span className="text-fg-muted">区间</span>
+              <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
+                {PERIODS.map(p => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => setMonths(p.months)}
+                    className={cn('rounded px-2 py-0.5 transition-colors',
+                      months === p.months ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <span className="mx-1 h-4 w-px bg-border" />
+
+              <label className="inline-flex items-center gap-1 text-fg-muted">
+                <input type="checkbox" checked={showMA} onChange={e => setShowMA(e.target.checked)} />
+                MA
+              </label>
+
+              <span className="mx-1 h-4 w-px bg-border" />
+
+              <span className="text-fg-muted">缩放</span>
               <button
-                key={p.label}
                 type="button"
-                onClick={() => setMonths(p.months)}
-                className={cn('rounded px-2 py-0.5 transition-colors',
-                  months === p.months ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                onClick={() => setVisibleBars(v => Math.min(500, v + 20))}
+                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                title="缩小(看更多)"
               >
-                {p.label}
+                <Minus className="h-3 w-3" />
               </button>
-            ))}
-          </div>
-
-          <span className="mx-1 h-4 w-px bg-border" />
-
-          <label className="inline-flex items-center gap-1 text-fg-muted">
-            <input type="checkbox" checked={showMA} onChange={e => setShowMA(e.target.checked)} />
-            MA
-          </label>
-
-          <span className="mx-1 h-4 w-px bg-border" />
-
-          <span className="text-fg-muted">缩放</span>
-          <button
-            type="button"
-            onClick={() => setVisibleBars(v => Math.min(500, v + 20))}
-            className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
-            title="缩小(看更多)"
-          >
-            <Minus className="h-3 w-3" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setVisibleBars(v => Math.max(20, v - 20))}
-            className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
-            title="放大(看更少)"
-          >
-            <Plus className="h-3 w-3" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setVisibleBars(60)}
-            className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
-            title="复位"
-          >
-            <RotateCcw className="h-3 w-3" />
-          </button>
-          <span className="text-[11px] text-fg-muted">
-            当前 {visibleBars} 根 · 副图指标用图表右上控件切换 · 点击蜡烛可看当日分时
-          </span>
+              <button
+                type="button"
+                onClick={() => setVisibleBars(v => Math.max(20, v - 20))}
+                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                title="放大(看更少)"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setVisibleBars(60)}
+                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                title="复位"
+              >
+                <RotateCcw className="h-3 w-3" />
+              </button>
+              <span className="text-[11px] text-fg-muted">
+                当前 {visibleBars} 根 · 副图指标用图表右上控件切换 · 点击蜡烛可看当日分时
+              </span>
+            </>
+          )}
           <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-fg-muted">
             <Maximize2 className="h-3 w-3" /> 图表区
           </span>
         </div>
 
-        <StockDailyKChart
-          symbol={symbol}
-          height={430}
-          dateRange={dateRange}
-          showMA={showMA}
-          visibleBars={visibleBars}
-          period={kPeriod}
-          onDataChange={setKline}
-        />
+        {/* 分时走独立的当日分钟源(腾讯), 日/周/月/年走日K聚合 —— 两条路不混。 */}
+        {kPeriod === 'minute' ? (
+          aCode ? (
+            <StockMinuteChart code={aCode} height={430} />
+          ) : (
+            <div className="flex h-[430px] flex-col items-center justify-center gap-1 px-4 text-center text-xs text-fg-muted">
+              <span>当日分时仅覆盖 A股</span>
+              <span className="text-[11px] opacity-70">
+                {symbol} 不是 A股代码（腾讯分时端点只认沪深北） —— 不拿别的品种的曲线冒充
+              </span>
+            </div>
+          )
+        ) : (
+          <StockDailyKChart
+            symbol={symbol}
+            height={430}
+            dateRange={dateRange}
+            showMA={showMA}
+            visibleBars={visibleBars}
+            period={kPeriod}
+            onDataChange={setKline}
+          />
+        )}
       </div>
 
       {/* ── 深度数据 5 tab ──

@@ -82,6 +82,12 @@ _TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 #: 盘中行情短缓存(秒)。个股页每次渲染都打一次会明显拖慢首屏。
 _TENCENT_QUOTE_TTL_S = 10.0
 
+#: 腾讯当日分时。与 qt.gtimg.cn 同厂不同域名(web.ifzq.gtimg.cn), UTF-8 JSON,
+#: 一次回传全天 240+ 个分钟点(约 15KB)。
+_TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+#: 分时盘中变化快但体量大, 15s 足够 —— 再快就是白打腾讯的带宽。
+_TENCENT_MINUTE_TTL_S = 15.0
+
 #: 「机构专用」席位的营业部代码。实测 002317 买入席位中三条机构席位均为 "0"。
 _INSTITUTION_DEPT_CODE = "0"
 
@@ -724,6 +730,101 @@ def realtime_quote(code: str) -> dict:
 
     result = {"source": SOURCE_TENCENT, "data": payload}
     _cache_put(url, result, _TENCENT_QUOTE_TTL_S)
+    return result
+
+
+def minute_bars(code: str) -> dict:
+    """A股**当日分时**(腾讯 web.ifzq.gtimg.cn) —— 分时线 / 均价线 / 分时量。
+
+    九章个股页的「分时」tab 就靠这块。上一轮判断"我方没分钟库、做了就是空图",
+    实测下来是错的: 这个端点是**当日全量**, 不需要任何本地分钟库, 且直连可达。
+
+    ⚠️ 字段口径(实测 sh688825, 267 点, 2026-10-09):
+        ``data.<sym>.data.data`` 每行 ``"HHMM 价格 累计成交量(股) 累计成交额(元)"``
+        —— 第 3/4 列是**全天累计值**, 不是该分钟增量。直接拿去画量柱会得到一根
+        单调爬升的阶梯(把累计量当分钟量), 这里按相邻差分还原每分钟量。
+        均价线 = 累计成交额 / 累计成交量(元/股), 与通达信「均价」同口径。
+        ``data.<sym>.qt.<sym>`` 是腾讯标准数组: [1]名称 [3]现价 **[4]昨收** [5]今开;
+        昨收是分时图涨跌幅与上下对称轴的唯一基准, 取不到就不画图(fail-closed)。
+
+    ⚠️ 时间轴**不补齐**: 腾讯给多少点画多少点, 缺的分钟(集合竞价/盘后档位差异)
+       不插值、不补零 —— 补出来的点是编的。
+    """
+    code = _norm_code(code)
+    sym = _tx_symbol(code)
+
+    url = _TENCENT_MINUTE_URL + "?" + urllib.parse.urlencode({"code": sym})
+    cached = _cache_get(url)
+    if isinstance(cached, dict):
+        return cached
+
+    payload = _request_json(url)
+    node = ((payload or {}).get("data") or {}).get(sym)
+    if not isinstance(node, dict):
+        raise ValueError(f"腾讯未返回分时节点: {sym}")
+
+    rows = ((node.get("data") or {}).get("data") or [])
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"腾讯分时数据为空(未开盘或非交易日?): {sym}")
+
+    qt = (node.get("qt") or {}).get(sym)
+    prev_close = _num(qt[4]) if isinstance(qt, list) and len(qt) > 4 else None
+    if prev_close is None:
+        # qt 缺昨收 → 退回行情接口拿(它有独立缓存, 不会重复打)
+        prev_close = realtime_quote(code)["data"].get("prev_close")
+    if not prev_close or prev_close <= 0:
+        raise ValueError(f"腾讯分时无昨收基准: {sym}")
+
+    points: list[dict] = []
+    prev_cum_v = 0.0
+    prev_cum_a = 0.0
+    for raw in rows:
+        parts = str(raw).split()
+        if len(parts) < 4:
+            continue
+        t, price = parts[0], _num(parts[1])
+        cum_v, cum_a = _num(parts[2]), _num(parts[3])
+        if price is None or cum_v is None:
+            continue
+        # 差分还原每分钟增量; 累计值回退(接口偶发乱序)时按 0 处理, 不造负数
+        minute_v = max((cum_v or 0) - prev_cum_v, 0.0)
+        minute_a = max((cum_a or 0) - prev_cum_a, 0.0)
+        prev_cum_v, prev_cum_a = cum_v or prev_cum_v, cum_a or prev_cum_a
+        avg = (cum_a / cum_v) if cum_v and cum_v > 0 else price
+        points.append({
+            "t": f"{t[:2]}:{t[2:4]}" if len(t) == 4 else t,
+            "price": round(price, 3),
+            "avg": round(avg, 3),
+            "pct": round((price - prev_close) / prev_close * 100, 3),
+            "volume": round(minute_v, 0),
+            "amount": round(minute_a, 2),
+        })
+
+    if not points:
+        raise ValueError(f"腾讯分时无法解析: {sym}")
+
+    prices = [p["price"] for p in points]
+    last = points[-1]
+    result = {
+        "source": SOURCE_TENCENT,
+        "data": {
+            "code": code,
+            "symbol": sym,
+            "name": qt[1] if isinstance(qt, list) and len(qt) > 1 else None,
+            "date": (node.get("data") or {}).get("date") or None,
+            "prev_close": round(prev_close, 3),
+            "open": _num(qt[5]) if isinstance(qt, list) and len(qt) > 5 else None,
+            "last_price": last["price"],
+            "last_pct": last["pct"],
+            "high": round(max(prices), 3),
+            "low": round(min(prices), 3),
+            "volume": round(sum(p["volume"] for p in points), 0),
+            "amount": round(sum(p["amount"] for p in points), 2),
+            "points": points,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(url, result, _TENCENT_MINUTE_TTL_S)
     return result
 
 
