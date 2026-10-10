@@ -4,11 +4,46 @@
 
 | 文件 | 作用 |
 | --- | --- |
+| `update-service.bat`（项目根） | **双击即可更新**：改代码 → 重新打包镜像 → 重建容器 → 健康检查（失败自动回滚）。执行策略/编码都已处理，无障碍入口 |
+| `start-host-deps.bat`（项目根） | 双击启动两个宿主常驻依赖（sec_relay / OpenBB），机器重启后用它恢复美股深度数据面板 |
 | `scripts/deploy.ps1` | 主流程：检查 → 生成 tag → 构建 → 部署 → 健康检查（失败自动回滚）→ 清理旧镜像 |
 | `scripts/rollback.ps1` | 单独回滚到上一版或指定 tag |
 | `scripts/deploy-common.ps1` | 两个脚本共用的函数库（日志、命令执行、Docker 检测、tag 状态文件、健康检查等），**不要单独执行** |
 
 脚本**不会**修改 `Dockerfile`、`docker-compose.yml`、`.dockerignore`，也**不会**碰 `data/` 目录。
+
+> **为什么额外提供 `.bat`？**
+> PowerShell 的执行策略默认会拦住 `.ps1`（双击常常变成"用记事本打开"或直接被拒绝），
+> 而 Windows 控制台默认 GBK 代码页会把批处理里的中文读成乱码。
+> 所以 `.bat` 只做三件事：**绕开执行策略**、**保持 ASCII 内容**（中文输出全交给 UTF-8-BOM 的 PowerShell）、**跑完暂停让你看清结果**。
+
+---
+
+## 只想双击更新的人（从这里开始）
+
+直接双击项目根目录的 **`update-service.bat`**。它会依次完成：
+
+| 步骤 | 内容 |
+| --- | --- |
+| 1/6 | 前置检查：Docker/Compose 可用性、`.env` 是否存在、是否有后台任务正在写数据 |
+| 2/6 | 生成镜像 tag 并记录（同时把当前运行中的镜像锚定为回滚点） |
+| 3/6 | `docker compose build` 重新打包镜像 |
+| 4/6 | `docker compose up -d --force-recreate` 重建容器上线 |
+| 5/6 | 轮询 `http://127.0.0.1:<port>/health`，**失败自动回滚到上一版镜像** |
+| 6/6 | 清理旧镜像（默认保留最近 5 个 tag） |
+
+跑完会打印前端访问地址，以及 sec_relay / OpenBB 两个**宿主常驻依赖**的状态。
+
+> **「正在写数据」保护是两级判定**（2026-10-09 修正，此前是错误设计）：
+>
+> - **服务在跑**（端口监听、容器 running）→ 只是**现状信息**，绿色打印，**不拦截**。因为更新已部署的服务时它本来就在跑，若拿这条拦截会导致每次双击都中止。
+> - **真写入证据** → 才中止：① 后端 `/api/pipeline/jobs` 自报有活动任务（`active_id` 非空，或存在 `running/pending/queued`）；② `data/` 下的 `*.log` / `*.lock` / 一级子目录在 `-BusyWindowSec`（默认 60 秒）内被更新。
+>
+> 只有被真证据拦住时才需要加 `-Force`：
+>
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Force
+> ```
 
 ---
 
@@ -73,7 +108,14 @@
 | 参数 | 说明 |
 | --- | --- |
 | `-DryRun` | 演练，只打印命令，零副作用 |
-| `-SkipBuild` | 跳过构建，只重启服务（改了 `.env` 这类运行时配置时用） |
+| `-SkipBuild` | 跳过构建，只用现有镜像重新部署（改了 `.env` 这类运行时配置时用） |
+| `-SkipRecreate` | 不强制重建容器。**默认行为是强制重建**，见下方说明，一般不用动 |
+
+> **`up -d` 为什么默认带 `--force-recreate`（勿随手删）**
+> compose 的 `env_file:` 会把 `.env` 的值在**容器创建时**固化进容器内的 `os.environ`，
+> 而 pydantic-settings 的优先级是 **环境变量 > `.env` 文件**。于是当镜像内容没变时
+> （典型场景：`-SkipBuild` 只改了 `.env`）compose 不会重建容器，**旧环境变量会遮蔽新的 `.env`**，
+> 表现为「改了配置却没生效」。`docker restart` 同样无效——必须重建容器。
 | `-Force` | 忽略「检测到正在写数据」的警告，强制部署 |
 | `-NoRollback` | 健康检查失败时不自动回滚，保留现场排查 |
 | `-RunTests` | 部署前跑一次后端测试子集（默认不跑，全量测试耗时很长） |
@@ -127,23 +169,26 @@ Docker Desktop 没启动或还在初始化。打开 Docker Desktop 等状态变�
 
 ### 3. 部署被「正在写数据」警告拦住
 
-输出会是醒目黄框，例如：
+输出会是醒目黄框，框里只列**真写入证据**，例如：
 
 ```
+       现状: 端口 3018 正在监听(服务在运行, 属正常现象)
+       现状: Compose 容器 TickFlow_Stock_Panel 处于 running 状态
 ************************************************************
 *  警告: 检测到后端可能正在写数据 / 正在运行              *
 ************************************************************
-  * - 端口 3018 正在监听(后端服务在运行, 可能正在处理后台任务)
+  * - 后台任务 0599a045c9 状态=running 阶段=market_daily_sync 进度=42%
   * - data 目录最近 12 秒内有写入(最新: backend.log)
 ************************************************************
 [FAIL] 已中止部署。确认安全后请加 -Force 参数重新执行。
 ```
 
-判定信号有三个，命中任一即告警：
+**两级判定**（2026-10-09 修正）：
 
-1. 服务端口处于监听状态；
-2. Compose 项目里有 `running` 状态的容器；
-3. `data/` 下的 `*.log`、`*.lock` 或一级子目录在最近 60 秒（`-BusyWindowSec`）内被更新。
+- **不拦截**（现状信息，绿色）：① 服务端口在监听；② 有 `running` 容器。头两条只是告诉你"服务本来就在跑"。
+- **会拦截**（写入证据）：① `/api/pipeline/jobs` 报告有活动任务；② `data/` 下的 `*.log`、`*.lock` 或一级子目录在最近 60 秒（`-BusyWindowSec`）内被更新。
+
+> 2026-10-09 之前这里是**错误设计**：把"端口在监听"和"容器 running"也算成写入信号，而更新一个已部署的服务时这两条恒为真 ⇒ **每次双击都会被拦**。现已按上面的两级重构。
 
 **为什么默认拦**：项目里跑过长任务（例如 `market_daily_sync` 实测跑了 98 分钟），在服务写数据中途重启容器可能中断任务或留下半截文件。确认任务结束后重试即可；确实要强推就加 `-Force`。
 
@@ -172,7 +217,27 @@ Get-NetTCPConnection -LocalPort 3018 -State Listen |
 
 要么停掉占用进程，要么改 `.env` 里的 `PORT` 后重新部署。
 
-### 6. 回滚失败：目标镜像不存在
+### 6. `docker compose build` 秒失败：`failed to get console: The handle is invalid.`
+
+典型输出（构建压根没开始，不到一秒就退）：
+
+```
+$ docker compose build
+WARN[0000] The "HOME" variable is not set. Defaulting to a blank string.
+failed to get console: The handle is invalid.
+[FAIL] 构建失败: 命令执行失败(退出码 1) : docker compose build
+```
+
+**根因**：双击 `.bat` 的进程链是 `Explorer → conhost → cmd → powershell → docker compose`。在这条链上 compose 会把自己的 stdout 判定为终端（证据：它的 logrus 输出切成了带 `[NNNN]` 偏移的着色格式 `WARN[0000] …`），随即去取控制台句柄，而该句柄在此上下文里无效；同一个命令在常规终端里是好的，所以极难自查。
+
+**已修（2026-10-10）**，两道保险，都在 `deploy-common.ps1` 里：
+
+1. `Invoke-ExternalCommand` 改用 .NET `Process` 启动子进程，**三条标准流全部重定向**（stdin 立刻 EOF、stdout/stderr 走管道）→ 子进程 `isatty()` 全为 false，compose 不再碰控制台。stderr 异步抽干，防止管道缓冲区写满死锁。
+2. `Invoke-ComposeCommand` 给所有 compose 子命令加全局开关 `--progress plain --ansi never`（`docker compose --progress plain --ansi never build`）。
+
+顺带：`deploy.ps1` 与 `update-service.bat` 都补了 `HOME` 兜底（双击时 Windows 只给 `USERPROFILE`），消除那条 WARN。
+
+### 7. 回滚失败：目标镜像不存在
 
 镜像可能已被清理（只保留最近 5 个 tag）或从未构建过。先列出可用 tag：
 

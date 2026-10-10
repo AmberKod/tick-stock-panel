@@ -24,7 +24,12 @@
     跳过"检测到正在写数据时默认中止"的保护, 强制继续部署。
 
 .PARAMETER SkipBuild
-    跳过构建, 只用现有镜像重启服务(改了 .env 等运行时配置时很有用)。
+    跳过构建, 只用现有镜像重启服务。注意容器仍会被 --force-recreate 重建,
+    所以改 .env 后用它就能让新配置生效(见下方说明)。
+
+.PARAMETER SkipRecreate
+    不加 --force-recreate, 交给 compose 自己判断要不要重建容器。
+    默认行为是强制重建(见下), 一般不需要动这个开关。
 
 .PARAMETER NoRollback
     健康检查失败时不做自动回滚, 直接报错退出(便于保留现场排查)。
@@ -34,6 +39,12 @@
 
 .PARAMETER RunTests
     部署前先跑一次后端测试子集(默认不跑, 全量测试耗时很长)。
+
+    重要背景(勿删): 默认给 up -d 带 --force-recreate, 原因是 compose 的 env_file:
+    会把 .env 的值在"容器创建时"固化进容器内的 os.environ, 而 pydantic-settings 的
+    优先级是 环境变量 > .env 文件。于是镜像没变(-SkipBuild 只改 .env 的典型场景)时
+    compose 不会重建容器, 旧环境变量就会遮蔽实时 .env, 表现为"改了配置却没生效"。
+    docker restart 同样无效, 必须重建容器。
 
 .PARAMETER TestFilter
     配合 -RunTests 使用的 pytest -k 过滤表达式, 默认 "not slow"。
@@ -78,6 +89,7 @@
 param(
     [switch]$Force,
     [switch]$SkipBuild,
+    [switch]$SkipRecreate,
     [switch]$NoRollback,
     [switch]$DryRun,
     [switch]$RunTests,
@@ -113,6 +125,15 @@ $exitCode = 0
 $projectRoot = $null
 $composeInvocation = $null
 
+# HOME 兜底: 双击 .bat 时 Windows 只给 USERPROFILE, 不给 HOME, 于是 compose 每步都嘀咕
+# 'The "HOME" variable is not set. Defaulting to a blank string.'。补上它, 顺带让依赖
+# $HOME 的路径(docker config / buildx store)有正确落点。
+if ([string]::IsNullOrWhiteSpace($env:HOME)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $env:HOME = $env:USERPROFILE
+    }
+}
+
 try {
     $projectRoot = Get-TspProjectRoot -ScriptDirectory $scriptDirectory
 
@@ -147,13 +168,21 @@ try {
     Write-InfoMsg ('健康检查地址: ' + $healthUrl + '  (注意: 是 /health, 不是 /api/health)')
 
     # --- 是否正在写数据 ---
+    # 注意: "服务在跑"是正常背景(ContextSignals), 只有真写入证据(BusySignals)才拦截。
     $busyCheck = Test-WriteInProgress -ProjectRoot $projectRoot -Port $healthPort -WindowSec $BusyWindowSec -ComposeInvocation $composeInvocation
+
+    if ($busyCheck.ContextSignals.Count -gt 0) {
+        foreach ($signal in $busyCheck.ContextSignals) {
+            Write-InfoMsg ('现状: ' + $signal)
+        }
+    }
+
     if ($busyCheck.Busy) {
         Write-Host ''
         Write-Host '************************************************************' -ForegroundColor Yellow
         Write-Host '*  警告: 检测到后端可能正在写数据 / 正在运行              *' -ForegroundColor Yellow
         Write-Host '************************************************************' -ForegroundColor Yellow
-        foreach ($signal in $busyCheck.Signals) {
+        foreach ($signal in $busyCheck.BusySignals) {
             Write-Host ('  * - ' + $signal) -ForegroundColor Yellow
         }
         Write-Host '  * 边写边构建/重启可能复制到半截文件或中断后台长任务。  *' -ForegroundColor Yellow
@@ -168,6 +197,7 @@ try {
                 Write-Host ''
                 Write-FailMsg '已中止部署。确认安全后请加 -Force 参数重新执行。'
                 Write-InfoMsg '提示: 可先用 docker compose logs --tail 50 或查看 data/backend.log 确认后台任务是否已结束。'
+                Write-InfoMsg ('      也可直接查: curl --noproxy "*" http://127.0.0.1:' + $healthPort + '/api/pipeline/jobs')
                 exit 1
             }
         }
@@ -177,7 +207,7 @@ try {
         }
     }
     else {
-        Write-OkMsg '未检测到正在写数据的迹象。'
+        Write-OkMsg ('未检测到正在写数据的迹象(近 ' + $BusyWindowSec + ' 秒内无 data 写入, 无活动后台任务)。')
     }
 
     # --- git 状态摘要(仅提示) ---
@@ -223,6 +253,26 @@ try {
 
     $oldLastTag = Read-DeployTag -Path $lastTagPath
     $oldPrevTag = Read-DeployTag -Path $prevTagPath
+
+    # --- 首次部署的回滚锚点 ---
+    # 没有历史 tag 时(第一次用本脚本), 把"此刻正在运行的那个镜像"锚定成回滚目标。
+    # 否则一旦新镜像健康检查失败, 会因为拿不到上一版而只能保留现场人工排障。
+    if (-not $oldLastTag) {
+        $containerName = 'TickFlow_Stock_Panel'
+        $runningImageId = Get-RunningContainerImageId -ContainerName $containerName
+        if ($runningImageId) {
+            $anchorTag = 'running-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            $null = Invoke-ExternalCommand -Exe 'docker' `
+                -Arguments @('tag', $runningImageId, ($imageName + ':' + $anchorTag)) `
+                -Description ('锚定当前运行镜像为回滚点 ' + $anchorTag) -DryRun:$DryRun
+            Write-DeployTag -Path $prevTagPath -Value $anchorTag -DryRun:$DryRun
+            Write-InfoMsg ('首次部署: 已把容器 ' + $containerName + ' 当前运行的镜像锚定为回滚点 ' + $anchorTag)
+            $oldLastTag = $anchorTag
+        }
+        else {
+            Write-WarnMsg ('没有历史 tag, 且容器 ' + $containerName + ' 当前不在运行 —— 本次部署若健康检查失败将无法自动回滚。')
+        }
+    }
 
     Write-InfoMsg ('镜像名      : ' + $imageName)
     Write-InfoMsg ('本次 tag    : ' + $newTag)
@@ -273,9 +323,21 @@ try {
     # [4/6] 部署
     # -------------------------------------------------------------------------
     Write-SectionMsg '部署服务'
-    Write-StepMsg -Index 4 -Total $totalSteps -Message 'docker compose up -d'
+    Write-StepMsg -Index 4 -Total $totalSteps -Message 'docker compose up -d --force-recreate'
 
-    $null = Invoke-ComposeCommand -Invocation $composeInvocation -Arguments @('up', '-d') -Description '启动/更新服务' -DryRun:$DryRun
+    # 默认强制重建容器: compose 的 env_file: 会把 .env 在容器创建时固化进 os.environ,
+    # 只在镜像变化时才会自动重建; 一旦走 -SkipBuild 或某些镜像摘要未变的场景,
+    # 新的 .env 就会被容器里的旧环境变量遮蔽(pydantic 优先级 env > .env 文件),
+    # 表现为"改了配置却没生效"。docker restart 亦无效 —— 必须重建容器。
+    $upArguments = @('up', '-d')
+    if ($SkipRecreate) {
+        Write-WarnMsg '已指定 -SkipRecreate, 本次不强制重建容器(改 .env 可能不会生效)。'
+    }
+    else {
+        $upArguments += '--force-recreate'
+    }
+
+    $null = Invoke-ComposeCommand -Invocation $composeInvocation -Arguments $upArguments -Description '启动/更新服务' -DryRun:$DryRun
     Write-OkMsg 'compose up -d 已执行。'
 
     if ($DryRun) {
@@ -351,6 +413,15 @@ try {
     Remove-OldDeployImages -ImageName $imageName -Keep $KeepImages -ProtectedTags $protected -DryRun:$DryRun
 
     Write-DeploySummary -Title '部署完成' -ImageName $imageName -Tag $newTag -HealthUrl $healthUrl
+
+    # 前端由 FastAPI 同源托管(dist 挂在容器里), 健康检查端口即访问端口
+    Write-Host ''
+    Write-Host ('  访问地址  : http://127.0.0.1:' + $healthPort + '   (前端与 API 同源, 由容器提供)') -ForegroundColor Cyan
+    Write-Host ('  提醒      : 打开页面若发现界面没变, 先 Ctrl+Shift+R 硬刷新一次浏览器缓存') -ForegroundColor DarkGray
+
+    # 宿主常驻依赖(不代为启动, 只提示)
+    $null = Write-HostDependencyReport
+
     Write-OkMsg '全部步骤执行完毕。'
 }
 catch {

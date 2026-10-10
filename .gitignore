@@ -125,3 +125,7 @@ reports/cursor_tickflow_pro_rate_limit_p0.bundle
 docs/*
 # 例外: 数据安全红线文档。它是操作规范, 不进版本控制等于没人看得到。
 !docs/DATA-SAFETY.md
+
+# ===== 部署脚本运行时产物 (deploy.ps1 每次部署写的 tag, 供回滚用) =====
+scripts/.last-deploy-tag
+scripts/.prev-deploy-tag
