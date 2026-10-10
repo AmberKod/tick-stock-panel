@@ -18,6 +18,7 @@ import {
   type StockInfo,
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
+import type { Drawing, DrawTool } from '@/lib/chartDrawings'
 
 /** 分钟档位。与后端 _MKLINE_PERIODS 一致。 */
 export type MklinePeriod = 'm1' | 'm5' | 'm15' | 'm30' | 'm60'
@@ -117,6 +118,11 @@ interface Props {
   adjust?: AdjustMode
   /** 复权系数取不到时的说明回调(让页面能提示"该股无除权记录")。 */
   onAdjustInfo?: (info: { mode: AdjustMode; hasAdjust: boolean; available: boolean }) => void
+  /** 画图工具: 用户自己画的图形 / 当前工具 / 变更回调。原样转发给 EChartsCandlestick。 */
+  drawings?: Drawing[]
+  drawTool?: DrawTool | null
+  drawCtx?: string
+  onDrawingsChange?: (next: Drawing[]) => void
 }
 
 function isValidRow(r: any): boolean {
@@ -205,6 +211,10 @@ export function StockDailyKChart({
   adjust = 'qfq',
   onAdjustInfo,
   showVolumeProfile = false,
+  drawings,
+  drawTool = null,
+  drawCtx,
+  onDrawingsChange,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   // 可见区间由 EChartsCandlestick 在缩放/平移后回传 —— 成交量分布必须按**当前
@@ -432,6 +442,10 @@ export function StockDailyKChart({
           mainType={mainType}
           volumeProfile={volumeProfile}
           onVisibleRangeChange={onVisRange}
+          drawings={drawings}
+          drawTool={drawTool}
+          drawCtx={drawCtx}
+          onDrawingsChange={onDrawingsChange}
         />
       )}
     </div>

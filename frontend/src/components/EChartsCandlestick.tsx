@@ -2,6 +2,8 @@ import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
+import { ChartDrawingLayer } from '@/components/ChartDrawingLayer'
+import type { Drawing, DrawTool } from '@/lib/chartDrawings'
 
 export interface OHLC {
   date: string
@@ -367,6 +369,17 @@ interface Props {
    * 分布必须跟着可见区间走, 否则缩放后图上柱子还是全区间统计, 与眼睛看到的蜡烛对不上。
    */
   onVisibleRangeChange?: (from: number, to: number) => void
+  /** 用户自己画的图形(趋势线/水平线/矩形/斐波那契)。null/空 = 不画。 */
+  drawings?: Drawing[]
+  /** 当前画图工具。null = 关闭画图(图层不吃鼠标事件, 缩放平移照旧)。 */
+  drawTool?: DrawTool | null
+  /**
+   * 新建图形时记下的坐标上下文(周期 + 复权档)。
+   * 复权档一换价格体系就变了, 前复权下画的线放到不复权图上会指错价 ——
+   * 页面按 ctx 过滤后再传进来, 这里是"当前视图的 ctx"。
+   */
+  drawCtx?: string
+  onDrawingsChange?: (next: Drawing[]) => void
 }
 
 /**
@@ -1083,7 +1096,14 @@ export function EChartsCandlestick({
   mainType = 'candle',
   volumeProfile = null,
   onVisibleRangeChange,
+  drawings,
+  drawTool = null,
+  drawCtx = '',
+  onDrawingsChange,
 }: Props) {
+  // 画图图层要拿到 ECharts 实例才能做像素↔数据坐标换算。init 在 effect 里,
+  // 所以这里用 state 存实例, 让图层有能力在图表真正就绪后再挂载。
+  const [chartInst, setChartInst] = useState<ECharts | null>(null)
   // 可见区间(闭区间下标)。缩放/平移后要重算成交量分布, 否则分布图统计的区间
   // 与眼睛看到的蜡烛不是同一段 —— 看起来就像"柱子对不上"。
   const [visRange, setVisRange] = useState(() => ({
@@ -1249,6 +1269,7 @@ export function EChartsCandlestick({
 
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
+    setChartInst(chart)
 
     // 鼠标移动 → 只更新 ref + DOM，不触发 React re-render
     // 设计原则: 找不到有效数据时保持上次显示，永远不清空信息栏
@@ -1350,6 +1371,7 @@ export function EChartsCandlestick({
       ro.disconnect()
       chart.dispose()
       chartRef.current = null
+      setChartInst(null)
     }
   }, [chartHeight]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1511,8 +1533,22 @@ export function EChartsCandlestick({
           dangerouslySetInnerHTML={{ __html: initialHTML }} />
       )}
 
-      {/* ECharts canvas */}
-      <div ref={containerRef} className="w-full" style={{ height: chartHeight }} />
+      {/* ECharts canvas + 画图图层(图层与 canvas 同区域, 只盖 canvas 那一块) */}
+      <div className="relative w-full">
+        <div ref={containerRef} className="w-full" style={{ height: chartHeight }} />
+        {chartInst && (drawTool || (drawings && drawings.length > 0)) && (
+          <ChartDrawingLayer
+            chart={chartInst}
+            dates={dates}
+            dateIndexMap={dateIndexMap}
+            rows={data}
+            drawings={drawings ?? []}
+            ctx={drawCtx}
+            tool={drawTool ?? null}
+            onChange={next => onDrawingsChange?.(next)}
+          />
+        )}
+      </div>
     </div>
   )
 }

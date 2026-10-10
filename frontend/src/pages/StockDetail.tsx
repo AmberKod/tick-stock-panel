@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, GitCompare, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw, X } from 'lucide-react'
@@ -10,6 +10,7 @@ import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
 import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import { computeChips } from '@/lib/chips'
+import { DRAW_TOOLS, loadDrawings, saveDrawings, type Drawing, type DrawTool } from '@/lib/chartDrawings'
 import { ChipDistributionPanel } from '@/components/ChipDistributionPanel'
 import { EstimateTag } from '@/components/EstimateNotice'
 import {
@@ -479,6 +480,31 @@ export function StockDetail() {
   /** 开了筹码但拿不到流通股本 —— 明确说清楚为什么没有, 而不是空着让人猜。 */
   const chipsBlocked = showChips && kPeriod !== 'minute' && !mkPeriod && !chips
 
+  /**
+   * 画图工具(趋势线/水平线/矩形/斐波那契)。
+   * 全部存本地、按标的隔离; 锚点是「日期 + 价格」而不是像素, 缩放平移后仍钉在同一根 K 上。
+   * 每条图形带坐标上下文(周期 + 复权档): 复权档一换价格体系就变了,
+   * 前复权下画的线放到不复权图上会指错价 —— 所以上下文不匹配时**不渲染**, 而不是画错的位置。
+   */
+  const [drawings, setDrawings] = useState<Drawing[]>(() => loadDrawings(symbol))
+  const [drawTool, setDrawTool] = useState<DrawTool | null>(null)
+  const persistDrawings = useCallback((next: Drawing[]) => {
+    setDrawings(next)
+    saveDrawings(symbol, next)
+  }, [symbol])
+  // 换标的 → 换成那个标的的图形, 并退出画图模式(避免手上一个工具误画到新标的)
+  useEffect(() => {
+    setDrawings(loadDrawings(symbol))
+    setDrawTool(null)
+  }, [symbol])
+  /** 当前视图的坐标上下文: 周期 + 分钟档 + 复权档 */
+  const drawCtx = `${kPeriod}|${mkPeriod ?? ''}|${adjust}`
+  const visibleDrawings = useMemo(
+    () => drawings.filter(d => d.ctx === drawCtx),
+    [drawings, drawCtx],
+  )
+  const hiddenDrawings = drawings.length - visibleDrawings.length
+
   const persistPriceLines = useCallback((next: ChartPriceLine[]) => {
     setPriceLines(next)
     try {
@@ -803,11 +829,64 @@ export function StockDetail() {
             </>
           )}
 
+          {/* ── 画图工具 ──
+              画出来的东西不是数据, 是标注: 只存本地、不参与任何计算、也不会被当成信号。
+              锚点存日期+价格, 所以缩放/平移/换主题后仍钉在同一根 K 上。 */}
+          {kPeriod !== 'minute' && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
+              <span className="text-fg-muted">画图</span>
+              {DRAW_TOOLS.map(t => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => setDrawTool(cur => (cur === t.value ? null : t.value))}
+                  title={t.hint}
+                  className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                    drawTool === t.value
+                      ? 'border-amber-400/40 bg-amber-400/10 text-amber-500'
+                      : 'border-border text-fg-muted hover:text-fg-secondary')}
+                >
+                  {t.label}
+                </button>
+              ))}
+              {drawings.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => persistDrawings([])}
+                  title="清除这只股票上画的所有图形(只清本地存储)"
+                  className="rounded border border-border px-1.5 py-0.5 text-fg-muted transition-colors hover:border-red-400/40 hover:text-red-400"
+                >
+                  清除 {drawings.length}
+                </button>
+              )}
+            </>
+          )}
+
           <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-fg-muted">
             {kPeriod !== 'minute' && <span>双击图表可加水平线 · 滚轮缩放 · 拖动平移</span>}
             <Maximize2 className="h-3 w-3" /> 图表区
           </span>
         </div>
+
+        {/* 画图模式的代价要提前说清: 图层吃掉了鼠标事件, 这段时间滚轮缩放/拖动平移用不了。 */}
+        {drawTool && (
+          <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-fg-muted">
+            <span className="text-amber-500">画图模式</span>
+            <span>
+              滚轮缩放与拖动平移暂时不可用（鼠标事件归画图层），退出工具即恢复；画完点一下当前工具按钮即可退出。
+              选中图形后按 Delete 删除，拖动两端圆点可改位置。
+            </span>
+          </div>
+        )}
+        {/* 别的周期/复权档下画的图形, 在当前坐标系里没有意义 —— 说明为什么不显示, 而不是默默消失 */}
+        {hiddenDrawings > 0 && (
+          <div className="px-1 text-[10.5px] text-fg-muted">
+            另有 {hiddenDrawings} 条图形是在
+            <span className="text-fg-secondary">其他周期/复权档</span>
+            下画的（价格体系不同），当前视图不显示 —— 切回去就能看到。
+          </div>
+        )}
 
         {/* 已加的水平线 —— 可删。放在图表上方而不是图里, 免得遮 K 线。 */}
         {kPeriod !== 'minute' && priceLines.length > 0 && (
@@ -875,6 +954,10 @@ export function StockDetail() {
                 { value: price, label: price.toFixed(2), color: '#F59E0B' },
               ])}
               onDataChange={setKline}
+              drawings={visibleDrawings}
+              drawTool={drawTool}
+              drawCtx={drawCtx}
+              onDrawingsChange={persistDrawings}
             />
           </>
         )}
