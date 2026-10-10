@@ -55,6 +55,9 @@ SOURCE_AKSHARE = "akshare"
 #: 成交额 / 换手率 / 振幅 / PE(TTM) / PB / 总市值 / 流通市值 / 涨停跌停。
 #: 九章个股页的行情条也走这个源。标记已在 source_gate 白名单内。
 SOURCE_TENCENT = "live-tencent"
+#: 东财 F10(公司资料 / 核心题材)。与 datacenter 行情报表同域名不同报表号,
+#: 单独标记以便在 UI 上区分"行情来自哪、题材来自哪"。
+SOURCE_EM_F10 = "live-eastmoney-f10"
 
 #: 东财 datacenter 统一入口。与 push2.eastmoney.com 是不同域名(后者被墙)。
 _DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
@@ -722,6 +725,97 @@ def realtime_quote(code: str) -> dict:
     result = {"source": SOURCE_TENCENT, "data": payload}
     _cache_put(url, result, _TENCENT_QUOTE_TTL_S)
     return result
+
+
+#: 东财 F10 报表号(与行情报表分开维护, 报表名错了东财会返回 success:false)。
+_REPORT_F10_ORG = "RPT_F10_BASIC_ORGINFO"        # 公司基本资料 → 行业
+_REPORT_F10_BOARD = "RPT_F10_CORETHEME_BOARDTYPE"  # 核心题材 → 所属板块
+
+
+def _secucode(code: str) -> str:
+    """'300308' → '300308.SZ'。东财 F10 报表按 SECUCODE 过滤, 不是纯 6 位代码。
+
+    与腾讯符号(_tx_symbol)同理但后缀不同: 这里要 '.SH'/'.SZ'/'.BJ'。
+    """
+    c = _norm_code(code)
+    if c[0] in ("4", "8"):
+        return f"{c}.BJ"
+    if c[0] in ("6", "9") or c.startswith("5"):
+        return f"{c}.SH"
+    return f"{c}.SZ"
+
+
+def stock_sectors(code: str, limit: int = 24) -> dict:
+    """个股所属板块 / 题材 —— 东财 F10, 全真源。
+
+    返回 data:
+      - ``industry``: 东财三级行业(EM2016) + 证监会行业(INDUSTRYCSRC1), 原样字符串
+      - ``boards``:   题材列表, ``precise=True``(核心题材)排前, **带东财给的入选理由**
+
+    🔴 与九章同名模块的三点差别(也就是"比它更好"的地方):
+      1. 九章的行业靠 akshare ``stock_individual_info_em`` —— 该函数底层走
+         ``push2.eastmoney.com``, 在我方网络被墙(实测 ProxyError)。它在此处
+         会静默 except 掉, 于是个股页可能一个行业都不显示。我方走东财 F10
+         同域名的 datacenter 报表, 实测可达。
+      2. 九章的题材来自同花顺强势股 tags, 拿不到时退回一份**硬编码兜底 map**
+         (``_DEMO_SECTORS_MAP``)—— 没有数据时依然能显示出板块名。我方不写死
+         映射表, 拿不到就是拿不到。
+      3. 我方多给一层: 东财 ``SELECTED_BOARD_REASON``(为什么归进这个板块),
+         例 "2025年半年报显示, 公司主营业务为高端光通信收发模块"。
+         九章只有板块名, 没有任何归因依据。
+    """
+    code = _norm_code(code)
+    filt = f'(SECUCODE="{_secucode(code)}")'
+
+    industry: dict[str, object] = {}
+    name: str | None = None
+    org_rows = _datacenter(_REPORT_F10_ORG, filt, page_size=1)
+    if org_rows:
+        row = org_rows[0]
+        name = str(row.get("SECURITY_NAME_ABBR") or "").strip() or None
+        em = str(row.get("EM2016") or "").strip()
+        csrc = str(row.get("INDUSTRYCSRC1") or "").strip()
+        if em:
+            industry["em"] = em
+            industry["em_parts"] = [p for p in em.split("-") if p]
+        if csrc:
+            industry["csrc"] = csrc
+            industry["csrc_parts"] = [p for p in csrc.split("-") if p]
+
+    boards: list[dict] = []
+    for row in _datacenter(_REPORT_F10_BOARD, filt, page_size=50,
+                           sort_columns="IS_PRECISE,BOARD_RANK",
+                           sort_types="-1,1"):
+        bname = str(row.get("BOARD_NAME") or "").strip()
+        if not bname:
+            continue
+        if not name:
+            name = str(row.get("SECURITY_NAME_ABBR") or "").strip() or None
+        boards.append({
+            "name": bname,
+            "board_code": (str(row.get("NEW_BOARD_CODE") or row.get("BOARD_CODE")
+                               or "").strip() or None),
+            # '1'=东财认定为核心题材(精确匹配), 其余是宽泛/衍生归类
+            "precise": str(row.get("IS_PRECISE") or "0") == "1",
+            "rank": _num(row.get("BOARD_RANK")),
+            "reason": str(row.get("SELECTED_BOARD_REASON") or "").strip() or None,
+        })
+
+    if not industry and not boards:
+        # 两个报表都没数据 —— 这是"取不到", 不是"该股没有板块"。上抛让上游
+        # 走 available:false, 绝不返回空壳冒充成功。
+        raise ValueError(f"东财 F10 未返回该股板块数据: {code}")
+
+    return {
+        "source": SOURCE_EM_F10,
+        "data": {
+            "code": code,
+            "name": name,
+            "industry": industry or None,
+            "boards": boards[:max(1, min(int(limit), 50))],
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
 
 
 def warmup() -> None:

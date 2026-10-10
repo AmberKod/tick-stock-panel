@@ -31,6 +31,9 @@ REAL_SOURCES: frozenset[str] = frozenset({
     "live-eastmoney",
     # jiuzhang_astock_provider.py:SOURCE_CNINFO (巨潮公告, 2026-10-10 实测真数据)
     "live-cninfo",
+    # jiuzhang_astock_provider.py:SOURCE_EM_F10 (东财 F10 公司资料/核心题材,
+    # 2026-10-10 实测 datacenter-web 可达; 与行情报表同源域名不同报表号)
+    "live-eastmoney-f10",
     "live-hexin",
     "live-tencent-proxy",
     "sec-edgar",

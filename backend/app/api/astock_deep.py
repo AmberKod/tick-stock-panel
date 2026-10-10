@@ -6,6 +6,7 @@
 - GET /api/astock/fundflow/{code}: 资金流向(新浪; 东财 push2/push2his 被墙)
 - GET /api/astock/financials/{code}: 财务摘要(akshare 东财财务指标, 7 组 80 指标)
 - GET /api/astock/quote/{code}: 实时行情(腾讯, 补齐成交额/换手/PE/PB/市值)
+- GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
 失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
@@ -26,6 +27,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     SOURCE,
     SOURCE_AKSHARE,
     SOURCE_CNINFO,
+    SOURCE_EM_F10,
     SOURCE_SINA,
     SOURCE_TENCENT,
     announcements,
@@ -34,6 +36,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     fund_flow,
     realtime_quote,
     research_reports,
+    stock_sectors,
 )
 from app.services.source_gate import is_real
 
@@ -153,6 +156,24 @@ def get_quote(code: str) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: realtime_quote(norm),
                     required_key="price", source=SOURCE_TENCENT)
+
+
+@router.get("/sectors/{code}")
+def get_sectors(code: str, limit: int = 24) -> dict:
+    """个股所属板块 / 题材。
+
+    行业走东财 F10 公司资料, 题材走 F10 核心题材 —— 每个题材都带东财给的
+    ``reason``(入选理由), 前端 hover 即可看到"为什么归进这个板块"。
+
+    ⚠️ 与九章不同: 九章在真源拿不到时会退回硬编码的 ``_DEMO_SECTORS_MAP``,
+    我方两个报表都空就直接 ``available:false`` —— 宁可显示"取不到", 不编板块名。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_EM_F10}
+    return _respond(norm, lambda: stock_sectors(norm, limit=limit),
+                    required_key="boards", source=SOURCE_EM_F10)
 
 
 @router.get("/financials/{code}")

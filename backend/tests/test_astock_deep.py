@@ -719,3 +719,116 @@ def test_api_quote_ok(client, monkeypatch):
     body = client.get("/api/astock/quote/300308").json()
     assert body["available"] is True and body["source"] == "live-tencent"
     assert body["data"]["name"] == "中际旭创"
+
+
+# ---------------------------------------------------------------- 7. 所属板块/题材(东财 F10)
+
+# 实测 300308 中际旭创 2026-10-10 取自东财 F10, 字段裁剪后。
+_F10_ORG_ROW = [{
+    "SECUCODE": "300308.SZ",
+    "SECURITY_CODE": "300308",
+    "SECURITY_NAME_ABBR": "中际旭创",
+    "EM2016": "信息技术-通信设备-通信传输设备",
+    "INDUSTRYCSRC1": "制造业-计算机、通信和其他电子设备制造业",
+}]
+
+_F10_BOARD_ROWS = [
+    {"BOARD_NAME": "通信技术", "IS_PRECISE": "1", "BOARD_RANK": 31,
+     "NEW_BOARD_CODE": "BK0812",
+     "SELECTED_BOARD_REASON": "2025年半年报显示，公司主营业务为高端光通信收发模块。"},
+    {"BOARD_NAME": "算力概念", "IS_PRECISE": "1", "BOARD_RANK": 33,
+     "NEW_BOARD_CODE": "BK0901", "SELECTED_BOARD_REASON": None},
+    {"BOARD_NAME": "高市净率", "IS_PRECISE": "0", "BOARD_RANK": 12,
+     "NEW_BOARD_CODE": "BK0888", "SELECTED_BOARD_REASON": None},
+]
+
+
+def _patch_f10(monkeypatch, org=None, boards=None):
+    calls: list[str] = []
+
+    def fake(report_name, filter_str="", page_size=50, sort_columns="", sort_types="-1"):
+        calls.append(report_name)
+        if report_name == prov._REPORT_F10_ORG:
+            return _F10_ORG_ROW if org is None else org
+        if report_name == prov._REPORT_F10_BOARD:
+            return _F10_BOARD_ROWS if boards is None else boards
+        raise AssertionError(f"未预期的报表: {report_name}")
+
+    monkeypatch.setattr(prov, "_datacenter", fake)
+    return calls
+
+
+def test_sectors_uses_f10_reports(monkeypatch):
+    """行业与题材都走东财 F10(不是 akshare —— 它底层 push2 在我方被墙)。"""
+    calls = _patch_f10(monkeypatch)
+    prov.stock_sectors("300308")
+    assert prov._REPORT_F10_ORG in calls and prov._REPORT_F10_BOARD in calls
+
+
+def test_sectors_secucode_suffix(monkeypatch):
+    """F10 按 SECUCODE 过滤: 6/9/5 开头 .SH, 4/8 开头 .BJ, 其余 .SZ。"""
+    for code, suffix in (("600519", ".SH"), ("300308", ".SZ"), ("830799", ".BJ")):
+        sent: dict[str, str] = {}
+
+        # 默认参数绑定循环变量, 避免闭包延迟取值(每次循环 sent 都是新 dict)
+        def fake(report_name, filter_str="", page_size=50, sort_columns="",
+                 sort_types="-1", _sent=sent):
+            if report_name == prov._REPORT_F10_ORG:
+                _sent["filter"] = filter_str
+                return _F10_ORG_ROW
+            return _F10_BOARD_ROWS
+
+        monkeypatch.setattr(prov, "_datacenter", fake)
+        prov.stock_sectors(code)
+        assert sent["filter"] == f'(SECUCODE="{code}{suffix}")', (code, sent)
+
+
+def test_sectors_industry_and_boards(monkeypatch):
+    _patch_f10(monkeypatch)
+    d = prov.stock_sectors("300308")["data"]
+
+    assert d["name"] == "中际旭创"
+    assert d["industry"]["em"] == "信息技术-通信设备-通信传输设备"
+    assert d["industry"]["em_parts"] == ["信息技术", "通信设备", "通信传输设备"]
+    assert d["industry"]["csrc_parts"][0] == "制造业"
+
+    names = [b["name"] for b in d["boards"]]
+    assert names == ["通信技术", "算力概念", "高市净率"]
+    # 核心题材(IS_PRECISE=1)带入选理由; 宽泛归类没有理由
+    assert d["boards"][0]["precise"] is True
+    assert "高端光通信" in (d["boards"][0]["reason"] or "")
+    assert d["boards"][2]["precise"] is False
+    assert d["boards"][2]["reason"] is None
+
+
+def test_sectors_source_is_real(monkeypatch):
+    from app.services.source_gate import is_real
+    _patch_f10(monkeypatch)
+    payload = prov.stock_sectors("300308")
+    assert payload["source"] == "live-eastmoney-f10"
+    assert is_real(payload) is True, "live-eastmoney-f10 未登记进 source_gate 白名单"
+
+
+def test_sectors_no_data_raises(monkeypatch):
+    """🔴 两报表都空 → 上抛。绝不学九章退回硬编码 _DEMO_SECTORS_MAP 编板块名。"""
+    _patch_f10(monkeypatch, org=[], boards=[])
+    with pytest.raises(ValueError):
+        prov.stock_sectors("300308")
+
+
+def test_sectors_bad_code(monkeypatch):
+    _patch_f10(monkeypatch)
+    with pytest.raises(ValueError):
+        prov.stock_sectors("AAOI")
+
+
+def test_api_sectors_ok(client, monkeypatch):
+    _patch_f10(monkeypatch)
+    body = client.get("/api/astock/sectors/300308").json()
+    assert body["available"] is True and body["source"] == "live-eastmoney-f10"
+    assert body["data"]["boards"][0]["name"] == "通信技术"
+
+
+def test_api_sectors_bad_code(client):
+    body = client.get("/api/astock/sectors/AAOI").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
