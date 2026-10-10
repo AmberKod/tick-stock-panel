@@ -30,7 +30,7 @@
 | 3/6 | `docker compose build` 重新打包镜像 |
 | 4/6 | `docker compose up -d --force-recreate` 重建容器上线 |
 | 5/6 | 轮询 `http://127.0.0.1:<port>/health`，**失败自动回滚到上一版镜像** |
-| 6/6 | 清理旧镜像（默认保留最近 5 个 tag） |
+| 6/6 | 清理磁盘：保留最近 5 个镜像 tag + 回收悬空镜像 `<none>` + 构建缓存压回上限（默认 12GB） |
 
 跑完会打印前端访问地址，以及 sec_relay / OpenBB 两个**宿主常驻依赖**的状态。
 
@@ -123,7 +123,8 @@
 | `-Port 3018` | 手动指定健康检查端口（默认读 `.env` 的 `PORT`，读不到用 3018） |
 | `-HealthTimeoutSec 90` | 健康检查总超时 |
 | `-BusyWindowSec 60` | 「正在写数据」判定窗口（秒） |
-| `-KeepImages 5` | 清理时保留最近几个镜像 tag |
+| `-KeepImages 5` | 清理时保留最近几个镜像 tag（每个旧 tag 约占 0.4GB 独有层） |
+| `-KeepBuildCache 12GB` | buildx 构建缓存保留上限；设为 `0` 表示不清理缓存（磁盘换构建速度） |
 
 ### 回滚
 
@@ -153,7 +154,9 @@
   scripts/.prev-deploy-tag   # 上一版 tag（回滚目标）
   ```
 
-- 清理策略：只处理 Repository 等于本项目镜像名的行，**不会误删其他项目的镜像**；`latest` 与 `<none>` 不纳入统计且 `latest` 永不删除；当前版本与上一版本受保护；其余保留最近 5 个，删除前会先打印清单。
+- 清理策略（两段，缺一不可）：
+  1. **旧 tag**：只处理 Repository 等于本项目镜像名的行，**不会误删其他项目的镜像**；`latest` 与 `<none>` 不纳入统计且 `latest` 永不删除；当前版本与上一版本受保护；其余保留最近 5 个，删除前会先打印清单。
+  2. **悬空镜像 + 构建缓存**（2026-10-10 补）：`docker rmi` 只是**摘 tag**，镜像实体会变成 `<none>` 留下来，实测能攒到 2GB+；而 buildx 构建缓存不清理会一路涨到 16GB+。所以补了 `docker image prune -f`（只删 `<none>`，**不带 `-a`**，绝不碰任何还带 tag 的镜像）和 `docker builder prune --max-used-space`（压回上限而非全清，全清会让下次构建退化成冷启动）。
 
 ---
 

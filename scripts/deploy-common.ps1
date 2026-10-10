@@ -1090,6 +1090,91 @@ function Remove-OldDeployImages {
     }
 }
 
+function Get-DockerReclaimable {
+    <#
+    .SYNOPSIS 读取 docker system df 里"可回收"那几行的摘要, 用于清理前后对比。
+    #>
+    [CmdletBinding()]
+    param()
+
+    $rows = Invoke-ExternalCapture -Exe 'docker' -Arguments @('system', 'df') -Silent
+    $summary = @{}
+    if ($null -eq $rows) {
+        return $summary
+    }
+    foreach ($row in $rows) {
+        $line = ([string]$row).Trim()
+        if ($line -match '^(Images|Build Cache)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+.*)$') {
+            $summary[$Matches[1]] = $Matches[5].Trim()
+        }
+    }
+    return $summary
+}
+
+function Invoke-DockerDiskCleanup {
+    <#
+    .SYNOPSIS 清理悬空镜像(<none>)与构建缓存 —— Remove-OldDeployImages 管不到的那部分磁盘。
+
+    .DESCRIPTION
+        Remove-OldDeployImages 只做 `docker rmi <repo>:<tag>`, 它有两个盲区:
+          1. 被 untag 的镜像会变成 <none>(悬空)。讽刺的是它正是这里的清理动作
+             自己造出来的: rmi 把 tag 摘掉后镜像实体还在, 实测能攒到 2GB+,
+             而 <none> 又被统计逻辑显式跳过, 于是永远不会被清。
+          2. 每次 build 产生的 buildx 构建缓存不会自动回收, 实测涨到 16GB+。
+        这里补两步:
+          - `docker image prune -f`: 只删悬空镜像, **绝不碰任何还带 tag 的镜像**
+            (不带 -a), 所以其他项目的镜像不受影响;
+          - `docker builder prune --max-used-space <上限>`: 把缓存压回上限而不是
+            全清 —— 全清会让下一次构建退化成冷启动(实测多花 1~2 分钟)。
+
+    .PARAMETER KeepBuildCache
+        构建缓存保留上限, 默认 12GB。设为 0 表示跳过缓存清理。
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$KeepBuildCache = '12GB',
+        [switch]$DryRun
+    )
+
+    $before = Get-DockerReclaimable
+    if ($before.Count -gt 0) {
+        Write-InfoMsg '清理前 docker 占用:'
+        foreach ($key in ($before.Keys | Sort-Object)) {
+            Write-InfoMsg ('  ' + $key + ' 可回收 ' + $before[$key])
+        }
+    }
+
+    # 悬空镜像: 只删 <none>, 不影响任何带 tag 的镜像
+    try {
+        $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('image', 'prune', '-f') `
+            -Description '清理悬空镜像(<none>, 不触碰带 tag 的镜像)' -DryRun:$DryRun
+        Write-OkMsg '悬空镜像清理完成。'
+    }
+    catch {
+        Write-WarnMsg ('悬空镜像清理失败(不影响部署结果): ' + $_.Exception.Message)
+    }
+
+    # 构建缓存: 压回上限, 保留最近的以维持构建速度
+    if ($KeepBuildCache -and $KeepBuildCache -ne '0') {
+        try {
+            $null = Invoke-ExternalCommand -Exe 'docker' -Arguments @('builder', 'prune', '-f', '--max-used-space', $KeepBuildCache) `
+                -Description ('构建缓存压回上限 ' + $KeepBuildCache) -DryRun:$DryRun
+            Write-OkMsg ('构建缓存已压回 ' + $KeepBuildCache + ' 以内。')
+        }
+        catch {
+            Write-WarnMsg ('构建缓存清理失败(不影响部署结果): ' + $_.Exception.Message)
+        }
+    }
+
+    $after = Get-DockerReclaimable
+    if ($after.Count -gt 0) {
+        Write-InfoMsg '清理后 docker 占用:'
+        foreach ($key in ($after.Keys | Sort-Object)) {
+            Write-InfoMsg ('  ' + $key + ' 可回收 ' + $after[$key])
+        }
+    }
+}
+
 function Write-DeploySummary {
     <#
     .SYNOPSIS 打印部署/回滚结果摘要。

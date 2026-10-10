@@ -12,7 +12,8 @@
       [3/6] docker compose build 构建镜像, 并给构建产物打上本次 tag(同时保留 latest)
       [4/6] docker compose up -d 部署/重启服务
       [5/6] 轮询 http://127.0.0.1:<port>/health, 最多 90 秒; 失败则自动回滚到上一版
-      [6/6] 清理旧镜像: 只保留本项目最近 5 个 tag
+      [6/6] 清理磁盘: 只保留本项目最近 5 个镜像 tag + 回收悬空镜像(<none>) +
+                      把 buildx 构建缓存压回上限(默认 12GB)
 
     重要说明:
       - 本脚本不会修改 Dockerfile / docker-compose.yml / .dockerignore, 也不会动 data/ 目录。
@@ -64,6 +65,10 @@
 .PARAMETER KeepImages
     清理时保留最近多少个镜像 tag, 默认 5。
 
+.PARAMETER KeepBuildCache
+    构建缓存保留上限(传给 docker builder prune --max-used-space), 默认 12GB。
+    设成 0 表示跳过构建缓存清理(保留全部, 磁盘换构建速度)。
+
 .EXAMPLE
     .\scripts\deploy.ps1 -DryRun
     演练一遍, 只打印命令, 不做任何实际变更。
@@ -98,7 +103,8 @@ param(
     [int]$HealthTimeoutSec = 90,
     [int]$HealthIntervalSec = 3,
     [int]$BusyWindowSec = 60,
-    [int]$KeepImages = 5
+    [int]$KeepImages = 5,
+    [string]$KeepBuildCache = '12GB'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -411,6 +417,10 @@ try {
         $protected += $oldLastTag
     }
     Remove-OldDeployImages -ImageName $imageName -Keep $KeepImages -ProtectedTags $protected -DryRun:$DryRun
+
+    # 旧 tag 清理只摘 tag, 留下的 <none> 实体和 buildx 缓存才是磁盘大头 —— 补一步回收
+    Write-Host ''
+    Invoke-DockerDiskCleanup -KeepBuildCache $KeepBuildCache -DryRun:$DryRun
 
     Write-DeploySummary -Title '部署完成' -ImageName $imageName -Tag $newTag -HealthUrl $healthUrl
 
