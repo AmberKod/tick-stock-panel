@@ -236,7 +236,13 @@ export function ChartDrawingLayer({
     if (!draft) return
     const move = (e: MouseEvent) => {
       const p = pointAt(e.clientX, e.clientY)
-      if (p) setDraft(d => (d ? { ...d, b: p, c: d.stage === 'width' ? p : d.c } : d))
+      if (!p) return
+      setDraft(d => {
+        if (!d) return d
+        // 定宽度这一阶段只动 c —— b(基准线终点)要是也跟着鼠标走,
+        // c 和基准线就永远重合, 通道宽度恒为 0, 画不出来。
+        return d.stage === 'width' ? { ...d, c: p } : { ...d, b: p }
+      })
     }
     const up = () => {
       const d = stateRef.current.draft
