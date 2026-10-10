@@ -891,6 +891,125 @@ def test_api_minute_ok(client, monkeypatch):
     assert len(body["data"]["points"]) == 3
 
 
+# ---------------------------------------------------------------- 6.6 分钟K(腾讯 mkline)
+
+# 实测 sh688825 m5 前 3 根(裁剪)。行 = [时间, 开, 收, 高, 低, 量, {}, extra]
+# ⚠️ 第 2 列是开盘、第 3 列是收盘 —— 不是 OHLC 顺序。
+_MK_ROWS = [
+    ["202610091440", "50.80", "50.95", "50.99", "50.78", "1200000.00", {}, "0.00"],
+    ["202610091445", "50.95", "51.10", "51.15", "50.90", "1500000.00", {}, "0.00"],
+    ["202610091500", "51.02", "51.00", "51.10", "51.00", "3805391.00", {}, "8.45"],
+]
+# qt: [6]=成交量 [37]=成交额(万元)。这里 6/37 的比值 = 51.0 → 单位是股。
+_MK_QT_SHARES = ["1", "长鑫科技", "688825", "51.00", "50.52", "49.81", "6505391", "", "",
+                 "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                 "", "", "", "", "", "", "", "", "", "", "33177"]
+# 同一批行(价区 50.78~51.15), 但 qt 的量按"手"给: 额/量 = 5100 ≈ 100×价格
+# → 应判定为手并 ×100。
+_MK_QT_HANDS = ["1", "浦发银行", "600000", "9.54", "9.70", "9.68", "65053", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "33177"]
+
+
+def _patch_mkline(monkeypatch, rows=None, qt=None, empty=False):
+    sent: dict[str, object] = {}
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        sent["url"] = url
+        # urlencode 会把逗号编成 %2C, 先还原再切
+        sym = url.split("param=")[-1].split("%2C")[0]
+        if empty:
+            return {"code": 0, "data": {sym: {"qt": {sym: qt or _MK_QT_SHARES}, "m5": []}}}
+        return {"code": 0, "data": {sym: {
+            "qt": {sym: qt if qt is not None else _MK_QT_SHARES},
+            "m5": rows if rows is not None else _MK_ROWS,
+        }}}
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    return sent
+
+
+def test_mkline_uses_param_form(monkeypatch):
+    """mkline 只认 ``param=sh600000,m5,,320``; 用 code=/type= 会返回 param error。"""
+    sent = _patch_mkline(monkeypatch)
+    prov.minute_kline("600000", period="m5", limit=320)
+    assert "param=sh600000%2Cm5%2C%2C320" in sent["url"], sent["url"]
+
+
+def test_mkline_open_close_order(monkeypatch):
+    """🔴 行内第 2 列是开盘、第 3 列是收盘(不是 OHLC 顺序), 写反了整根 K 就反了。"""
+    _patch_mkline(monkeypatch)
+    rows = prov.minute_kline("688825", period="m5")["data"]["rows"]
+
+    first = rows[0]
+    assert first["date"] == "2026-10-09 14:40"      # 区间结束时刻
+    assert first["open"] == pytest.approx(50.80)
+    assert first["close"] == pytest.approx(50.95)
+    assert first["high"] == pytest.approx(50.99)
+    assert first["low"] == pytest.approx(50.78)
+
+
+def test_mkline_volume_unit_normalized_to_shares(monkeypatch):
+    """qt 里量按手给时(额/量 = 100×价格) → 输出必须 ×100 折成股。"""
+    _patch_mkline(monkeypatch, qt=_MK_QT_HANDS)
+    rows = prov.minute_kline("600000", period="m5")["data"]["rows"]
+    assert rows[0]["volume"] == pytest.approx(1200000.0 * 100)
+
+    # 单位是股时不该再放大
+    _patch_mkline(monkeypatch, qt=_MK_QT_SHARES)
+    rows = prov.minute_kline("688825", period="m5")["data"]["rows"]
+    assert rows[0]["volume"] == pytest.approx(1200000.0)
+
+
+def test_mkline_unit_mismatch_raises(monkeypatch):
+    """qt 的额/量既不像股也不像手 → 上抛, 不猜系数。"""
+    bad = list(_MK_QT_SHARES)
+    bad[37] = "331770"      # 额放大 10 倍 → 均价 510, 不在 50.78~51.15
+    bad[6] = "6505391"
+    _patch_mkline(monkeypatch, qt=bad)
+    with pytest.raises(ValueError):
+        prov.minute_kline("688825", period="m5")
+
+
+def test_mkline_bad_period(monkeypatch):
+    _patch_mkline(monkeypatch)
+    with pytest.raises(ValueError):
+        prov.minute_kline("688825", period="m120")
+
+
+def test_mkline_empty_raises(monkeypatch):
+    _patch_mkline(monkeypatch, empty=True)
+    with pytest.raises(ValueError):
+        prov.minute_kline("688825", period="m5")
+
+
+def test_mkline_source_is_real(monkeypatch):
+    from app.services.source_gate import is_real
+    _patch_mkline(monkeypatch)
+    payload = prov.minute_kline("688825", period="m5")
+    assert payload["source"] == "live-tencent"
+    assert is_real(payload) is True
+
+
+def test_api_mkline_bad_code(client):
+    body = client.get("/api/astock/mkline/AAOI").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_mkline_bad_period(client, monkeypatch):
+    _patch_mkline(monkeypatch)
+    body = client.get("/api/astock/mkline/688825?period=m2").json()
+    assert body["available"] is False and "bad_period" in body["reason"]
+
+
+def test_api_mkline_ok(client, monkeypatch):
+    _patch_mkline(monkeypatch)
+    body = client.get("/api/astock/mkline/688825.SH?period=m5&limit=100").json()
+    assert body["available"] is True and body["source"] == "live-tencent"
+    assert len(body["data"]["rows"]) == 3
+    assert body["data"]["period"] == "m5"
+
+
 # ---------------------------------------------------------------- 7. 所属板块/题材(东财 F10)
 
 # 实测 300308 中际旭创 2026-10-10 取自东财 F10, 字段裁剪后。

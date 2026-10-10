@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type KlineRow } from '@/lib/api'
+import { api, request, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { aggregateKline, type KPeriod } from '@/lib/klinePeriod'
+import { aggregateKline, computeIndicators, type KPeriod } from '@/lib/klinePeriod'
 import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
@@ -16,6 +16,17 @@ import {
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
 
+/** 分钟档位。与后端 _MKLINE_PERIODS 一致。 */
+export type MklinePeriod = 'm1' | 'm5' | 'm15' | 'm30' | 'm60'
+
+export const MK_PERIODS: { label: string; value: MklinePeriod }[] = [
+  { label: '1分', value: 'm1' },
+  { label: '5分', value: 'm5' },
+  { label: '15分', value: 'm15' },
+  { label: '30分', value: 'm30' },
+  { label: '60分', value: 'm60' },
+]
+
 const SUB_INFO_H = 16
 const SUB_GAP = 4
 const MAX_DAYS = 2000
@@ -26,6 +37,35 @@ function normalizeVolumeCompare(config: VolumeCompareConfig): VolumeCompareConfi
     enabled: config.enabled !== false,
     days: Math.max(1, Math.min(20, Math.round(Number(config.days) || 1))),
   }
+}
+
+/** 分钟K响应(与后端 app/api/astock_deep.py::minute_kline 对齐)。 */
+interface MklineResp {
+  available: boolean
+  source: string
+  reason?: string
+  data?: {
+    code: string
+    name: string | null
+    period: string
+    prev_close: number | null
+    /** date 形如 '2026-10-09 14:40' —— 该分钟区间的结束时刻, 不能切成日期。 */
+    rows: { date: string; open: number; close: number; high: number; low: number; volume: number }[]
+  }
+}
+
+/** 分钟K → OHLC。与 toOHLC 唯一的区别: **保留时间部分**。 */
+function toOHLCMinute(rows: { date: string; open: number; close: number; high: number; low: number; volume: number }[]): OHLC[] {
+  return rows
+    .filter(r => r && r.date != null && r.open != null && r.close != null)
+    .map(r => ({
+      date: String(r.date),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume ?? 0),
+    }))
 }
 
 export interface StockDailyKChartResult {
@@ -49,8 +89,13 @@ interface Props {
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
-  /** 日/周/月/年。周月年由日K聚合而来(确定性派生, 非另一份数据)。 */
+  /** 日/周/月/年/分时。周月年由日K聚合而来(确定性派生, 非另一份数据)。 */
   period?: KPeriod
+  /**
+   * 分钟档('m1'|'m5'|'m15'|'m30'|'m60')。给了就走腾讯 mkline 真源而不是日K ——
+   * 本地 kline_minute 库目前是空的, 这个端点直连就有数据。
+   */
+  mklinePeriod?: MklinePeriod
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -135,6 +180,7 @@ export function StockDailyKChart({
   showInfoBar = true,
   visibleBars = 60,
   period = 'day',
+  mklinePeriod,
   linkedPrice,
   onDateClick,
   onPriceDoubleClick,
@@ -153,13 +199,32 @@ export function StockDailyKChart({
   const kline = useQuery({
     queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns),
     queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns),
-    enabled: !!symbol,
+    enabled: !!symbol && !mklinePeriod,
+    placeholderData: (prev) => prev,
+  })
+
+  // 分钟K(1/5/15/30/60)走独立的腾讯源: 本地 kline_minute 库对这些标的是空的,
+  // 但腾讯 mkline 端点直连就有真数据 —— 不做"等库补齐"的空图。
+  const mkline = useQuery({
+    queryKey: QK.astockMkline(symbol, mklinePeriod ?? ''),
+    queryFn: () => request<MklineResp>(
+      `/api/astock/mkline/${encodeURIComponent(symbol)}?period=${mklinePeriod}&limit=320`),
+    enabled: !!symbol && !!mklinePeriod,
+    staleTime: 30_000,
     placeholderData: (prev) => prev,
   })
 
   const dayRows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  // 分钟K: 后端只给 OHLCV, 指标必须在这串分钟 bar 上重算(不能沿用日K的指标值)。
+  const mkRows = useMemo(
+    () => mklinePeriod ? computeIndicators(toOHLCMinute(mkline.data?.data?.rows ?? [])) : [],
+    [mkline.data?.data?.rows, mklinePeriod],
+  )
   // 周/月/年在日K基础上聚合; 日K原样透传(后端算好的指标就是权威值)
-  const rows = useMemo(() => aggregateKline(dayRows, period), [dayRows, period])
+  const rows = useMemo(
+    () => mklinePeriod ? mkRows : aggregateKline(dayRows, period),
+    [dayRows, period, mklinePeriod, mkRows],
+  )
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [
@@ -268,9 +333,16 @@ export function StockDailyKChart({
           )}
         </div>
       )}
-      {kline.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
-      {kline.isError && <div className="text-sm text-danger py-2">日K加载失败</div>}
-      {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
+      {(kline.isLoading || mkline.isLoading) && <div className="text-sm text-muted py-4">加载中…</div>}
+      {(kline.isError || mkline.isError) && <div className="text-sm text-danger py-2">
+        {mklinePeriod ? '分钟K加载失败' : '日K加载失败'}
+      </div>}
+      {mklinePeriod && !mkline.isLoading && !mkline.isError && mkline.data && !mkline.data.available && (
+        <div className="px-1 py-2 text-xs text-muted">
+          分钟K不可用：{mkline.data.reason ?? '未知原因'} —— 不画空图，也不拿日K冒充分钟K。
+        </div>
+      )}
+      {!mklinePeriod && !kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
         <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
       )}
       {rows.length > 0 && (

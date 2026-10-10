@@ -7,6 +7,7 @@
 - GET /api/astock/financials/{code}: 财务摘要(akshare 东财财务指标, 7 组 80 指标)
 - GET /api/astock/quote/{code}: 实时行情(腾讯, 补齐成交额/换手/PE/PB/市值)
 - GET /api/astock/minute/{code}: 当日分时(腾讯; 分时线/均价线/分时量)
+- GET /api/astock/mkline/{code}: 分钟K(腾讯; 1/5/15/30/60 分)
 - GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
@@ -36,6 +37,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     financials,
     fund_flow,
     minute_bars,
+    minute_kline,
     realtime_quote,
     research_reports,
     stock_sectors,
@@ -176,6 +178,32 @@ def get_minute(code: str) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: minute_bars(norm),
                     required_key="points", source=SOURCE_TENCENT)
+
+
+@router.get("/mkline/{code}")
+def get_minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
+    """A股分钟K(腾讯 mkline): 1分 / 5分 / 15分 / 30分 / 60分。
+
+    本地 kline_minute 库对这些标的还是空的(补数要 Pro+ 权限), 但这个端点直连就有
+    真数据 —— 不做"等库补齐再说"的空图。
+
+    ⚠️ 行内量单位随标的不同(主板手 / 科创板股), 这里已统一成**股**;
+       时间字段是该分钟区间的结束时刻, 前端直接用, 不要再切片成日期。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TENCENT}
+    period = (period or "").strip().lower()
+    if period not in ("m1", "m5", "m15", "m30", "m60"):
+        return {"available": False,
+                "reason": f"bad_period: {period!r} (m1/m5/m15/m30/m60)",
+                "source": SOURCE_TENCENT}
+    if limit < 20 or limit > 640:
+        return {"available": False, "reason": f"bad_limit: {limit} (20..640)",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: minute_kline(norm, period=period, limit=limit),
+                    required_key="rows", source=SOURCE_TENCENT)
 
 
 @router.get("/sectors/{code}")

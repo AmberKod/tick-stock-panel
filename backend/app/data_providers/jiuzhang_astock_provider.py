@@ -88,6 +88,15 @@ _TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
 #: 分时盘中变化快但体量大, 15s 足够 —— 再快就是白打腾讯的带宽。
 _TENCENT_MINUTE_TTL_S = 15.0
 
+#: 腾讯分钟K(m1/m5/m15/m30/m60)。⚠️ 用 ifzq.gtimg.cn 而不是 web.ifzq.gtimg.cn:
+#: 实测容器内后者解析 mkline 路径时 DNS 间歇性失败(分时那个路径没事), 前者稳定。
+#: 参数格式是 ``param=sh600000,m5,,320``, 不是 ``code=/type=``(那样返回 param error)。
+_TENCENT_MKLINE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
+#: 分钟K缓存(秒)。历史K不会变, 只有最后一根在盘中跳动 —— 30s 足够。
+_TENCENT_MKLINE_TTL_S = 30.0
+#: 支持的分钟档位。腾讯不提供 120 分钟, 别让调用方乱传。
+_MKLINE_PERIODS = ("m1", "m5", "m15", "m30", "m60")
+
 #: 「机构专用」席位的营业部代码。实测 002317 买入席位中三条机构席位均为 "0"。
 _INSTITUTION_DEPT_CODE = "0"
 
@@ -755,6 +764,109 @@ def _volume_unit_factor(cum_v: float, cum_a: float, low: float, high: float) -> 
     if within(implied / 100.0):
         return 100.0
     return None
+
+
+def _tx_volume_unit_from_qt(qt: object, lo: float, hi: float) -> float | None:
+    """从腾讯 ``qt`` 数组反推该标的成交量的单位(1.0=股 / 100.0=手)。
+
+    分钟K(mkline)的行里**只有量没有额**, 没法像分时那样用本行数据自校验,
+    但同一个响应体里的 qt 数组有 [6]成交量 与 [37]成交额(万元) —— 两者都是
+    **同一时刻的当日累计值**, 比值就是当日均价, 同样必须落在价格区间内。
+    """
+    if not isinstance(qt, list) or len(qt) < 38:
+        return None
+    vol = _num(qt[6])
+    amt_wan = _num(qt[37])
+    if vol is None or amt_wan is None or vol <= 0:
+        return None
+    return _volume_unit_factor(vol, amt_wan * _WAN, lo, hi)
+
+
+def minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
+    """A股**分钟K**(腾讯 mkline): 1分 / 5分 / 15分 / 30分 / 60分。
+
+    九章个股页的周期档里有 1/5/15/30/60 分钟, 我方本地 kline_minute 库对这些标的是
+    空的(实测 688825 `source: none`, 且分钟同步要 Pro+ 权限) —— 走腾讯这个端点
+    一样拿得到真数据, 不需要等本地库补齐。
+
+    ⚠️ 字段口径(实测 sh688825, m5 320 根):
+       行 = ``[时间(YYYYMMDDHHMM), 开, 收, 高, 低, 量, {}, extra]`` —— 注意**第 2 列是
+       开、第 3 列是收**(不是 OHLC 顺序), 且与日K接口一样**没有成交额列**。
+       时间是该区间的**结束时刻**(15:00 那根是 14:55~15:00)。
+       量单位同样随标的不同(主板手 / 科创板股), 用 qt 数组反推(见
+       ``_tx_volume_unit_from_qt``)。输出统一为**股**。
+
+    ⚠️ 不补 K: 腾讯给多少根就是多少根, 缺失的区间(停牌/集合竞价)不插零轴。
+    """
+    code = _norm_code(code)
+    sym = _tx_symbol(code)
+    period = (period or "").strip().lower()
+    if period not in _MKLINE_PERIODS:
+        raise ValueError(f"period 必须是 {_MKLINE_PERIODS} 之一: {period!r}")
+    limit = max(20, min(int(limit or 320), 640))
+
+    url = _TENCENT_MKLINE_URL + "?" + urllib.parse.urlencode(
+        {"param": f"{sym},{period},,{limit}"})
+    cached = _cache_get(url)
+    if isinstance(cached, dict):
+        return cached
+
+    payload = _request_json(url)
+    node = ((payload or {}).get("data") or {}).get(sym)
+    raw_rows = (node or {}).get(period) if isinstance(node, dict) else None
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise ValueError(f"腾讯未返回分钟K: {sym} {period}")
+
+    qt = (node.get("qt") or {}).get(sym) if isinstance(node, dict) else None
+
+    parsed: list[tuple[str, float, float, float, float, float]] = []
+    for r in raw_rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 6:
+            continue
+        ts = str(r[0]).strip()
+        o, c = _num(r[1]), _num(r[2])
+        h, l, v = _num(r[3]), _num(r[4]), _num(r[5])
+        if o is None or c is None or h is None or l is None or v is None:
+            continue
+        if len(ts) == 12:
+            ts = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}"
+        parsed.append((ts, o, c, h, l, v))
+
+    if not parsed:
+        raise ValueError(f"腾讯分钟K无法解析: {sym} {period}")
+
+    # 单位判定用**最后一天**的价格区间: qt 是当日累计, 拿全历史的 low/high 会错位
+    last_day = parsed[-1][0][:10]
+    day_rows = [p for p in parsed if p[0].startswith(last_day)]
+    lo = min(p[4] for p in day_rows)
+    hi = max(p[3] for p in day_rows)
+    factor = _tx_volume_unit_from_qt(qt, lo, hi)
+    if factor is None:
+        raise ValueError(f"腾讯分钟K量单位无法判定: {sym} {period}")
+
+    rows = [{
+        "date": p[0],
+        "open": p[1],
+        "close": p[2],
+        "high": p[3],
+        "low": p[4],
+        "volume": round(p[5] * factor, 0),
+    } for p in parsed]
+
+    result = {
+        "source": SOURCE_TENCENT,
+        "data": {
+            "code": code,
+            "symbol": sym,
+            "name": qt[1] if isinstance(qt, list) and len(qt) > 1 else None,
+            "period": period,
+            "rows": rows,
+            "prev_close": _num(qt[4]) if isinstance(qt, list) and len(qt) > 4 else None,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(url, result, _TENCENT_MKLINE_TTL_S)
+    return result
 
 
 def minute_bars(code: str) -> dict:

@@ -7,7 +7,7 @@ import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
-import { StockDailyKChart, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import { StockDailyKChart, type MklinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
@@ -52,6 +52,18 @@ const K_PERIODS: { label: string; value: KPeriod }[] = [
   { label: '周K', value: 'week' },
   { label: '月K', value: 'month' },
   { label: '年K', value: 'year' },
+]
+
+/**
+ * 分钟档。九章周期条有 1/5/15/30/60 分, 我方本地 kline_minute 库是空的(补数要 Pro+),
+ * 但腾讯 mkline 端点直连就有真数据 —— 走它, 不做空图。
+ */
+const MK_TABS: { label: string; value: MklinePeriod }[] = [
+  { label: '1分', value: 'm1' },
+  { label: '5分', value: 'm5' },
+  { label: '15分', value: 'm15' },
+  { label: '30分', value: 'm30' },
+  { label: '60分', value: 'm60' },
 ]
 
 /** 实时行情契约(与后端 app/api/astock_deep.py 的 realtime_quote 对齐)。 */
@@ -348,6 +360,8 @@ export function StockDetail() {
 
   const [months, setMonths] = useState(6)
   const [kPeriod, setKPeriod] = useState<KPeriod>('day')
+  /** 分钟档; 非空时 kPeriod 无意义(图表走 mkline 源)。 */
+  const [mkPeriod, setMkPeriod] = useState<MklinePeriod | null>(null)
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
   const [showMA, setShowMA] = useState(true)
   const [kline, setKline] = useState<StockDailyKChartResult | null>(null)
@@ -461,21 +475,44 @@ export function StockDetail() {
                 type="button"
                 onClick={() => {
                   setKPeriod(p.value)
+                  setMkPeriod(null)
                   // 分时不用根数控制(0 = 不适用), 保持上一次的缩放以免切回日K被重置
                   const bars = PERIOD_DEFAULT_BARS[p.value]
                   if (bars > 0) setVisibleBars(bars)
                 }}
                 className={cn('rounded px-2 py-0.5 transition-colors',
-                  kPeriod === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  kPeriod === p.value && !mkPeriod ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
               >
                 {p.label}
               </button>
             ))}
           </div>
 
-          {/* 分时档没有「区间/MA/缩放」这三组控件(它固定是当日 09:30~15:00),
-              摆上去点了没反应反而像坏了 —— 直接不渲染。 */}
-          {kPeriod !== 'minute' && (
+          {/* 分钟档(真源: 腾讯 mkline)。摆在第二组: 它跟日/周/月/年是并列关系,
+              混进第一组会让周期条太长, 而且语义不同(分钟档是另一份数据)。 */}
+          {aCode && (
+            <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
+              {MK_TABS.map(p => (
+                <button
+                  key={p.value}
+                  type="button"
+                  onClick={() => {
+                    setMkPeriod(p.value)
+                    setVisibleBars(120)
+                  }}
+                  className={cn('rounded px-2 py-0.5 transition-colors',
+                    mkPeriod === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 分时/分钟档没有「区间」这组控件(区间是日K的回溯窗口, 对当日分时与
+              固定 320 根的分钟K都没意义), 摆上去点了没反应反而像坏了 —— 不渲染。
+              MA/缩放对分钟K仍然有效, 保留。 */}
+          {kPeriod !== 'minute' && !mkPeriod && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
 
@@ -558,6 +595,7 @@ export function StockDetail() {
             showMA={showMA}
             visibleBars={visibleBars}
             period={kPeriod}
+            mklinePeriod={mkPeriod ?? undefined}
             onDataChange={setKline}
           />
         )}

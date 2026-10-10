@@ -87,6 +87,17 @@ function wilder(values: number[], n: number): number[] {
  * 聚合。入参必须已按日期升序(日K接口保证)。
  * 返回的 date 是该周期**首个交易日**(周K显示周一所在的那一周起点, 月K是 1 号)。
  */
+/**
+ * 在**给定的这一串** bar 上重算全部技术指标。
+ *
+ * 为什么要能单独调: 分钟K(1/5/15/30/60 分)是另一份数据, 后端只给 OHLCV、
+ * 不带指标 —— 指标必须在这串分钟 bar 上按同样的口径算出来。直接沿用日K的
+ * 指标值是最隐蔽的一种错(图上看着有 MACD, 实际是日频值按分钟抽样)。
+ */
+export function computeIndicators(bars: OHLC[]): OHLC[] {
+  return attachIndicators(bars)
+}
+
 export function aggregateKline(rows: OHLC[], period: KPeriod): OHLC[] {
   // 'minute' 由 StockMinuteChart 单独渲染, 走到这里说明调用方传错了 —— 原样返回,
   // 绝不能把当日分时塞进周/月/年聚合分支(会把日线按月截断, 图直接错)。
@@ -125,6 +136,14 @@ export function aggregateKline(rows: OHLC[], period: KPeriod): OHLC[] {
     } as OHLC
   })
 
+  return attachIndicators(bars)
+}
+
+/**
+ * 指标重算(MA/BOLL/MACD/RSI/KDJ)。被 aggregateKline(周月年) 与分钟K共用 ——
+ * 分钟K必须自己重算, 不能沿用日K的指标值(见 computeIndicators 注释)。
+ */
+function attachIndicators(bars: OHLC[]): OHLC[] {
   // ── 在新周期序列上重算指标(不沿用日K值, 见文件头注释) ──
   const closes = bars.map(b => b.close)
   const ma5 = sma(closes, 5)
