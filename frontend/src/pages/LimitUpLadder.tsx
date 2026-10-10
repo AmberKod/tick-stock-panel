@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type LimitLadderTier, type LimitLadderStock, type MonitorRule } from '@/lib/api'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -1486,8 +1486,7 @@ export function LimitUpLadder() {
       return next
     })
   }, [showConcept])
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState('')
+  const openStock = useOpenStock()
   const [selectedTag, setSelectedTag] = useState<{ fieldKey: 'concept' | 'industry'; tag: string } | null>(null)
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   const handleSelectTag = useCallback((sel: { fieldKey: 'concept' | 'industry'; tag: string } | null) => {
@@ -1509,10 +1508,7 @@ export function LimitUpLadder() {
     storage.limitLadderExtFields.set(f)
   }, [])
 
-  const handleStockClick = useCallback((symbol: string, name?: string) => {
-    setPreviewSymbol(symbol)
-    setPreviewName(name ?? '')
-  }, [])
+  const handleStockClick = useCallback((symbol: string) => { openStock(symbol) }, [openStock])
 
   const extColumnsParam = useMemo(() => buildExtColumnsParam(extFields), [extFields])
 
@@ -1759,17 +1755,10 @@ export function LimitUpLadder() {
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={(symbol) => {
           setDimensionTarget(null)
-          handleStockClick(symbol, name)
+          handleStockClick(symbol)
         }}
-      />
-
-      {/* 个股K线弹窗 */}
-      <StockPreviewDialog
-        symbol={previewSymbol}
-        name={previewName}
-        onClose={() => setPreviewSymbol(null)}
       />
 
       {/* 字段配置弹窗 */}

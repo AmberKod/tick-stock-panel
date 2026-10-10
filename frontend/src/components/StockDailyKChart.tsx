@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { aggregateKline, type KPeriod } from '@/lib/klinePeriod'
 import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
@@ -48,6 +49,8 @@ interface Props {
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
+  /** 日/周/月/年。周月年由日K聚合而来(确定性派生, 非另一份数据)。 */
+  period?: KPeriod
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -131,6 +134,7 @@ export function StockDailyKChart({
   showMA = true,
   showInfoBar = true,
   visibleBars = 60,
+  period = 'day',
   linkedPrice,
   onDateClick,
   onPriceDoubleClick,
@@ -153,7 +157,9 @@ export function StockDailyKChart({
     placeholderData: (prev) => prev,
   })
 
-  const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  const dayRows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  // 周/月/年在日K基础上聚合; 日K原样透传(后端算好的指标就是权威值)
+  const rows = useMemo(() => aggregateKline(dayRows, period), [dayRows, period])
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [

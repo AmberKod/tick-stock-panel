@@ -12,7 +12,7 @@ import { storage } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useStrategyPool } from '@/lib/useStrategyPool'
 import { StrategyCard, CardSize, loadCardSize, cardWrapCls } from '@/components/screener/StrategyCard'
@@ -46,9 +46,7 @@ export function Screener() {
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
   const [batchMsg, setBatchMsg] = useState<string>('')
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState<string>('')
-  const closePreview = useCallback(() => { setPreviewSymbol(null); setPreviewName('') }, [])
+  const openStock = useOpenStock()
   const [settingsStrategyId, setSettingsStrategyId] = useState<string | null>(null)
   const [showPoolDialog, setShowPoolDialog] = useState(false)
   const [showBuilder, setShowBuilder] = useState(false)
@@ -937,7 +935,7 @@ export function Screener() {
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
                     watchlistSet={watchlistSet}
-                    onPreview={(symbol, name) => { setPreviewSymbol(symbol); setPreviewName(name) }}
+                    onPreview={symbol => openStock(symbol)}
                     onAddToWatchlist={(symbol, groupId) => toggleWatchlist.mutate({ symbol, action: 'add', groupId })}
                     onRemoveFromWatchlist={symbol => toggleWatchlist.mutate({ symbol, action: 'remove' })}
                     watchlistPending={toggleWatchlist.isPending}
@@ -981,12 +979,6 @@ export function Screener() {
         title="自定义策略结果列"
         builtinSectionLabel="策略内置列"
         extColumnAlign="center"
-      />
-
-      <StockPreviewDialog
-        symbol={previewSymbol}
-        name={previewName}
-        onClose={closePreview}
       />
 
       <StrategySettingsDialog

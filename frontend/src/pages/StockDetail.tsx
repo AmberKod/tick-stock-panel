@@ -6,6 +6,7 @@ import { ArrowLeft, Loader2, Maximize2, Minus, Newspaper, Plus, RotateCcw } from
 import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
+import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { StockDailyKChart, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
@@ -37,6 +38,18 @@ const PERIODS = [
   { label: '3年', months: 36 },
 ] as const
 
+/**
+ * K线周期。周/月/年**不是**另一份数据 —— 由日K聚合而来(见 lib/klinePeriod),
+ * 每根都能回溯到具体日K区间。这是与九章"周期切换"的同一功能, 但九章的分时/分钟档
+ * 需要独立的分钟库支撑, 我方 minute 数据未全量同步前先不做(做了就是空图)。
+ */
+const K_PERIODS: { label: string; value: KPeriod }[] = [
+  { label: '日K', value: 'day' },
+  { label: '周K', value: 'week' },
+  { label: '月K', value: 'month' },
+  { label: '年K', value: 'year' },
+]
+
 /** 实时行情契约(与后端 app/api/astock_deep.py 的 realtime_quote 对齐)。 */
 interface AstockQuoteResp {
   available: boolean
@@ -63,6 +76,31 @@ interface AstockQuoteResp {
     limit_up: number | null
     limit_down: number | null
     quote_time: string | null
+    updated_at: string
+  }
+}
+
+/** 所属板块/题材契约(与后端 stock_sectors 对齐)。 */
+interface AstockSectorsResp {
+  available: boolean
+  source: string
+  reason?: string
+  data?: {
+    code: string
+    name: string | null
+    industry: {
+      em?: string
+      em_parts?: string[]
+      csrc?: string
+      csrc_parts?: string[]
+    } | null
+    boards: {
+      name: string
+      board_code: string | null
+      precise: boolean
+      rank: number | null
+      reason: string | null
+    }[]
     updated_at: string
   }
 }
@@ -164,6 +202,64 @@ function QuoteStrip({ kline, quote }: {
   )
 }
 
+/**
+ * 所属板块 —— 对齐九章个股页的 "所属板块" chips, 但比它多两层信息:
+ *   1. 每个题材 hover 显示**东财给的入选理由**(为什么归进这个板块);
+ *   2. 紫色=行业(F10 公司资料)、蓝色=核心题材(IS_PRECISE=1)、灰色=宽泛归类。
+ * 九章只有板块名, 且真源拿不到时会退回硬编码映射表照样显示; 我方取不到就整行不显示。
+ */
+function SectorRow({ symbol }: { symbol: string }) {
+  const query = useQuery({
+    queryKey: ['astock', 'sectors', symbol],
+    queryFn: () => request<AstockSectorsResp>(`/api/astock/sectors/${encodeURIComponent(symbol)}`),
+    staleTime: 3_600_000,
+    retry: false,
+  })
+
+  const d = query.data?.available ? query.data.data : undefined
+  // 取不到就一行都不显示 —— 不编板块名, 也不用"暂无"占位伪装成有内容
+  if (!d) return null
+
+  const industryLeaf = d.industry?.em_parts?.[d.industry.em_parts.length - 1]
+    ?? d.industry?.em ?? null
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-surface px-4 py-2 text-xs">
+      <span className="text-fg-muted">所属板块</span>
+
+      {d.industry?.em && (
+        <Link
+          to={`/industry-analysis?board=${encodeURIComponent(industryLeaf ?? d.industry.em)}`}
+          title={`东财行业: ${d.industry.em}${d.industry.csrc ? ` · 证监会: ${d.industry.csrc}` : ''}`}
+          className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-violet-300 hover:border-violet-400 hover:text-violet-200"
+        >
+          {d.industry.em}
+        </Link>
+      )}
+
+      {d.boards.map(b => (
+        <Link
+          key={b.name}
+          to={`/concept-analysis?board=${encodeURIComponent(b.name)}`}
+          title={b.reason ? `${b.reason}` : `${b.name} — 东财宽泛归类(非核心题材)`}
+          className={cn(
+            'rounded border px-1.5 py-0.5 transition-colors',
+            b.precise
+              ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:border-sky-400 hover:text-sky-200'
+              : 'border-border bg-elevated text-fg-muted hover:text-fg-secondary',
+          )}
+        >
+          {b.name}
+        </Link>
+      ))}
+
+      <span className="text-[11px] text-fg-muted">
+        紫=行业 · 蓝=核心题材 · 悬停看入选理由 · 源 {query.data?.source}
+      </span>
+    </div>
+  )
+}
+
 function NewsCard({ symbol, name }: { symbol: string; name?: string | null }) {
   const query = useQuery({
     queryKey: ['news', 'stock', symbol],
@@ -214,10 +310,14 @@ export function StockDetail() {
   const symbol = (rawSymbol ?? '').trim()
 
   const [months, setMonths] = useState(6)
-  const [visibleBars, setVisibleBars] = useState(60)
+  const [kPeriod, setKPeriod] = useState<KPeriod>('day')
+  const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
   const [showMA, setShowMA] = useState(true)
   const [kline, setKline] = useState<StockDailyKChartResult | null>(null)
   const [deepTab, setDeepTab] = useState<DeepTab>('fundflow')
+
+  /** 6 位纯数字 = A股。港股/美股走另一套深度源, 本页面只提供行情+K线+资讯。 */
+  const isAStock = /^\d{6}$/.test(symbol)
 
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
 
@@ -276,9 +376,29 @@ export function StockDetail() {
       {/* ── 行情条 ── */}
       <QuoteStrip kline={kline} quote={quote} />
 
+      {/* ── 所属板块 ── */}
+      <SectorRow symbol={symbol} />
+
       {/* ── K 线 + 工具栏 ── */}
       <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
+            {K_PERIODS.map(p => (
+              <button
+                key={p.value}
+                type="button"
+                onClick={() => { setKPeriod(p.value); setVisibleBars(PERIOD_DEFAULT_BARS[p.value]) }}
+                className={cn('rounded px-2 py-0.5 transition-colors',
+                  kPeriod === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <span className="mx-1 h-4 w-px bg-border" />
+
+          <span className="text-fg-muted">区间</span>
           <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
             {PERIODS.map(p => (
               <button
@@ -341,6 +461,7 @@ export function StockDetail() {
           dateRange={dateRange}
           showMA={showMA}
           visibleBars={visibleBars}
+          period={kPeriod}
           onDataChange={setKline}
         />
       </div>
@@ -348,7 +469,16 @@ export function StockDetail() {
       {/* ── 资讯 ── */}
       <NewsCard symbol={symbol} name={kline?.name} />
 
-      {/* ── 深度数据 5 tab ── */}
+      {/* ── 深度数据 5 tab ──
+          这五块的后端(A股深度)只认 A股代码, 港股/美股会 available:false。
+          fail-closed 是对的, 但把五个"不可用"面板摆上去观感很差 —— 非 A股
+          直接整块不渲染, 并说明原因, 而不是让用户看到一排空面板。 */}
+      {!isAStock ? (
+        <div className="rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">
+          深度数据（资金流 / 龙虎榜 / 研报 / 公告 / 财务摘要）当前仅覆盖 A股 ——
+          非 A股代码不显示这五块，也不会用占位内容冒充。
+        </div>
+      ) : (
       <div className="rounded-lg border border-border bg-surface p-3">
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold text-fg">深度数据</h3>
@@ -376,6 +506,7 @@ export function StockDetail() {
           {deepTab === 'financials' && <FinancialsPanel symbol={symbol} periods={8} />}
         </div>
       </div>
+      )}
     </div>
   )
 }

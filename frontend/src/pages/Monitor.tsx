@@ -18,7 +18,7 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { usePreferences } from '@/lib/useSharedQueries'
 
@@ -453,8 +453,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const navigate = useNavigate()
   const [confirmTs, setConfirmTs] = useState<number | null>(null)
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
-  const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
+  const openStock = useOpenStock()
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   // 面板 3: 「只看汇聚」—— 单类命中不删除, 只是默认不升级、可被这一层筛掉
   const [convergedOnly, setConvergedOnly] = useState(false)
@@ -561,7 +560,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
             <ConvergedCard
               key={cluster.key}
               cluster={cluster}
-              onPreview={ev => setPreviewEv(ev)}
+              onPreview={ev => { if (ev.symbol) openStock(ev.symbol) }}
             />
           ))}
         </div>
@@ -620,7 +619,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             const board = boardTag(ev.symbol)
                             return (
                               <button
-                                onClick={() => setPreviewEv(ev)}
+                                onClick={() => { if (ev.symbol) openStock(ev.symbol) }}
                                 className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                                 title="点击查看日K"
                               >
@@ -707,7 +706,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           const board = boardTag(ev.symbol)
                           return (
                             <button
-                              onClick={() => setPreviewEv(ev)}
+                              onClick={() => { if (ev.symbol) openStock(ev.symbol) }}
                               className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                               title="点击查看日K"
                             >
@@ -835,25 +834,12 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
         pending={clearMut.isPending}
       />
 
-      <StockPreviewDialog
-        symbol={memberPreview?.symbol ?? previewEv?.symbol ?? null}
-        name={memberPreview?.name ?? previewEv?.name ?? undefined}
-        triggerInfo={previewEv ? {
-          price: previewEv.price ?? null,
-          changePct: previewEv.change_pct ?? null,
-          ts: previewEv.ts,
-          signals: previewEv.signals,
-          message: previewEv.message,
-        } : null}
-        onClose={() => { setPreviewEv(null); setMemberPreview(null) }}
-      />
-
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={symbol => {
           setDimensionTarget(null)
-          setMemberPreview({ symbol, name })
+          openStock(symbol)
         }}
       />
     </div>
@@ -936,7 +922,7 @@ function RulesList({ rulesQuery, onEdit }: {
 }) {
   const qc = useQueryClient()
   const [confirmId, setConfirmId] = useState<string | null>(null)
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const openStock = useOpenStock()
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const rules: MonitorRule[] = (rulesQuery.data as any)?.rules ?? []
@@ -1053,7 +1039,7 @@ function RulesList({ rulesQuery, onEdit }: {
                   {/* 个股类型: 直接显示可点击的代码+名称; 分组类型: 分组chip跳自选页; 其他类型显示规则名 */}
                   {r.scope === 'symbols' && r.symbols.length > 0 ? (
                     <button
-                      onClick={() => setPreviewSymbol(r.symbols[0])}
+                      onClick={() => { if (r.symbols[0]) openStock(r.symbols[0]) }}
                       className="inline-flex items-center gap-1 min-w-0 hover:bg-elevated/50 rounded px-0.5 transition-colors cursor-pointer"
                       title={`查看 ${r.symbols[0]} 日K`}
                     >
@@ -1198,11 +1184,6 @@ function RulesList({ rulesQuery, onEdit }: {
         })
       )}
 
-      <StockPreviewDialog
-        symbol={previewSymbol}
-        name={previewSymbol ? symbolNames[previewSymbol] : undefined}
-        onClose={() => setPreviewSymbol(null)}
-      />
     </div>
   )
 }

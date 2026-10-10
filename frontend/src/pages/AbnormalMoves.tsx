@@ -8,7 +8,7 @@ import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { Panel } from '@/components/panel'
 import { tierQueryOptions } from '@/lib/refreshTiers'
 
@@ -153,7 +153,7 @@ export function AbnormalMoves() {
   const [watchlistOnly, setWatchlistOnly] = useState(false)
   // 默认过滤 ST/*ST 风险警示股票 (口径与后端 is_st_name 一致: 名称含 ST)
   const [excludeSt, setExcludeSt] = useState(true)
-  const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
+  const openStock = useOpenStock()
   // ── 面板 2 · 异动归因 ──
   const [silentOnly, setSilentOnly] = useState(false)
   /** 单条点击再查的 symbol 追加集合 (与自动前 N 条合并进同一批请求, 命中后端缓存) */
@@ -650,7 +650,7 @@ export function AbnormalMoves() {
                       <button
                         key={r.symbol}
                         type="button"
-                        onClick={() => setPreview({ symbol: r.symbol, name: r.name ?? r.symbol })}
+                        onClick={() => openStock(r.symbol)}
                         title="窗口内 0 个域名命中 —— 点击查看详情"
                         className="inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/5 px-1.5 py-0.5 text-[10px] transition-colors hover:border-danger/60 cursor-pointer"
                       >
@@ -753,7 +753,7 @@ export function AbnormalMoves() {
                             setExpandedSymbol(prev => (prev === r.symbol ? null : r.symbol))
                           }
                         }}
-                        onPreview={() => setPreview({ symbol: r.symbol, name: r.name ?? r.symbol })}
+                        onPreview={() => openStock(r.symbol)}
                       />
                     )
                   })
@@ -765,13 +765,6 @@ export function AbnormalMoves() {
       )}
 
       </div>
-      {preview && (
-        <StockPreviewDialog
-          symbol={preview.symbol}
-          name={preview.name}
-          onClose={() => setPreview(null)}
-        />
-      )}
     </div>
   )
 

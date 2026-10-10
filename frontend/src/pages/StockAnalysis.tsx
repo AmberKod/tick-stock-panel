@@ -4,7 +4,7 @@ import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bel
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
@@ -30,7 +30,7 @@ export function StockAnalysis() {
   const [name, setName] = useState<string>('')
   const [checking, setChecking] = useState(false)
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const openStock = useOpenStock()
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
 
@@ -98,7 +98,7 @@ export function StockAnalysis() {
           {symbol && (
             <>
               <button
-                onClick={() => setPreviewSymbol(symbol)}
+                onClick={() => openStock(symbol)}
                 title="查看个股日 K 详情"
                 className="group flex items-center gap-2 text-sm rounded-md px-1.5 py-0.5 -mx-1.5 hover:bg-elevated transition-colors"
               >
@@ -152,14 +152,6 @@ export function StockAnalysis() {
           onClose={() => setConfirmReport(null)}
         />
       )}
-
-      {/* 个股日 K 详情对话框(点击名称/代码打开) */}
-      <StockPreviewDialog
-        symbol={previewSymbol}
-        name={previewSymbol === symbol ? name : undefined}
-        triggerInfo={null}
-        onClose={() => setPreviewSymbol(null)}
-      />
 
       {showPriceAlerts && symbol && (
         <PriceAlertDialog

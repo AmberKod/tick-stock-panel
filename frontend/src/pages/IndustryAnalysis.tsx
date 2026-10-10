@@ -1,4 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
@@ -15,7 +16,7 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
 import { api, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -271,11 +272,17 @@ function groupByIndustryLevel(groups: DimensionGroup[], level: IndustryLevel): D
 export function IndustryAnalysis() {
   const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(loadConfig)
   const [showConfig, setShowConfig] = useState(false)
-  const [search, setSearch] = useState('')
+  // 个股详情整页的行业 chip 带 ?board=xxx 跳进来 → 预填搜索框直接定位到该行业。
+  // useEffect 是必要的: 组件不重新挂载时, 只靠 useState 初值会停在第一次的板块上。
+  const [searchParams] = useSearchParams()
+  const boardParam = searchParams.get('board') ?? ''
+  const [search, setSearch] = useState(boardParam)
+  useEffect(() => {
+    if (boardParam) setSearch(boardParam)
+  }, [boardParam])
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>('heat')
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState<string>('')
+  const openStock = useOpenStock()
   const [showRps, setShowRps] = useState(false)
 
   const configsQuery = useQuery({ queryKey: QK.extData, queryFn: api.extDataList })
@@ -446,7 +453,7 @@ export function IndustryAnalysis() {
             falling={falling}
             selectedKey={selected?.key ?? null}
             onSelect={setSelectedKey}
-            onStockClick={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name ?? '') }}
+            onStockClick={sym => openStock(sym)}
           />
 
           {/* 热力图 */}
@@ -471,7 +478,7 @@ export function IndustryAnalysis() {
                 onSort={setSortMode}
                 onSelect={setSelectedKey}
               />
-              <IndustryFocus stat={selected} onStockClick={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name ?? '') }} />
+              <IndustryFocus stat={selected} onStockClick={sym => openStock(sym)} />
             </div>
           ) : rowsQuery.isLoading ? (
             <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">正在计算行业强度...</div>
@@ -493,13 +500,6 @@ export function IndustryAnalysis() {
         {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} showHierarchyLevel />}
       </AnimatePresence>
 
-      {previewSymbol && (
-        <StockPreviewDialog
-          symbol={previewSymbol}
-          name={previewName}
-          onClose={() => { setPreviewSymbol(null); setPreviewName('') }}
-        />
-      )}
       {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind="industry" />}
     </>
   )

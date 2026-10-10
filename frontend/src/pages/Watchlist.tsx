@@ -11,7 +11,7 @@ import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import {
   DimensionMembersDialog,
   dimensionKindForSourceField,
@@ -796,14 +796,9 @@ export function Watchlist() {
       return next
     })
   }, [])
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState<string>('')
+  const openStock = useOpenStock()
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
-  const closePreview = useCallback(() => {
-    setPreviewSymbol(null)
-    setPreviewName('')
-  }, [])
 
   const handleToggleExpand = useCallback((cellKey: string) => {
     setExpandedCells(prev => {
@@ -1023,8 +1018,8 @@ export function Watchlist() {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
 
   // 稳定的 per-symbol 回调 (供 memo 化的 StockCard 使用, 避免每次渲染都传新引用)
-  const handleCardPreview = useCallback((sym: string, name: string) => {
-    setPreviewSymbol(sym); setPreviewName(name)
+  const handleCardPreview = useCallback((sym: string) => {
+    openStock(sym)
   }, [])
   const handleCardConfirmRemove = useCallback((sym: string) => {
     const entry = (list.data?.symbols ?? []).find(item => item.symbol === sym)
@@ -1382,7 +1377,7 @@ export function Watchlist() {
               </button>
             )}
             <StockSearchBox
-              onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
+              onPreview={sym => openStock(sym)}
               existingBySymbol={groupBySymbol}
               groups={groups}
               onAdd={(symbol, groupId) => addMutation.mutate({ symbol, groupId })}
@@ -1723,7 +1718,7 @@ export function Watchlist() {
                       <div className="flex items-center gap-1 w-full">
                         <button
                           type="button"
-                          onClick={() => { setPreviewSymbol(r.symbol); setPreviewName(name ?? '') }}
+                          onClick={() => openStock(r.symbol)}
                           className="flex items-center gap-1 text-left min-w-0"
                         >
                           <span className="font-mono text-foreground text-xs group-hover:text-accent transition-colors duration-150">
@@ -1964,19 +1959,12 @@ export function Watchlist() {
         onClose={() => setCustomizerOpen(false)}
       />
 
-      <StockPreviewDialog
-        symbol={previewSymbol}
-        name={previewName}
-        onClose={closePreview}
-      />
-
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={symbol => {
           setDimensionTarget(null)
-          setPreviewSymbol(symbol)
-          setPreviewName(name ?? '')
+          openStock(symbol)
         }}
       />
 

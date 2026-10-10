@@ -9,7 +9,7 @@ import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
 import { cn } from '@/lib/cn'
@@ -174,7 +174,7 @@ export function Dashboard() {
   const qc = useQueryClient()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
-  const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
+  const openStock = useOpenStock()
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
   const [showWelcomeModal, setShowWelcomeModal] = useState(false)
   const dataStatus = useDataStatus({ staleTime: 60_000 })
@@ -467,15 +467,15 @@ export function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
+            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={symbol => openStock(symbol)} />
+            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" onStockClick={symbol => openStock(symbol)} />
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
-            <StockList title="涨幅榜" rows={data.top_gainers} mode="gain" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="跌幅榜" rows={data.top_losers} mode="loss" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="成交额榜" rows={data.turnover_leaders} mode="amount" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="活跃换手" rows={data.active_leaders} mode="active" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
+            <StockList title="涨幅榜" rows={data.top_gainers} mode="gain" onStockClick={symbol => openStock(symbol)} />
+            <StockList title="跌幅榜" rows={data.top_losers} mode="loss" onStockClick={symbol => openStock(symbol)} />
+            <StockList title="成交额榜" rows={data.turnover_leaders} mode="amount" onStockClick={symbol => openStock(symbol)} />
+            <StockList title="活跃换手" rows={data.active_leaders} mode="active" onStockClick={symbol => openStock(symbol)} />
           </div>
         </main>
 
@@ -496,24 +496,12 @@ export function Dashboard() {
               </Link>
             </div>
             <MonitorWidget onStockClick={(event) => {
-              if (event.symbol) setPreviewStock({ symbol: event.symbol, name: event.name ?? undefined, alert: event })
+              if (event.symbol) openStock(event.symbol)
             }} />
           </section>
         </aside>
       </div>
 
-      <StockPreviewDialog
-        symbol={previewStock?.symbol ?? null}
-        name={previewStock?.name}
-        triggerInfo={previewStock?.alert ? {
-          price: previewStock.alert.price ?? null,
-          changePct: previewStock.alert.change_pct ?? null,
-          ts: previewStock.alert.ts,
-          signals: previewStock.alert.signals,
-          message: previewStock.alert.message,
-        } : null}
-        onClose={() => setPreviewStock(null)}
-      />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BarChart3, Flame, Gauge, Info, LineChart, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -7,7 +7,7 @@ import {
   SectionTitle, KpiCell, IndexTicker, BreadthBar, DistributionBars,
   EmotionRadar, LadderMini, MiniMetric, StockList, HotRankCard,
 } from '@/components/overview/OverviewKit'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useOpenStock } from '@/lib/useOpenStock'
 import { fmtBigNum } from '@/lib/format'
 
 type Market = 'hk' | 'us'
@@ -53,7 +53,7 @@ const fetchOverview = (market: Market, asOf?: string) =>
  */
 export function HKUSMarketOverview({ market }: Props) {
   const meta = MARKET_META[market]
-  const [previewStock, setPreviewStock] = useState<{ symbol: string; name?: string } | null>(null)
+  const openStock = useOpenStock()
 
   const overview = useQuery({
     queryKey: ['hk-us-overview', market],
@@ -63,8 +63,8 @@ export function HKUSMarketOverview({ market }: Props) {
   })
   const data = overview.data
 
-  // 点击个股 → A股同款弹窗 (K线/分时/自选/监控一体); detail 页仍保留给直链场景
-  const openPreview = (symbol: string, name?: string) => setPreviewStock({ symbol, name })
+  // 点击个股 → 个股详情整页(K线/行情条/资讯/深度一体)
+  const openPreview = (symbol: string) => openStock(symbol)
 
   const strongRate = useMemo(() => {
     const d = data
@@ -247,12 +247,6 @@ export function HKUSMarketOverview({ market }: Props) {
         </div>
       )}
 
-      {/* A股同款个股弹窗: K线/分时/自选/监控一体 (数据层 get_daily 已对 .HK/.US 分流) */}
-      <StockPreviewDialog
-        symbol={previewStock?.symbol ?? null}
-        name={previewStock?.name}
-        onClose={() => setPreviewStock(null)}
-      />
     </div>
   )
 }
