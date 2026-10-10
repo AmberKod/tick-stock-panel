@@ -825,12 +825,12 @@ def minute_kline(code: str, period: str = "m5", limit: int = 320) -> dict:
             continue
         ts = str(r[0]).strip()
         o, c = _num(r[1]), _num(r[2])
-        h, l, v = _num(r[3]), _num(r[4]), _num(r[5])
-        if o is None or c is None or h is None or l is None or v is None:
+        h, lo, v = _num(r[3]), _num(r[4]), _num(r[5])
+        if o is None or c is None or h is None or lo is None or v is None:
             continue
         if len(ts) == 12:
             ts = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}"
-        parsed.append((ts, o, c, h, l, v))
+        parsed.append((ts, o, c, h, lo, v))
 
     if not parsed:
         raise ValueError(f"腾讯分钟K无法解析: {sym} {period}")

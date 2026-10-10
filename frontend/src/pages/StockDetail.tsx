@@ -1,13 +1,15 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw } from 'lucide-react'
+import { ArrowLeft, Loader2, Maximize2, Minimize2, Minus, Newspaper, Plus, RotateCcw, X } from 'lucide-react'
 
 import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
+import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
 import { StockDailyKChart, type MklinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import type { ChartPriceLine } from '@/components/EChartsCandlestick'
 import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
@@ -371,6 +373,21 @@ export function StockDetail() {
    * 只是"阅读舒适度"的取舍, 不是功能约束 —— 想要窄一点随时点右上角切换, 选择记本地。
    */
   const [wide, setWide] = useState<boolean>(() => localStorage.getItem('stockDetail:wide') !== '0')
+  /**
+   * K线内标注(全部由 OHLCV 确定性派生, 见 lib/klineSignals)。
+   * 默认只开「放量」—— 全开会把 K 线糊住, 而且标注不是建议, 别喧宾夺主。
+   */
+  const [signals, setSignals] = useState<Set<SignalKey>>(() => new Set<SignalKey>(['volume']))
+  /** 双击图表加的水平价格线(本地持久化, 按标的隔离)。 */
+  const [priceLines, setPriceLines] = useState<ChartPriceLine[]>(() => {
+    try {
+      const raw = localStorage.getItem(`stockDetail:priceLines:${(rawSymbol ?? '').trim()}`)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed.filter((x: any) => Number.isFinite(x?.value)) : []
+    } catch {
+      return []
+    }
+  })
 
   /**
    * A股判定 —— 必须兼容 `688825.SH` 这种带后缀写法(应用内主流格式), 否则深度
@@ -380,6 +397,28 @@ export function StockDetail() {
   const isAStock = aCode != null
 
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
+
+  // 标注基于**当前周期那串 K**算(日K就用日K, 分钟K就用分钟K), 不跨周期混用。
+  const signalMarkers = useMemo(
+    () => buildSignalMarkers(kline?.rows ?? [], signals),
+    [kline?.rows, signals],
+  )
+
+  const persistPriceLines = useCallback((next: ChartPriceLine[]) => {
+    setPriceLines(next)
+    try {
+      localStorage.setItem(`stockDetail:priceLines:${symbol}`, JSON.stringify(next))
+    } catch { /* 存不下就算了, 不影响看图 */ }
+  }, [symbol])
+
+  const toggleSignal = useCallback((key: SignalKey) => {
+    setSignals(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   // 实时行情(腾讯) —— 补齐日K里没有的 成交额/换手/PE/PB/市值。10s 短缓存。
   const quoteQuery = useQuery({
@@ -566,14 +605,61 @@ export function StockDetail() {
                 <RotateCcw className="h-3 w-3" />
               </button>
               <span className="text-[11px] text-fg-muted">
-                当前 {visibleBars} 根 · 副图指标用图表右上控件切换 · 点击蜡烛可看当日分时
+                当前 {visibleBars} 根 · 副图指标用图表右上控件切换
               </span>
             </>
           )}
+
+          {/* ── K线内标注 ──
+              全部由当前那串 K 线**确定性派生**(放量/新高/新低/MACD交叉), 不是打分、
+              不是买卖建议。口径写在 title 里, 免得被当成某种"信号推荐"。 */}
+          {kPeriod !== 'minute' && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" />
+              <span className="text-fg-muted">标注</span>
+              {KLINE_SIGNALS.map(s => (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => toggleSignal(s.key)}
+                  title={s.desc}
+                  className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                    signals.has(s.key)
+                      ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
+                      : 'border-border text-fg-muted hover:text-fg-secondary')}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </>
+          )}
+
           <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-fg-muted">
+            {kPeriod !== 'minute' && <span>双击图表可加水平线 · 滚轮缩放 · 拖动平移</span>}
             <Maximize2 className="h-3 w-3" /> 图表区
           </span>
         </div>
+
+        {/* 已加的水平线 —— 可删。放在图表上方而不是图里, 免得遮 K 线。 */}
+        {kPeriod !== 'minute' && priceLines.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 px-1 text-[11px]">
+            <span className="text-fg-muted">水平线</span>
+            {priceLines.map((l, i) => (
+              <span key={`${l.value}-${i}`}
+                    className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-fg-secondary">
+                {l.label ?? l.value.toFixed(2)}
+                <button
+                  type="button"
+                  onClick={() => persistPriceLines(priceLines.filter((_, j) => j !== i))}
+                  className="text-fg-muted hover:text-fg"
+                  title="删除这条水平线"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* 分时走独立的当日分钟源(腾讯), 日/周/月/年走日K聚合 —— 两条路不混。 */}
         {kPeriod === 'minute' ? (
@@ -596,6 +682,12 @@ export function StockDetail() {
             visibleBars={visibleBars}
             period={kPeriod}
             mklinePeriod={mkPeriod ?? undefined}
+            markers={signalMarkers}
+            priceLines={priceLines}
+            onPriceDoubleClick={(price) => persistPriceLines([
+              ...priceLines,
+              { value: price, label: price.toFixed(2), color: '#F59E0B' },
+            ])}
             onDataChange={setKline}
           />
         )}
