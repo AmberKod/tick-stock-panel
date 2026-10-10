@@ -80,6 +80,28 @@ interface AstockQuoteResp {
   }
 }
 
+/**
+ * 应用内 A股代码的主流写法是 **带后缀的 ts-code**(`688825.SH` / `000001.SZ`),
+ * 也有 `sh600519` / 裸 `600519`。所以判定不能只认 6 位裸数字 —— 那会让带后缀的
+ * A股被当成非A股, 深度五块整块不渲染, 页面下半部分直接空掉。
+ */
+function astockCode(symbol: string): string | null {
+  const s = symbol.trim().toUpperCase()
+  if (!s || /\.(HK|US)$/.test(s)) return null
+  const core = s.replace(/^(SH|SZ|BJ)[.\-]?/, '').replace(/[.\-](SH|SZ|BJ)$/, '')
+  return /^\d{6}$/.test(core) ? core : null
+}
+
+/** 板块归属 —— 只做展示标签, 不参与任何数据判定。 */
+function marketLabel(code: string): string {
+  if (code.startsWith('688') || code.startsWith('689')) return '科创板'
+  if (code.startsWith('300') || code.startsWith('301')) return '创业板'
+  if (code.startsWith('8') || code.startsWith('4')) return '北交所'
+  if (code.startsWith('6')) return '沪市'
+  if (code.startsWith('0') || code.startsWith('3')) return '深市'
+  return 'A股'
+}
+
 /** 所属板块/题材契约(与后端 stock_sectors 对齐)。 */
 interface AstockSectorsResp {
   available: boolean
@@ -179,15 +201,21 @@ function QuoteStrip({ kline, quote }: {
   ]
 
   return (
-    <div className="rounded border border-border bg-surface px-4 py-2">
-      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-xs">
+    <div className="rounded-lg border border-border bg-surface px-3 py-2">
+      {/* auto-fill 栅格: 放在宽主列时自动排成多列, 放进窄侧栏时自动收成 2 列 ——
+          不用为两种容器各写一份布局。 */}
+      <div
+        className="grid gap-x-3 gap-y-1.5 text-xs"
+        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(6.5rem, 1fr))' }}
+      >
         {items.map(([k, v]) => (
-          <span key={k} className="text-fg-muted">
-            {k} <b className="font-mono text-fg">{v}</b>
-          </span>
+          <div key={k} className="min-w-0">
+            <div className="truncate text-[11px] text-fg-muted">{k}</div>
+            <div className="truncate font-mono text-[13px] text-fg">{v}</div>
+          </div>
         ))}
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-fg-muted">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 border-t border-border/60 pt-1.5 text-[11px] text-fg-muted">
         {q?.limit_up != null && q?.limit_down != null && (
           <span>涨停 <b className="font-mono text-fg">{num(q.limit_up)}</b> · 跌停{' '}
             <b className="font-mono text-fg">{num(q.limit_down)}</b></span>
@@ -224,38 +252,43 @@ function SectorRow({ symbol }: { symbol: string }) {
     ?? d.industry?.em ?? null
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-surface px-4 py-2 text-xs">
-      <span className="text-fg-muted">所属板块</span>
+    <div className="rounded-lg border border-border bg-surface px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-2">
+        <h3 className="text-sm font-semibold text-fg">所属板块</h3>
+        <span className="ml-auto text-[11px] text-fg-muted">源 {query.data?.source}</span>
+      </div>
 
-      {d.industry?.em && (
-        <Link
-          to={`/industry-analysis?board=${encodeURIComponent(industryLeaf ?? d.industry.em)}`}
-          title={`东财行业: ${d.industry.em}${d.industry.csrc ? ` · 证监会: ${d.industry.csrc}` : ''}`}
-          className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-violet-300 hover:border-violet-400 hover:text-violet-200"
-        >
-          {d.industry.em}
-        </Link>
-      )}
+      <div className="flex flex-wrap gap-1.5 text-xs">
+        {d.industry?.em && (
+          <Link
+            to={`/industry-analysis?board=${encodeURIComponent(industryLeaf ?? d.industry.em)}`}
+            title={`东财行业: ${d.industry.em}${d.industry.csrc ? ` · 证监会: ${d.industry.csrc}` : ''}`}
+            className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-violet-300 hover:border-violet-400 hover:text-violet-200"
+          >
+            {d.industry.em}
+          </Link>
+        )}
 
-      {d.boards.map(b => (
-        <Link
-          key={b.name}
-          to={`/concept-analysis?board=${encodeURIComponent(b.name)}`}
-          title={b.reason ? `${b.reason}` : `${b.name} — 东财宽泛归类(非核心题材)`}
-          className={cn(
-            'rounded border px-1.5 py-0.5 transition-colors',
-            b.precise
-              ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:border-sky-400 hover:text-sky-200'
-              : 'border-border bg-elevated text-fg-muted hover:text-fg-secondary',
-          )}
-        >
-          {b.name}
-        </Link>
-      ))}
+        {d.boards.map(b => (
+          <Link
+            key={b.name}
+            to={`/concept-analysis?board=${encodeURIComponent(b.name)}`}
+            title={b.reason ? `${b.reason}` : `${b.name} — 东财宽泛归类(非核心题材)`}
+            className={cn(
+              'rounded border px-1.5 py-0.5 transition-colors',
+              b.precise
+                ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:border-sky-400 hover:text-sky-200'
+                : 'border-border bg-elevated text-fg-muted hover:text-fg-secondary',
+            )}
+          >
+            {b.name}
+          </Link>
+        ))}
+      </div>
 
-      <span className="text-[11px] text-fg-muted">
-        紫=行业 · 蓝=核心题材 · 悬停看入选理由 · 源 {query.data?.source}
-      </span>
+      <div className="mt-1.5 text-[11px] text-fg-muted">
+        紫=行业 · 蓝=核心题材 · 悬停看入选理由
+      </div>
     </div>
   )
 }
@@ -316,8 +349,12 @@ export function StockDetail() {
   const [kline, setKline] = useState<StockDailyKChartResult | null>(null)
   const [deepTab, setDeepTab] = useState<DeepTab>('fundflow')
 
-  /** 6 位纯数字 = A股。港股/美股走另一套深度源, 本页面只提供行情+K线+资讯。 */
-  const isAStock = /^\d{6}$/.test(symbol)
+  /**
+   * A股判定 —— 必须兼容 `688825.SH` 这种带后缀写法(应用内主流格式), 否则深度
+   * 五块会被误判成非A股而整块不渲染。港股/美股走另一套深度源, 本页只给行情+K线+资讯。
+   */
+  const aCode = astockCode(symbol)
+  const isAStock = aCode != null
 
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
 
@@ -348,7 +385,9 @@ export function StockDetail() {
   }
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-4 p-4">
+    // 宽屏不再居中留两条大白边: 上限放宽到 1800, 且内容用左右分栏填满 ——
+    // 左主列(图表/深度)自适应的同时, 右列把行情/板块/资讯竖排铺满, 不留空槽。
+    <div className="mx-auto w-full max-w-[1800px] space-y-3 px-3 py-3">
       {/* ── 头部 ── */}
       <div className="flex flex-wrap items-baseline gap-3">
         <Link to="/" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg">
@@ -356,6 +395,11 @@ export function StockDetail() {
         </Link>
         <h1 className="text-xl font-semibold text-fg">{rt?.name || kline?.name || symbol}</h1>
         <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-xs text-fg-secondary">{symbol}</span>
+        {aCode && (
+          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-fg-muted">
+            {marketLabel(aCode)}
+          </span>
+        )}
         {headPrice != null && (
           <>
             <span className={cn('text-2xl font-bold tabular-nums', priceColorClass(changePct))}>
@@ -373,12 +417,23 @@ export function StockDetail() {
         </span>
       </div>
 
-      {/* ── 行情条 ── */}
-      <QuoteStrip kline={kline} quote={quote} />
+      {/* ── 主体两栏: 左=图表+深度(吃满剩余宽度) 右=行情/板块/资讯 ── */}
+      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_23rem]">
 
-      {/* ── 所属板块 ── */}
-      <SectorRow symbol={symbol} />
+      {/* 右列 —— 用 order 保证窄屏时仍排在图表之后(DOM 顺序不改, 只改视觉序) */}
+      <aside className="order-2 min-w-0 space-y-3">
+        {/* ── 行情条 ── */}
+        <QuoteStrip kline={kline} quote={quote} />
 
+        {/* ── 所属板块 ── */}
+        <SectorRow symbol={symbol} />
+
+        {/* ── 资讯 ── */}
+        <NewsCard symbol={symbol} name={kline?.name ?? rt?.name} />
+      </aside>
+
+      {/* 左主列 */}
+      <div className="order-1 min-w-0 space-y-3">
       {/* ── K 线 + 工具栏 ── */}
       <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -466,9 +521,6 @@ export function StockDetail() {
         />
       </div>
 
-      {/* ── 资讯 ── */}
-      <NewsCard symbol={symbol} name={kline?.name} />
-
       {/* ── 深度数据 5 tab ──
           这五块的后端(A股深度)只认 A股代码, 港股/美股会 available:false。
           fail-closed 是对的, 但把五个"不可用"面板摆上去观感很差 —— 非 A股
@@ -479,34 +531,37 @@ export function StockDetail() {
           非 A股代码不显示这五块，也不会用占位内容冒充。
         </div>
       ) : (
-      <div className="rounded-lg border border-border bg-surface p-3">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold text-fg">深度数据</h3>
-          <span className="text-xs text-fg-muted">A股全栈 · 全部为真实数据（过 source_gate 白名单）</span>
-          <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
-            {DEEP_TABS.map(t => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setDeepTab(t.key)}
-                className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-                  deepTab === t.key ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
-              >
-                {t.label}
-              </button>
-            ))}
+        <div className="rounded-lg border border-border bg-surface p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold text-fg">深度数据</h3>
+            <span className="text-xs text-fg-muted">A股全栈 · 全部为真实数据（过 source_gate 白名单）</span>
+            <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
+              {DEEP_TABS.map(t => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setDeepTab(t.key)}
+                  className={cn('rounded px-2 py-0.5 text-xs transition-colors',
+                    deepTab === t.key ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 面板自带左右内边距; -mx-3 让分隔线与卡片边缘齐平(卡片 p-3) */}
+          <div className="-mx-3 border-t border-border">
+            {deepTab === 'fundflow' && <FundFlowPanel symbol={symbol} days={30} />}
+            {deepTab === 'dragon' && <DragonTigerPanel symbol={symbol} />}
+            {deepTab === 'research' && <ResearchPanel symbol={symbol} limit={20} />}
+            {deepTab === 'announcements' && <AnnouncementsPanel symbol={symbol} limit={20} />}
+            {deepTab === 'financials' && <FinancialsPanel symbol={symbol} periods={8} />}
           </div>
         </div>
-
-        <div className="-mx-4 border-t border-border">
-          {deepTab === 'fundflow' && <FundFlowPanel symbol={symbol} days={30} />}
-          {deepTab === 'dragon' && <DragonTigerPanel symbol={symbol} />}
-          {deepTab === 'research' && <ResearchPanel symbol={symbol} limit={20} />}
-          {deepTab === 'announcements' && <AnnouncementsPanel symbol={symbol} limit={20} />}
-          {deepTab === 'financials' && <FinancialsPanel symbol={symbol} periods={8} />}
-        </div>
-      </div>
       )}
+      </div>{/* /左主列 */}
+      </div>{/* /两栏栅格 */}
     </div>
   )
 }
