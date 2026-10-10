@@ -733,6 +733,30 @@ def realtime_quote(code: str) -> dict:
     return result
 
 
+def _volume_unit_factor(cum_v: float, cum_a: float, low: float, high: float) -> float | None:
+    """反推腾讯分时第 3 列的单位: 返回 1.0(股) / 100.0(手), 判不出来返回 None。
+
+    依据: ``成交额 = 成交量 × 均价``, 而**均价必然落在当日 [low, high] 之间**
+    (它就是全天成交的加权平均价)。把累计额/累计量算出来:
+      - 落在 [low, high] 内 → 单位已经是股 → 1.0;
+      - 除以 100 后落在区间内 → 单位是手 → 100.0;
+      - 都不是 → None(数据自相矛盾, 交给调用方 fail-closed, 不猜)。
+    留 5% 容差吸收一字板 / 均价贴近边界的情形。
+    """
+    if cum_v <= 0 or cum_a <= 0 or low <= 0:
+        return None
+
+    def within(v: float) -> bool:
+        return low * 0.95 <= v <= high * 1.05
+
+    implied = cum_a / cum_v
+    if within(implied):
+        return 1.0
+    if within(implied / 100.0):
+        return 100.0
+    return None
+
+
 def minute_bars(code: str) -> dict:
     """A股**当日分时**(腾讯 web.ifzq.gtimg.cn) —— 分时线 / 均价线 / 分时量。
 
@@ -749,6 +773,14 @@ def minute_bars(code: str) -> dict:
 
     ⚠️ 时间轴**不补齐**: 腾讯给多少点画多少点, 缺的分钟(集合竞价/盘后档位差异)
        不插值、不补零 —— 补出来的点是编的。
+
+    🔴 **成交量单位在 A股内部不统一**(实测 2026-10-09 收盘数据):
+       主板 sh600000 / sh601318 / sh603288 / sz000001 / sz000651 第 3 列给**手**,
+       科创板 sh688825 / sh688981 与 ETF sh512880 给**股** —— 同一个接口差 100 倍。
+       按代码前缀硬编码(如"688 就一定如何")早晚踩空, 这里用数据自身的恒等式
+       ``成交额 = 成交量 × 均价`` 反推单位(见 _volume_unit_factor), 且**均价必须
+       落在当日 [low, high] 区间内** —— 这是可证伪的校验, 不是猜。
+       输出统一为**股 / 元**。
     """
     code = _norm_code(code)
     sym = _tx_symbol(code)
@@ -775,22 +807,37 @@ def minute_bars(code: str) -> dict:
     if not prev_close or prev_close <= 0:
         raise ValueError(f"腾讯分时无昨收基准: {sym}")
 
-    points: list[dict] = []
-    prev_cum_v = 0.0
-    prev_cum_a = 0.0
+    # ── 先按原始单位解析一遍, 拿到价格区间用于反推量的单位 ──
+    raw_rows: list[tuple[str, float, float, float]] = []
     for raw in rows:
         parts = str(raw).split()
         if len(parts) < 4:
             continue
-        t, price = parts[0], _num(parts[1])
-        cum_v, cum_a = _num(parts[2]), _num(parts[3])
+        price, cum_v, cum_a = _num(parts[1]), _num(parts[2]), _num(parts[3])
         if price is None or cum_v is None:
             continue
+        raw_rows.append((parts[0], price, cum_v, cum_a or 0.0))
+    if not raw_rows:
+        raise ValueError(f"腾讯分时无法解析: {sym}")
+
+    lo = min(r[1] for r in raw_rows)
+    hi = max(r[1] for r in raw_rows)
+    last_cum_v, last_cum_a = raw_rows[-1][2], raw_rows[-1][3]
+    factor = _volume_unit_factor(last_cum_v, last_cum_a, lo, hi)
+    if factor is None:
+        # 量额自相矛盾(单位既不是股也不是手) → 不给量, 也不给靠它算出来的均价
+        raise ValueError(f"腾讯分时量额单位无法判定: {sym} (额/量={last_cum_a / last_cum_v:.4f}, 价区 {lo}~{hi})")
+
+    points: list[dict] = []
+    prev_cum_v = 0.0
+    prev_cum_a = 0.0
+    for t, price, cum_v, cum_a in raw_rows:
         # 差分还原每分钟增量; 累计值回退(接口偶发乱序)时按 0 处理, 不造负数
-        minute_v = max((cum_v or 0) - prev_cum_v, 0.0)
-        minute_a = max((cum_a or 0) - prev_cum_a, 0.0)
-        prev_cum_v, prev_cum_a = cum_v or prev_cum_v, cum_a or prev_cum_a
-        avg = (cum_a / cum_v) if cum_v and cum_v > 0 else price
+        minute_v = max(cum_v - prev_cum_v, 0.0) * factor
+        minute_a = max(cum_a - prev_cum_a, 0.0)
+        prev_cum_v, prev_cum_a = cum_v, cum_a
+        # 均价 = 累计成交额 / 累计成交量(股), 与通达信均价同口径
+        avg = (cum_a / (cum_v * factor)) if cum_v > 0 else price
         points.append({
             "t": f"{t[:2]}:{t[2:4]}" if len(t) == 4 else t,
             "price": round(price, 3),
@@ -799,9 +846,6 @@ def minute_bars(code: str) -> dict:
             "volume": round(minute_v, 0),
             "amount": round(minute_a, 2),
         })
-
-    if not points:
-        raise ValueError(f"腾讯分时无法解析: {sym}")
 
     prices = [p["price"] for p in points]
     last = points[-1]

@@ -815,6 +815,39 @@ def test_minute_pct_uses_prev_close_from_qt(monkeypatch):
     assert d["high"] == pytest.approx(49.81) and d["low"] == pytest.approx(49.45)
 
 
+def test_minute_volume_unit_is_normalized_to_shares(monkeypatch):
+    """🔴 主板第 3 列给的是**手**, 科创板/ETF 给的是**股** —— 差 100 倍。
+
+    实测 2026-10-09: sh600000 / sh601318 / sh603288 / sz000001 / sz000651 → 手;
+    sh688825 / sh688981 / sh512880 → 股。按代码前缀硬编码会踩空, 这里靠
+    ``额 = 量 × 均价`` 且均价必落在 [low, high] 反推单位。输出统一为股。
+    """
+    # 这组是"手": 额/量 = 1178 ≈ 价格 11.78 的 100 倍
+    rows = [
+        "0930 11.78 7508 8844424.00",
+        "0931 11.80 15000 17680000.00",
+        "0932 11.75 22000 25900000.00",
+    ]
+    _patch_minute(monkeypatch, rows=rows, qt=["1", "浦发银行", "600000", "11.75", "11.78", "11.78"])
+    d = prov.minute_bars("600000")["data"]
+
+    assert d["points"][0]["volume"] == pytest.approx(750800)          # 7508 手 → 股
+    assert d["points"][1]["volume"] == pytest.approx((15000 - 7508) * 100)
+    assert d["volume"] == pytest.approx(22000 * 100)                  # 全天 22000 手
+    # 均价必须落在当日价格区间内 —— 若不换算会得到 1178 这种荒谬值
+    assert d["low"] <= d["points"][0]["avg"] <= d["high"]
+    assert d["points"][0]["avg"] == pytest.approx(8844424.0 / 750800, abs=1e-2)
+
+
+def test_minute_unit_mismatch_raises(monkeypatch):
+    """量额自相矛盾(单位既不是股也不是手) → 上抛, 不猜一个系数硬凑。"""
+    # 额/量 = 117.8, 既不是 11.78(股) 也不是 1178(手)
+    rows = ["0930 11.78 10000 1178000.00", "0931 11.80 20000 2360000.00"]
+    _patch_minute(monkeypatch, rows=rows, qt=["1", "浦发银行", "600000", "11.80", "11.78", "11.78"])
+    with pytest.raises(ValueError):
+        prov.minute_bars("600000")
+
+
 def test_minute_time_is_hh_mm(monkeypatch):
     _patch_minute(monkeypatch)
     pts = prov.minute_bars("688825")["data"]["points"]
