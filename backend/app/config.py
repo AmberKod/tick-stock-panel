@@ -160,6 +160,15 @@ class Settings(BaseSettings):
     # OpenBB 请求超时(秒)。三大报表/filings 由上游(yfinance/SEC)抓取, 偶发慢。
     openbb_timeout_s: float = 45.0  # yfinance 小盘股冷拉取可 >25s(实测 AAOI 33.5s)
 
+    # 东方财富 datacenter (九章融合 P2-2: 龙虎榜/研报/公告)。2026-10-10 实测
+    # 宿主与容器内均直连可达 —— 与 push2 系列(被墙, 连接级 RST)是不同域名,
+    # 不要套用同一套代理配置。
+    eastmoney_timeout_s: float = 15.0
+    # datacenter 结果缓存(秒)。东财有限流, 避免个股页每次刷新都打一次。
+    eastmoney_cache_ttl_s: float = 300.0
+    # 巨潮 cninfo (公告) 超时。orgId 查询 + 公告列表两步, 实测单步 <3s。
+    cninfo_timeout_s: float = 15.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()

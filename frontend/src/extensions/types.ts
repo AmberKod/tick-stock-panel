@@ -27,12 +27,22 @@ export interface FrontendSlotContextMap {
 
 export type FrontendSlotName = keyof FrontendSlotContextMap
 
+/**
+ * 插槽注册项 — 必须是**判别联合**(按 name 分发), 不能写成
+ * `{ name: K; component: ComponentType<Ctx[K]> }`: 后者在 K 为联合时
+ * component 会被推断成"能同时吃三种 context"的函数类型, 而任何真实扩展
+ * 组件只处理其中一种 —— 函数参数逆变导致**所有**具体 slot 实现都无法通过
+ * 类型检查(2026-10-10 首个真实扩展 astock-deep 撞出此问题; 模板是
+ * .example 不参与编译, 所以此前没暴露)。
+ */
 export type FrontendSlotRegistration<K extends FrontendSlotName = FrontendSlotName> = {
-  name: K
-  id: string
-  order?: number
-  component: ComponentType<FrontendSlotContextMap[K]>
-}
+  [P in FrontendSlotName]: {
+    name: P
+    id: string
+    order?: number
+    component: ComponentType<FrontendSlotContextMap[P]>
+  }
+}[K]
 
 export interface FrontendExtensionRoute {
   id: string

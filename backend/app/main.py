@@ -17,6 +17,7 @@ from app.api import (
     abnormal,
     alerts,
     analysis,
+    astock_deep,
     backtest,
     data,
     ext_data,
@@ -575,6 +576,7 @@ app.include_router(hk_api.router)
 app.include_router(us_api.router)
 app.include_router(us_financials.router)
 app.include_router(us_deep.router)
+app.include_router(astock_deep.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(hotspots.router)

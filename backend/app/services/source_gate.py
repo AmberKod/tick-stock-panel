@@ -29,6 +29,8 @@ REAL_SOURCES: frozenset[str] = frozenset({
     "live-tencent",
     "live-akshare",
     "live-eastmoney",
+    # jiuzhang_astock_provider.py:SOURCE_CNINFO (巨潮公告, 2026-10-10 实测真数据)
+    "live-cninfo",
     "live-hexin",
     "live-tencent-proxy",
     "sec-edgar",

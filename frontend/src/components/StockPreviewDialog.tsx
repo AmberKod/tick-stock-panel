@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity, ExternalLink } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -388,6 +389,16 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 >
                   {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                 </button>
+
+                {/* 整页打开: 弹窗装不下研究型内容(行情条/K线工具/深度数据5块), 整页才是主场 */}
+                <Link
+                  to={`/stock/${symbol}`}
+                  className="p-1.5 rounded-btn text-secondary hover:text-foreground hover:bg-elevated transition-colors"
+                  title="在整页中打开（含深度数据）"
+                  aria-label={`在整页中打开 ${symbol}`}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                </Link>
 
                 <button
                   onClick={onClose}

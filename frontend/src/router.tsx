@@ -55,6 +55,9 @@ const HKStockAnalysis = lazy(() => import('./pages/HKStockAnalysis').then(m => (
 const USStocks = lazy(() => import('./pages/USStocks').then(m => ({ default: m.USStocksPage })))
 const USStockAnalysis = lazy(() => import('./pages/USStockAnalysis').then(m => ({ default: m.USStockAnalysisPage })))
 const MarketModulePage = lazy(() => import('./pages/MarketModulePage').then(m => ({ default: m.MarketModulePage })))
+
+// ===== A股个股详情整页 (九章式研究主页; 弹窗降级为快速预览) =====
+const StockDetail = lazy(() => import('./pages/StockDetail').then(m => ({ default: m.StockDetail })))
 // 跨市场总览: 一屏并置 A股/港股/美股(三市场态势 + 关键量)
 const Markets = lazy(() => import('./pages/Markets').then(m => ({ default: m.Markets })))
 
@@ -175,6 +178,8 @@ export const router = createBrowserRouter([
       { path: 'hk/:symbol', element: <HKStockAnalysis /> },
       { path: 'us', element: <USStocks /> },
       { path: 'us/:symbol', element: <USStockAnalysis /> },
+      // A股个股详情整页: /stock/300308
+      { path: 'stock/:symbol', element: <StockDetail /> },
       // 港美股菜单对应的统一页面位置
       ...(['hk', 'us'] as const).flatMap(market => [
         ...(['watchlist', 'screener', 'backtest', 'mining', 'stock-analysis', 'limit-ladder', 'concept-analysis', 'industry-analysis', 'financials', 'monitor', 'regime', 'abnormal', 'review', 'indices', 'data'] as const).map(module => ({

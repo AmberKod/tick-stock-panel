@@ -1,0 +1,151 @@
+"""A股深度数据 API — 东方财富 datacenter (九章融合 P2-2)。
+
+- GET /api/astock/dragon/{code}: 龙虎榜(上榜记录 + 买卖席位 TOP5 + 机构/北向动向)
+- GET /api/astock/research/{code}: 个股研报(东财 reportapi: 机构/评级/目标价/EPS 预测)
+- GET /api/astock/announcements/{code}: 个股公告(巨潮 cninfo 全文检索)
+- GET /api/astock/fundflow/{code}: 资金流向(新浪; 东财 push2/push2his 被墙)
+- GET /api/astock/financials/{code}: 财务摘要(akshare 东财财务指标, 7 组 80 指标)
+
+项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
+失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
+伪装成功(fail-closed)。
+
+⚠️ 一处与 us_deep 刻意不同: **「窗口内没上过榜」是真实答案, 不是数据缺失**。
+此时 ``available`` 仍为 ``true``、``records`` 为空数组, 由前端显示"近期无
+上榜记录"。若把空 records 当 no_data, 等于把"这只票干净"谎报成"取不到数"。
+"""
+from __future__ import annotations
+
+import logging
+import re
+
+from fastapi import APIRouter
+
+from app.data_providers.jiuzhang_astock_provider import (
+    SOURCE,
+    SOURCE_AKSHARE,
+    SOURCE_CNINFO,
+    SOURCE_SINA,
+    announcements,
+    dragon_tiger,
+    financials,
+    fund_flow,
+    research_reports,
+)
+from app.services.source_gate import is_real
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/astock", tags=["astock-deep"])
+
+_CODE_RE = re.compile(r"\d{6}")
+
+
+def _norm_code(raw: str) -> str | None:
+    """从 '002317' / 'sz002317' / '002317.SZ' 里抽出 6 位数字代码。"""
+    m = _CODE_RE.search(raw or "")
+    return m.group(0) if m else None
+
+
+def _respond(code: str, call, *, required_key: str, source: str = SOURCE) -> dict:
+    """统一响应: 成功过闸门 → available:true; 异常/被闸门拦 → available:false。
+
+    required_key: 各端点的数据主键(records/reports/announcements), 用来在返回
+    前确认 provider 没把结构改坏 —— 空数组是合法答案, 缺键才是结构坏了。
+    """
+    try:
+        payload = call()
+    except Exception as exc:
+        logger.warning("astock deep provider error (%s): %s", code, exc)
+        return {"available": False, "reason": f"provider_error: {exc}", "source": source}
+
+    if not is_real(payload):
+        # 防御性闸门: provider 恒带真实 source, 一旦被改坏在这里拦下
+        logger.error("astock deep blocked by source_gate: %s source=%r", code, payload.get("source"))
+        return {"available": False,
+                "reason": f"source_gate_rejected: {payload.get('source')!r}",
+                "source": source}
+
+    data = payload.get("data")
+    if not isinstance(data, dict) or required_key not in data:
+        return {"available": False, "reason": "bad_payload: provider 返回结构异常", "source": source}
+
+    return {"available": True, "source": payload["source"], "code": code, "data": data}
+
+
+@router.get("/dragon/{code}")
+def get_dragon(code: str, days: int = 30) -> dict:
+    """龙虎榜。days 为回溯窗口(自然日), 默认 30。
+
+    records 为空表示窗口内该票未上榜 —— 这是真实结论, available 仍为 true。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码", "source": SOURCE}
+    if days < 1 or days > 180:
+        return {"available": False, "reason": f"bad_days: {days} (1..180)", "source": SOURCE}
+    return _respond(norm, lambda: dragon_tiger(norm, days=days), required_key="records")
+
+
+@router.get("/research/{code}")
+def get_research(code: str, limit: int = 20) -> dict:
+    """个股研报列表(东财 reportapi)。limit 1..100, 默认 20。
+
+    reports 为空 = 该票近三年确实没有机构覆盖 —— 真实结论, available 仍为 true。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码", "source": SOURCE}
+    if limit < 1 or limit > 100:
+        return {"available": False, "reason": f"bad_limit: {limit} (1..100)", "source": SOURCE}
+    return _respond(norm, lambda: research_reports(norm, limit=limit), required_key="reports")
+
+
+@router.get("/announcements/{code}")
+def get_announcements(code: str, limit: int = 20) -> dict:
+    """个股公告列表(巨潮 cninfo)。limit 1..100, 默认 20。
+
+    巨潮 orgId 不能由代码拼出, provider 内部走 topSearch 拿真 orgId(见 provider
+    注释 —— 参考实现九章用 gssz0{code} 拼, 导致公告面板恒空)。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码", "source": SOURCE_CNINFO}
+    if limit < 1 or limit > 100:
+        return {"available": False, "reason": f"bad_limit: {limit} (1..100)", "source": SOURCE_CNINFO}
+    return _respond(norm, lambda: announcements(norm, limit=limit),
+                    required_key="announcements", source=SOURCE_CNINFO)
+
+
+@router.get("/fundflow/{code}")
+def get_fund_flow(code: str, days: int = 20) -> dict:
+    """资金流向(新浪日线)。days 1..120, 默认 20。
+
+    ⚠️ 九章走东财 push2, 我方被墙(连接级 RST)故换源; 新浪接口只提供主力净额
+    (netamount)与超大单净额(r0_net), 没有大/中/小单分档 —— 缺的档位留空,
+    不按其它数字推算。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码", "source": SOURCE_SINA}
+    if days < 1 or days > 120:
+        return {"available": False, "reason": f"bad_days: {days} (1..120)", "source": SOURCE_SINA}
+    return _respond(norm, lambda: fund_flow(norm, days=days),
+                    required_key="rows", source=SOURCE_SINA)
+
+
+@router.get("/financials/{code}")
+def get_financials(code: str, periods: int = 8) -> dict:
+    """财务摘要(akshare → 东财 datacenter 财务分析指标)。periods 1..12, 默认 8。
+
+    返回 7 组共 80 个指标 × 最近 N 期, values 按报告期从新到旧。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_AKSHARE}
+    if periods < 1 or periods > 12:
+        return {"available": False, "reason": f"bad_periods: {periods} (1..12)",
+                "source": SOURCE_AKSHARE}
+    return _respond(norm, lambda: financials(norm, periods=periods),
+                    required_key="indicators", source=SOURCE_AKSHARE)
