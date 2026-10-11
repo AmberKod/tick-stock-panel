@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, Link } from 'react-router-dom'
 import {
@@ -10,6 +11,9 @@ import {
 } from 'lucide-react'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import { StockDailyKChart } from '@/components/StockDailyKChart'
+import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
+import { buildSignalMarkers } from '@/lib/klineSignals'
+import type { OHLC } from '@/components/EChartsCandlestick'
 
 interface USRealtime {
   symbol: string
@@ -131,6 +135,17 @@ export function USStockAnalysisPage() {
       fetchJson<FilingsResp>(`/api/us/deep/filings/${encodeURIComponent(ticker)}?limit=8`),
     staleTime: 600_000,
   })
+
+  /**
+   * 图上三件套(主图画法 / K线内标注 / 画图) —— 纯前端能力, 与 A股个股页共用实现。
+   * 坐标上下文 `day||none`: 本页日K + 不复权(美股后复权/不复权都拿不到真源, 见接口探测结论)。
+   */
+  const tools = useKlineTools(symbol, 'day||none', 'usDetail')
+  const [klineRows, setKlineRows] = useState<OHLC[]>([])
+  const signalMarkers = useMemo(
+    () => buildSignalMarkers(klineRows, tools.signals),
+    [klineRows, tools.signals],
+  )
 
   const r = realtime.data
   const changeColor =
@@ -351,8 +366,25 @@ export function USStockAnalysisPage() {
         </Panel>
       </div>
 
-      {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) */}
-      <StockDailyKChart symbol={symbol} height={560} showLimitMarkers={false} />
+      {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) —— 主图四类 / 标注 / 画图全开;
+          美股无涨跌停(limitMarkers 关), 复权固定「不复权」: hfq/不复权腾讯都不给, 不猜。 */}
+      <KlineToolsBar tools={tools} className="space-y-1" />
+      <StockDailyKChart
+        symbol={symbol}
+        height={560}
+        showLimitMarkers={false}
+        adjust="none"
+        mainType={tools.mainType}
+        markers={signalMarkers}
+        priceLines={tools.priceLines}
+        onPriceDoubleClick={tools.addPriceLine}
+        onDataChange={result => setKlineRows(result.rows)}
+        drawings={tools.visibleDrawings}
+        drawTool={tools.drawTool}
+        drawCtx={tools.ctx}
+        onDrawingsChange={tools.persistDrawings}
+        onDrawToolChange={tools.setDrawTool}
+      />
     </div>
   )
 }

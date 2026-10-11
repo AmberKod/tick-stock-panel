@@ -1,7 +1,11 @@
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, Link } from 'react-router-dom'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import { StockDailyKChart } from '@/components/StockDailyKChart'
+import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
+import { buildSignalMarkers } from '@/lib/klineSignals'
+import type { OHLC } from '@/components/EChartsCandlestick'
 
 interface HKRealtime {
   symbol: string
@@ -41,6 +45,18 @@ export function HKStockAnalysisPage() {
     queryFn: () => fetchJson<HKRealtime>(`/api/hk/realtime/${encodeURIComponent(symbol)}`),
     refetchInterval: 10_000,  // 10s 轮询
   })
+
+  /**
+   * 图上三件套(主图画法 / K线内标注 / 画图) —— 全是纯前端能力:
+   * 吃的只是同一串 OHLC, 不碰任何市场差异, 所以与 A股个股页共用同一套实现。
+   * 坐标上下文写死 `day||none`: 本页日K + 不复权(港股暂不接复权源), 图形锚点才不会串档。
+   */
+  const tools = useKlineTools(symbol, 'day||none', 'hkDetail')
+  const [klineRows, setKlineRows] = useState<OHLC[]>([])
+  const signalMarkers = useMemo(
+    () => buildSignalMarkers(klineRows, tools.signals),
+    [klineRows, tools.signals],
+  )
 
   const r = realtime.data
   const changeColor =
@@ -122,8 +138,26 @@ export function HKStockAnalysisPage() {
         港股无涨跌停制度 · T+0 交收 · 货币 HKD 原币（不折算 CNY）· 行情源: 腾讯优先, 新浪降级
       </div>
 
-      {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) */}
-      <StockDailyKChart symbol={symbol} height={560} showLimitMarkers={false} />
+      {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) —— 工具条同款移植:
+          主图四类 / K线内标注 / 画图工具全都能用, 港股无涨跌停所以关掉 limitMarkers,
+          复权档固定「不复权」(本页还没接港股复权源, 不假装有)。 */}
+      <KlineToolsBar tools={tools} className="space-y-1" />
+      <StockDailyKChart
+        symbol={symbol}
+        height={560}
+        showLimitMarkers={false}
+        adjust="none"
+        mainType={tools.mainType}
+        markers={signalMarkers}
+        priceLines={tools.priceLines}
+        onPriceDoubleClick={tools.addPriceLine}
+        onDataChange={result => setKlineRows(result.rows)}
+        drawings={tools.visibleDrawings}
+        drawTool={tools.drawTool}
+        drawCtx={tools.ctx}
+        onDrawingsChange={tools.persistDrawings}
+        onDrawToolChange={tools.setDrawTool}
+      />
     </div>
   )
 }
