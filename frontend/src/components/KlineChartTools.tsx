@@ -222,8 +222,8 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
         <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-fg-muted">
           <span className="text-amber-500">画图模式</span>
           <span>
-            滚轮缩放与拖动平移暂时不可用（鼠标事件归画图层），退出工具即恢复；画完点一下当前工具按钮即可退出。
-            选中图形后按 Delete 删除，拖动两端圆点可改位置；画到一半按 Esc 取消。
+            滚轮缩放与拖动平移暂时不可用（鼠标事件归画图层），画完自动退出、随即恢复。
+            删图形：点中它 → 按 Delete 或点红色 ✕；拖动两端圆点可改位置；画到一半按 Esc 取消。
             {drawTool === 'channel' && ' 平行通道分两步：先拖出基准线，再点一下定宽度。'}
             {drawTool === 'text' && ' 文字标注就地输入，回车确认（留空自动丢弃），双击已画的文字可改。'}
           </span>

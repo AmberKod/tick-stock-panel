@@ -22,6 +22,7 @@ from app.api import (
     data,
     ext_data,
     financials,
+    hk_us_deep,
     hotspots,
     indices,
     intraday,
@@ -576,6 +577,8 @@ app.include_router(hk_api.router)
 app.include_router(us_api.router)
 app.include_router(us_financials.router)
 app.include_router(us_deep.router)
+app.include_router(hk_us_deep.router_hk)
+app.include_router(hk_us_deep.router_us)
 app.include_router(astock_deep.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)

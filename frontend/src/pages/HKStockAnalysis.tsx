@@ -5,6 +5,8 @@ import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import { StockDailyKChart } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
+import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
+import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import type { OHLC } from '@/components/EChartsCandlestick'
 
 interface HKRealtime {
@@ -53,6 +55,11 @@ export function HKStockAnalysisPage() {
    */
   const tools = useKlineTools(symbol, 'day||none', 'hkDetail')
   const [klineRows, setKlineRows] = useState<OHLC[]>([])
+  // 港美股都只支持 日/周/月/年 —— 分钟K无真源(见 DeepCapabilityNote)
+  const [kPeriod, setKPeriod] = useState<KPeriod>('day')
+  const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
+
+  const caps = <DeepCapabilityNote market="HK" />
   const signalMarkers = useMemo(
     () => buildSignalMarkers(klineRows, tools.signals),
     [klineRows, tools.signals],
@@ -142,9 +149,18 @@ export function HKStockAnalysisPage() {
           主图四类 / K线内标注 / 画图工具全都能用, 港股无涨跌停所以关掉 limitMarkers,
           复权档固定「不复权」(本页还没接港股复权源, 不假装有)。 */}
       <KlineToolsBar tools={tools} className="space-y-1" />
+      {caps}
+      <div className="flex flex-wrap items-center gap-2">
+        <KPeriodTabs
+          value={kPeriod}
+          onChange={(p, bars) => { setKPeriod(p); if (bars > 0) setVisibleBars(bars) }}
+        />
+      </div>
       <StockDailyKChart
         symbol={symbol}
         height={560}
+        period={kPeriod}
+        visibleBars={visibleBars}
         showLimitMarkers={false}
         adjust="none"
         mainType={tools.mainType}

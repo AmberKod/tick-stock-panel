@@ -112,6 +112,8 @@ export function ChartDrawingLayer({
   stateRef.current = { drawings, tool, draft, edit, selected }
 
   const active = tool !== null
+  /** 可以选中/拖动/删除已有图形的模式。tool 为 null(初始) 或 'cursor' 都算。 */
+  const editMode = !tool || tool === 'cursor'
   const hasAny = drawings.length > 0 || draft !== null
   void tick   // 缩放/重绘后让像素坐标重算
 
@@ -208,10 +210,10 @@ export function ChartDrawingLayer({
     if (type === 'text') next.text = ''
     setSelected(next.id)
     onChange([...stateRef.current.drawings, next])
-    if (type === 'text') {
-      setEditing({ id: next.id, value: '' })
-      onToolChange?.('cursor')   // 文字是一次性标注, 画完回到选择模式
-    }
+    if (type === 'text') setEditing({ id: next.id, value: '' })
+    // 画完一律退回选择模式。不这么做的话工具会停在(比如)水平线上: 之后每点一下图
+    // 就再画一条新线, 而画图模式下又选不中已有图形 —— 用户会越点越多、一条也删不掉。
+    onToolChange?.('cursor')
   }, [ctx, onChange, idxOf, onToolChange])
 
   const startDraft = useCallback((e: React.MouseEvent) => {
@@ -340,7 +342,9 @@ export function ChartDrawingLayer({
   }
 
   const startEdit = (e: React.MouseEvent, d: Drawing, part: 'a' | 'b' | 'body') => {
-    if (tool !== 'cursor') return
+    // 「没有工具在手上」等同于选择模式: 初始态 tool 是 null(不是 'cursor'),
+    // 只认 'cursor' 会让刚进页面画过的图形一条都选不中 —— 删不掉也拖不动。
+    if (!editMode) return
     e.stopPropagation()
     e.preventDefault()
     setSelected(d.id)
@@ -383,7 +387,7 @@ export function ChartDrawingLayer({
     const pb = toPixel(d.b.date, d.b.price)
     if (!pa || !pb) return null   // 锚点日期不在当前数据里 → 不画, 不猜位置
     // 端点把手只在"选择"模式下给 —— 画图模式下弹出把手会挡住下一次落笔
-    const isSel = selected === d.id && tool === 'cursor'
+    const isSel = selected === d.id && editMode
     const sw = isSel ? 2 : 1.4
     const right = Math.max(size.w - 4, 0)
 
@@ -391,10 +395,16 @@ export function ChartDrawingLayer({
       const y = pa[1]
       return (
         <g key={d.id}>
+          {/* 1.4px 的虚线鼠标根本点不中 ⇒ 先垫一条透明的宽命中区(看不见, 只用来接点击) */}
+          <line x1={0} x2={size.w} y1={y} y2={y} stroke="transparent" strokeWidth={14}
+                pointerEvents="stroke" className="cursor-ns-resize"
+                onMouseDown={e => startEdit(e, d, 'body')} />
           <line x1={0} x2={size.w} y1={y} y2={y} stroke={color} strokeWidth={sw} strokeDasharray="5 4"
+                pointerEvents="none" />
+          <rect x={2} y={y - 8} width={46} height={15} rx={2} fill={color} opacity={0.92}
                 className="cursor-ns-resize" onMouseDown={e => startEdit(e, d, 'body')} />
-          <rect x={2} y={y - 8} width={46} height={15} rx={2} fill={color} opacity={0.92} />
-          <text x={5} y={y + 3} fontSize={10} fill="#0b1020" fontFamily="ui-monospace,monospace">
+          <text x={5} y={y + 3} fontSize={10} fill="#0b1020" fontFamily="ui-monospace,monospace"
+                pointerEvents="none">
             {d.a.price.toFixed(2)}
           </text>
           {isSel && (
@@ -412,11 +422,16 @@ export function ChartDrawingLayer({
       const label = String(d.a.date).slice(0, 10)
       return (
         <g key={d.id}>
+          {/* 同上: 竖线太细, 垫透明宽命中区 */}
+          <line x1={x} x2={x} y1={0} y2={size.h} stroke="transparent" strokeWidth={14}
+                pointerEvents="stroke" className="cursor-ew-resize"
+                onMouseDown={e => startEdit(e, d, 'body')} />
           <line x1={x} x2={x} y1={0} y2={size.h} stroke={color} strokeWidth={sw} strokeDasharray="5 4"
+                pointerEvents="none" />
+          <rect x={x - 26} y={1} width={52} height={14} rx={2} fill={color} opacity={0.92}
                 className="cursor-ew-resize" onMouseDown={e => startEdit(e, d, 'body')} />
-          <rect x={x - 26} y={1} width={52} height={14} rx={2} fill={color} opacity={0.92} />
           <text x={x} y={11} fontSize={9.5} textAnchor="middle" fill="#0b1020"
-                fontFamily="ui-monospace,monospace">
+                fontFamily="ui-monospace,monospace" pointerEvents="none">
             {label}
           </text>
           {isSel && (

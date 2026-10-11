@@ -169,6 +169,12 @@ class Settings(BaseSettings):
     # 巨潮 cninfo (公告) 超时。orgId 查询 + 公告列表两步, 实测单步 <3s。
     cninfo_timeout_s: float = 15.0
 
+    # 港美股深度K线 (腾讯 kline/kline) —— 与上面的 datacenter/fqkline 分开设,
+    # 因为命中 WAF 时希望更早失败, 而不是把线程挂到日K那么久。
+    tencent_deep_timeout_s: float = 12.0
+    # 腾讯IFZQ 结果缓存(秒)。个股页切周期会反复请求同一个 param, 不开缓存会被限流。
+    tencent_deep_cache_ttl_s: float = 180.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
