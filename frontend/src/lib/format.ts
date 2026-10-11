@@ -26,9 +26,13 @@ export function priceColorClass(v: number | null | undefined): string {
 
 export function fmtBigNum(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
-  if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}万亿`
-  if (v >= 100_000_000) return `${(v / 100_000_000).toFixed(2)}亿`
-  if (v >= 10_000) return `${(v / 10_000).toFixed(0)}万`
+  // 🔴 单位换算要比**绝对值**: 直接比原值时负数(净额/净流出)一条都不匹配,
+  //    会退化成 "-38039147" 这种裸数字, 和其他"-3803万"的格子对不齐。
+  const abs = Math.abs(v)
+  const sign = v < 0 ? '-' : ''
+  if (abs >= 1_000_000_000_000) return `${sign}${(abs / 1_000_000_000_000).toFixed(2)}万亿`
+  if (abs >= 100_000_000) return `${sign}${(abs / 100_000_000).toFixed(2)}亿`
+  if (abs >= 10_000) return `${sign}${(abs / 10_000).toFixed(0)}万`
   return v.toFixed(0)
 }
 
