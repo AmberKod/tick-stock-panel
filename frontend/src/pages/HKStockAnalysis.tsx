@@ -6,8 +6,24 @@ import { StockDailyKChart } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
 import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
+import { HKAnnouncementsPanel, HKFinancialsPanel } from '@/components/hk/HKDeepPanels'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
+import { cn } from '@/lib/cn'
 import type { OHLC } from '@/components/EChartsCandlestick'
+
+/**
+ * 港股深度 tab —— 只放**有免费真源**的两块。
+ *
+ * ⚠️ 刻意不为「对齐 A股」而补空面板: 港股没有 A股那套龙虎榜 / 资金流 / 研报的
+ * 免费真源(新浪港股资金流实测返回空数组, 东财 push2 被墙), 硬摆上去只会得到
+ * 一排"不可用"。这里只接已实测可取的: 公告(披露易) + 财报(东财公告原文)。
+ */
+type DeepTab = 'announcements' | 'financials'
+
+const DEEP_TABS: { key: DeepTab; label: string }[] = [
+  { key: 'announcements', label: '公告' },
+  { key: 'financials', label: '财报' },
+]
 
 interface HKRealtime {
   symbol: string
@@ -58,6 +74,7 @@ export function HKStockAnalysisPage() {
   // 港美股都只支持 日/周/月/年 —— 分钟K无真源(见 DeepCapabilityNote)
   const [kPeriod, setKPeriod] = useState<KPeriod>('day')
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
+  const [deepTab, setDeepTab] = useState<DeepTab>('announcements')
 
   const caps = <DeepCapabilityNote market="HK" />
   const signalMarkers = useMemo(
@@ -174,6 +191,31 @@ export function HKStockAnalysisPage() {
         onDrawingsChange={tools.persistDrawings}
         onDrawToolChange={tools.setDrawTool}
       />
+
+      {/* ── 深度数据 2 tab ── */}
+      <div className="rounded-lg border border-border bg-surface p-3">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold text-fg">深度数据</h3>
+          <span className="text-xs text-fg-muted">
+            港股真源 · 公告走港交所披露易，财报走东财公告原文
+          </span>
+          <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
+            {DEEP_TABS.map(t => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setDeepTab(t.key)}
+                className={cn('rounded px-2 py-0.5 text-xs transition-colors',
+                  deepTab === t.key ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {deepTab === 'announcements' && <HKAnnouncementsPanel symbol={symbol} days={180} limit={40} />}
+        {deepTab === 'financials' && <HKFinancialsPanel symbol={symbol} periods={8} />}
+      </div>
     </div>
   )
 }
