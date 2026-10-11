@@ -12,6 +12,8 @@ import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import { computeChips } from '@/lib/chips'
 import { DRAW_TOOLS, loadDrawings, saveDrawings, type Drawing, type DrawTool } from '@/lib/chartDrawings'
 import { ChipDistributionPanel } from '@/components/ChipDistributionPanel'
+import { TickTapePanel } from '@/components/TickTapePanel'
+import { QK } from '@/lib/queryKeys'
 import { EstimateTag } from '@/components/EstimateNotice'
 import {
   MAIN_CHART_TYPES,
@@ -437,6 +439,35 @@ export function StockDetail() {
     setShowChips(on)
     try { localStorage.setItem('stockDetail:chips', on ? '1' : '0') } catch { /* 忽略 */ }
   }, [])
+  /**
+   * 成交明细(腾讯 3 秒快照)。默认关 —— 打开才会去打那个要翻页的上游接口。
+   * tail 也持久化, 因为"想看多长时间的流水"是个稳定偏好。
+   */
+  const [showTicks, setShowTicks] = useState<boolean>(() =>
+    localStorage.getItem('stockDetail:ticks') === '1')
+  const changeTicks = useCallback((on: boolean) => {
+    setShowTicks(on)
+    try { localStorage.setItem('stockDetail:ticks', on ? '1' : '0') } catch { /* 忽略 */ }
+  }, [])
+  const [tickTail, setTickTail] = useState<number>(() => {
+    const n = Number(localStorage.getItem('stockDetail:ticksTail'))
+    return [100, 200, 500, 1000, 3000].includes(n) ? n : 200
+  })
+  const changeTickTail = useCallback((n: number) => {
+    setTickTail(n)
+    try { localStorage.setItem('stockDetail:ticksTail', String(n)) } catch { /* 忽略 */ }
+  }, [])
+  const ticksQuery = useQuery({
+    queryKey: QK.astockTicks(symbol, tickTail),
+    queryFn: () => api.astockTicks(symbol, tickTail),
+    enabled: showTicks,
+    staleTime: 15_000,
+    retry: false,
+  })
+  const ticks = ticksQuery.data
+  /** 取不到就整块不显示, 并在工具条上说明原因 —— 不编一行假的成交明细。 */
+  const ticksBlocked = showTicks && !ticksQuery.isLoading && (!ticks?.available || !ticks.data)
+
   /** 双击图表加的水平价格线(本地持久化, 按标的隔离)。 */
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>(() => {
     try {
@@ -802,6 +833,22 @@ export function StockDetail() {
                 筹码
                 <EstimateTag className="ml-0.5" title="筹码分布是模型估算: 交易所不公开各价位持仓量, 图是用日K量价 + 流通股本反推的, 不是真实持仓成本">估算</EstimateTag>
               </button>
+
+              {/* ── 成交明细 ──
+                  真数据, 但粒度有上限: 每 3 秒一行的成交快照, 不是逐笔(逐笔要 Level-2)。
+                  刻意不把它叫"逐笔" —— 面板里也写死了这个口径。 */}
+              <button
+                type="button"
+                onClick={() => changeTicks(!showTicks)}
+                title="成交明细(腾讯): 每 3 秒一行的成交快照, 一行是该时间窗内所有成交的合计。真正的逐笔需要 Level-2 付费行情, 这里取不到也不假装取到。买卖方向是行情商判定, 不是交易所披露字段"
+                className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                  showTicks
+                    ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
+                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+              >
+                成交明细
+                <EstimateTag className="ml-0.5" title="3 秒一行的成交快照, 不是逐笔成交">3秒快照</EstimateTag>
+              </button>
             </>
           )}
 
@@ -976,6 +1023,35 @@ export function StockDetail() {
           筹码分布需要「流通股本」才能算（每日换手率 = 成交量 / 流通股本）—— 本地 stock_info 没给到
           {' '}<span className="font-mono text-fg-secondary">{symbol}</span>{' '}的流通股本，所以这里不做。
           不拿估算股本凑版面。
+        </div>
+      )}
+
+      {/* ── 成交明细 ──
+          腾讯 3 秒快照。取不到就明说原因(停牌/当日无成交/接口没覆盖), 不编一行假的。
+          默认关闭 —— 这个接口要翻页, 不该在首屏就打。 */}
+      {showTicks && ticks?.available && ticks.data && (
+        <TickTapePanel
+          rows={ticks.data.rows}
+          summary={ticks.data.summary}
+          date={ticks.data.date}
+          name={kline?.name}
+          tail={tickTail}
+          loading={ticksQuery.isFetching}
+          onRefresh={() => ticksQuery.refetch()}
+          onTailChange={changeTickTail}
+          className="mt-2"
+        />
+      )}
+      {showTicks && ticksQuery.isLoading && (
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-fg-muted">
+          正在拉取成交明细（后端要先探到最后一页再回溯取最近 {tickTail} 行）…
+        </div>
+      )}
+      {ticksBlocked && (
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+          成交明细取不到 —— {ticksQuery.data?.reason ?? '上游无返回'}。
+          {' '}常见情形是当日无成交（停牌 / 尚未开盘）或该标的不在腾讯明细接口的覆盖范围内；
+          这里不补一行占位数据。
         </div>
       )}
 

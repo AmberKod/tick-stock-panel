@@ -387,6 +387,43 @@ export interface PriceLimitInfo {
   source: 'rule' | 'instrument'
 }
 
+/**
+ * 成交明细的一行 —— **每 3 秒的成交快照**, 不是单笔成交。
+ * shares 由「成交额 ÷ 成交价」算出(见后端 _detail_row 注释): 不依赖原始
+ * 成交量列的单位, 因为那一列随标的时而手时而股。
+ */
+export interface TickRow {
+  seq: number
+  time: string
+  price: number
+  change: number | null
+  amount: number
+  shares: number
+  lots: number
+  /** B 主动买 / S 主动卖 / M 判不出方向 —— 行情商判定, 非交易所披露 */
+  side: 'B' | 'S' | 'M'
+  /** open 开盘集合竞价 / close 收盘集合竞价 / after 盘后成交 / null 连续竞价 */
+  auction: 'open' | 'close' | 'after' | null
+}
+
+export interface TickSummary {
+  count: number
+  amount: number
+  shares: number
+  buy_amount: number
+  buy_shares: number
+  sell_amount: number
+  sell_shares: number
+  neutral_amount: number
+  neutral_shares: number
+  net_amount: number
+  max_amount: number
+  max_time: string | null
+  max_price: number | null
+  from: string
+  to: string
+}
+
 export interface KlineRow {
   symbol?: string
   date: string
@@ -2445,6 +2482,28 @@ export const api = {
         coverage?: { from: string; to: string; bars: number }
       }
     }>(`/api/astock/index/${encodeURIComponent(code)}?limit=${limit}`),
+  /**
+   * 成交明细(腾讯, 每 3 秒一行的成交快照)。
+   *
+   * ⚠️ 不是逐笔 —— 免费公开源只到 3 秒粒度, 逐笔要 Level-2。
+   * 买卖方向 B/S/M 是行情商判定, 不是交易所披露字段。
+   * 取不到时后端给 available:false, 前端据此整块不显示, 不编一行假的明细。
+   */
+  astockTicks: (code: string, tail = 200) =>
+    request<{
+      available: boolean
+      reason?: string
+      source?: string
+      data?: {
+        code: string
+        symbol: string
+        date: string | null
+        rows: TickRow[]
+        summary: TickSummary
+        coverage?: { rows: number; requested_tail: number; pages: number[]; last_page: number; from: string; to: string }
+        updated_at?: string
+      }
+    }>(`/api/astock/ticks/${encodeURIComponent(code)}?tail=${tail}`),
   klineMinuteBatch: (symbols: string[], date?: string) =>
     request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
       method: 'POST',

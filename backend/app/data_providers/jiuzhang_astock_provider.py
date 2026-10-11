@@ -82,6 +82,18 @@ _TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 #: 盘中行情短缓存(秒)。个股页每次渲染都打一次会明显拖慢首屏。
 _TENCENT_QUOTE_TTL_S = 10.0
 
+#: 腾讯成交明细(每 3 秒一行的成交快照)。注意域名是 **stock**.gtimg.cn,
+#: 与分时的 web.ifzq / 分钟的 ifzq 都不同 —— 拼错域名返回空, 属于假成功。
+_TENCENT_DETAIL_URL = "https://stock.gtimg.cn/data/index.php"
+#: 明细盘中刷新快, 20s 足够(更快只是重复打同一个快照)。
+_TENCENT_DETAIL_TTL_S = 20.0
+#: 单次最多返回多少行。再多是白打请求 —— 3000 行 ≈ 2.5 小时的快照。
+_DETAIL_MAX_TAIL = 3000
+#: 分页探测上限。一个交易日约 4800 行 ≈ 69 页, 上限给 400 页足够且能防死循环。
+_DETAIL_MAX_PAGES = 400
+#: 单次调用最多回溯几页(防 pathological tail 把整日拉空)。
+_DETAIL_MAX_PAGES_PER_CALL = 60
+
 #: 腾讯当日分时。与 qt.gtimg.cn 同厂不同域名(web.ifzq.gtimg.cn), UTF-8 JSON,
 #: 一次回传全天 240+ 个分钟点(约 15KB)。
 _TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
@@ -769,6 +781,235 @@ def index_daily(code: str, limit: int = 320) -> dict:
     }
     _cache_put(cache_key, result, _TENCENT_ADJ_TTL_S)
     return result
+
+
+def tick_trades(code: str, tail: int = 200) -> dict:
+    """A股**成交明细**(腾讯 stock.gtimg.cn) —— 个股页「成交明细」面板的真源。
+
+    连通性实测 (2026-10-11, 宿主机与容器内均通):
+        ``https://stock.gtimg.cn/data/index.php?appn=detail&action=data&c=sh600519&p=0``
+        返回 ``v_detail_data_sh600519=[0,"<行>|<行>|…"]``
+
+    ⚠️ **这是每 3 秒一行的成交快照, 不是逐笔**: 行的时间戳严格以 3 秒为步长
+        (09:30:02 / 09:30:05 / 09:30:08 …), 每行是该时间窗内所有成交的合计。
+        真正的逐笔要 Level-2 行情(付费), 免费公开源只能拿到这个粒度。
+        UI 必须写清这一点 —— 标着"逐笔"卖 3 秒快照就是误导。
+
+    ⚠️ 字段口径: 行 = ``序号/时间/成交价/涨跌额/成交量/成交额/方向``
+        - 方向是 B(主动买)/S(主动卖)/M(中性, 无法判断), 由行情商按成交价与当时
+          盘口的比较判定, **不是交易所披露字段**;
+        - 09:25:xx 是开盘集合竞价, 14:57 之后含收盘集合竞价, 单独打标。
+
+    🔴 **成交量单位不猜, 直接用额和价算股数**: 量与额同在一行, 而 ``额 = 股数 × 价``
+        恒成立, 所以 ``股数 = round(额 / 价)`` 是精确反推(实测 600519 主板 / 000651
+        深主板 / 688825 科创板 / 510300 ETF 全部自洽, 价的四舍五入只带来 <0.1% 误差)。
+        反过来若信那一列的"手", 科创板与 ETF 会差 100 倍(分时那档已经踩过一次)。
+
+    分页: 每页固定 70 行, 只能从开盘往后翻(p=-1 无效), 所以先倍增+二分找到
+    最后一页, 再往前回溯取尾部。整页结果按 (日期, 页码) 缓存, 一次查询里的探测
+    不会重复打同一个 URL。
+    """
+    code = _norm_code(code)
+    sym = _tx_symbol(code)
+    tail = max(1, min(int(tail or 200), _DETAIL_MAX_TAIL))
+
+    # 数据日期: 明细接口本身不带日期, 从实时行情的行情时间拿(非交易日会是最近
+    # 一个交易日的收盘时间)。拿不到日期就不硬编今天 —— 会让"这是哪天的明细"说不清。
+    trade_date = None
+    try:
+        qt = realtime_quote(code)["data"]
+        t = (qt.get("quote_time") or "").strip()
+        if len(t) >= 8 and t[:8].isdigit():
+            trade_date = f"{t[:4]}-{t[4:6]}-{t[6:8]}"
+    except Exception:  # 行情挂了不代表明细挂了, 只是日期归零
+        trade_date = None
+
+    memo: dict[int, list[dict]] = {}
+
+    def page(pn: int) -> list[dict]:
+        if pn in memo:
+            return memo[pn]
+        rows = _detail_page(sym, pn)
+        memo[pn] = rows
+        return rows
+
+    first = page(0)
+    if not first:
+        raise ValueError(f"腾讯成交明细无数据(今日无成交 / 不支持的标的): {sym}")
+
+    last = _detail_last_page(page)
+
+    # 从最后一页往回取, 够 tail 行就停
+    out: list[dict] = []
+    pages_used: list[int] = []
+    pn = last
+    fetched = 0
+    while pn >= 0 and len(out) < tail and fetched < _DETAIL_MAX_PAGES_PER_CALL:
+        rows = page(pn)
+        pages_used.append(pn)
+        fetched += 1
+        out = rows + out
+        pn -= 1
+    out = out[-tail:]
+
+    if not out:
+        raise ValueError(f"腾讯成交明细解析结果为空: {sym}")
+
+    summary = _tick_summary(out)
+    result = {
+        "source": SOURCE_TENCENT,
+        "data": {
+            "code": code,
+            "symbol": sym,
+            "date": trade_date,
+            # 新的在前 —— 成交明细的阅读习惯是盯最新一笔
+            "rows": list(reversed(out)),
+            "summary": summary,
+            "coverage": {
+                "rows": len(out),
+                "requested_tail": tail,
+                "pages": pages_used,
+                "last_page": last,
+                "from": out[0]["time"],
+                "to": out[-1]["time"],
+            },
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(f"detail:{sym}:{trade_date}:{tail}", result, _TENCENT_DETAIL_TTL_S)
+    return result
+
+
+def _tick_summary(rows: list[dict]) -> dict:
+    """对**当前这批行**做汇总(不做全日推算): 主动买/卖/中性拆开, 净额 = 买额 − 卖额。
+
+    中性(M)既不算买也不算卖 —— 硬塞到一边等于替交易所做它没有的判断。
+    """
+    buy_a = buy_v = sell_a = sell_v = neu_a = neu_v = 0.0
+    total_a = total_v = 0.0
+    max_amt = 0.0
+    max_row: dict | None = None
+    for r in rows:
+        a = r.get("amount") or 0.0
+        v = r.get("shares") or 0.0
+        total_a += a
+        total_v += v
+        if a > max_amt:
+            max_amt = a
+            max_row = r
+        if r.get("side") == "B":
+            buy_a += a
+            buy_v += v
+        elif r.get("side") == "S":
+            sell_a += a
+            sell_v += v
+        else:
+            neu_a += a
+            neu_v += v
+    return {
+        "count": len(rows),
+        "amount": round(total_a, 2),
+        "shares": round(total_v, 0),
+        "buy_amount": round(buy_a, 2),
+        "buy_shares": round(buy_v, 0),
+        "sell_amount": round(sell_a, 2),
+        "sell_shares": round(sell_v, 0),
+        "neutral_amount": round(neu_a, 2),
+        "neutral_shares": round(neu_v, 0),
+        "net_amount": round(buy_a - sell_a, 2),
+        "max_amount": round(max_amt, 2),
+        "max_time": max_row["time"] if max_row else None,
+        "max_price": max_row["price"] if max_row else None,
+        "from": rows[0]["time"],
+        "to": rows[-1]["time"],
+    }
+
+
+def _detail_page(sym: str, page_no: int) -> list[dict]:
+    """拉一页成交明细并解析。返回 [] = 这一页没有数据(翻过头了)。"""
+    url = _TENCENT_DETAIL_URL + "?" + urllib.parse.urlencode(
+        {"appn": "detail", "action": "data", "c": sym, "p": max(0, int(page_no))})
+    cached = _cache_get(url)
+    if isinstance(cached, list):
+        return cached
+    raw = _request_text(url, encoding="utf-8", timeout=_timeout())
+    m = re.search(rf'v_detail_data_{re.escape(sym)}\s*=\s*\[\s*\d+\s*,\s*"(.*?)"\s*\]', raw, re.S)
+    if not m:
+        rows: list[dict] = []
+        _cache_put(url, rows, _TENCENT_DETAIL_TTL_S)
+        return rows
+    rows = [r for r in (_detail_row(x) for x in m.group(1).split("|")) if r]
+    _cache_put(url, rows, _TENCENT_DETAIL_TTL_S)
+    return rows
+
+
+def _detail_row(seg: str) -> dict | None:
+    """解析一行 ``序号/时间/成交价/涨跌额/成交量/成交额/方向``。坏行返回 None(丢, 不猜)。"""
+    p = (seg or "").split("/")
+    if len(p) < 6:
+        return None
+    price = _num(p[2])
+    amount = _num(p[5])
+    if price is None or amount is None or price <= 0 or amount < 0:
+        return None
+    tmv = (p[1] or "").strip()
+    # 🔴 必须是合法时刻: ``\d{2}:\d{2}:\d{2}`` 会放过 99:99:99 这种坏值,
+    #    那条"时间"会一路带到 UI 上当真数据(写测试时才抓到)。
+    if not re.match(r"^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$", tmv):
+        return None
+    # 股数由「额 ÷ 价」反推 —— 不依赖第 5 列的单位(那列随标的是手还是股并不统一)
+    shares = round(amount / price, 0)
+    side = (p[6] or "").strip().upper()[:1] if len(p) > 6 else ""
+    return {
+        "seq": int(_num(p[0]) or 0),
+        "time": tmv,
+        "price": price,
+        "change": _num(p[3]),
+        "amount": amount,
+        "shares": shares,
+        "lots": round(shares / 100.0, 2),
+        "side": side if side in ("B", "S", "M") else "M",
+        "auction": _detail_session(tmv),
+    }
+
+
+def _detail_session(t: str) -> str | None:
+    """把时间归到交易时段 —— 收盘集合竞价与 15:00 之后的成交**不是同一回事**。
+
+    实测: 沪主板末行停在 15:00:02; 深市个股/科创板/ETF 会往后排到 15:2x,
+    那是盘后成交(盘后固定价格交易等), 量通常很小。如果把它们也算进"收盘集合竞价",
+    会把集合竞价的金额抬高 —— 所以三档分开打标, 让 UI 能区分。
+    """
+    if t <= "09:25:30":
+        return "open"      # 开盘集合竞价
+    if "14:57:00" <= t <= "15:00:59":
+        return "close"     # 收盘集合竞价(含 15:00 的撮合出清)
+    if t > "15:00:59":
+        return "after"     # 盘后成交, 不在连续竞价内
+    return None
+
+
+def _detail_last_page(page) -> int:
+    """倍增 + 二分找最后一个非空页。``page`` 是带缓存的取页函数(返回非空即存在)。
+
+    明细只能从开盘往后翻, 要"最近 N 行"就得先知道尾巴在哪 —— 但也不想为了取
+    200 行去打 70 次请求, 所以先对数级探一次再只回溯需要的页数。
+    """
+    hi = 1
+    while hi <= _DETAIL_MAX_PAGES and page(hi):
+        hi *= 2
+    lo = max(0, hi // 2)
+    hi = min(hi, _DETAIL_MAX_PAGES)
+    # 此时 lo 已知非空、hi 已知空(或撞到上限), 二分收窄到最后一个非空页
+    if page(hi):
+        return hi
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if page(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
 
 
 def realtime_quote(code: str) -> dict:

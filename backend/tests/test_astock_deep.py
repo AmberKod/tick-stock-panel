@@ -1408,3 +1408,175 @@ def test_api_index_ok(client, monkeypatch):
     assert body["source"] == "live-tencent"
     assert body["data"]["code"] == "000300"
     assert len(body["data"]["rows"]) == 2
+
+
+# ════════════════════════════════════════════════════════════════════
+# 成交明细(3 秒快照) —— GET /api/astock/ticks/{code}
+# ════════════════════════════════════════════════════════════════════
+
+def _detail_body(page_no: int, rows: list[str] | None = None) -> str:
+    """拼一页腾讯明细响应。rows=None 表示翻过头了(空)。"""
+    if rows is None:
+        return ""
+    return f'v_detail_data_sh600519=[{page_no},"' + "|".join(rows) + '"]'
+
+
+def _patch_detail(monkeypatch, pages: dict[int, list[str]], quote_time="20261009161459"):
+    """按页码返回明细 + 行情(行情只用来取数据日期)。"""
+    calls: list[int] = []
+
+    def fake_text(url, encoding="utf-8", headers=None, timeout=None):
+        if "qt.gtimg.cn" in url:
+            # 按 ~ 切字段, 30 号位是行情时间 —— 用列表拼, 别去数多少个 ~
+            parts = ["1", "贵州茅台", "600519", "1263.00", "1255.79", "1255.42", "193"]
+            parts += ["0"] * (30 - len(parts))
+            parts.append(quote_time)
+            parts += ["0"] * 20
+            return 'v_sh600519="' + "~".join(parts) + '~"'
+        calls.append(url)
+        m = re.search(r"[?&]p=(\d+)", url)
+        pn = int(m.group(1)) if m else 0
+        return _detail_body(pn, pages.get(pn))
+
+    monkeypatch.setattr(prov, "_request_text", fake_text)
+    monkeypatch.setattr(prov, "_timeout", lambda: 5.0)
+    prov._CACHE.clear()
+    return calls
+
+
+_R0 = [
+    "0/09:25:02/1255.42/0.01/195/24480690/B",
+    "1/09:30:02/1258.41/2.99/127/15960625/S",
+    "2/09:30:05/1260.01/1.60/209/26350708/M",
+]
+
+
+def test_tick_row_price_change_amount_order(monkeypatch):
+    """行的第 3/4/6 列是 价/涨跌/额。反过来读会把涨跌当成成交量。"""
+    _patch_detail(monkeypatch, {0: _R0})
+    row = prov.tick_trades("600519.SH", 10)["data"]["rows"][-1]   # 新在前 → 第一条内容在末尾
+    assert row["price"] == 1255.42
+    assert row["change"] == 0.01
+    assert row["amount"] == 24480690.0
+    assert row["time"] == "09:25:02"
+
+
+def test_tick_shares_derived_from_amount_over_price(monkeypatch):
+    """🔴 股数必须由「额 ÷ 价」反推 —— 第 5 列随标的时而手时而股(分时那档已经
+    踩过一次: 科创板按手读会差 100 倍)。这里 24480690 / 1255.42 = 19499.98 股。"""
+    _patch_detail(monkeypatch, {0: _R0})
+    row = prov.tick_trades("600519.SH", 10)["data"]["rows"][-1]
+    assert row["shares"] == 19500.0
+    assert row["lots"] == 195.0
+
+
+def test_tick_side_and_session_labels(monkeypatch):
+    """B/S/M 三态要分开: M 是"判不出方向", 不能塞进买或卖充数。"""
+    _patch_detail(monkeypatch, {0: _R0})
+    rows = {r["time"]: r for r in prov.tick_trades("600519.SH", 10)["data"]["rows"]}
+    assert rows["09:25:02"]["side"] == "B"
+    assert rows["09:30:02"]["side"] == "S"
+    assert rows["09:30:05"]["side"] == "M"
+    # 09:25 是开盘集合竞价, 与连续竞价不是一回事
+    assert rows["09:25:02"]["auction"] == "open"
+
+
+def test_tick_after_hours_not_counted_as_close_auction(monkeypatch):
+    """深市/科创板/ETF 会排到 15:2x —— 那是盘后成交, 算进收盘集合竞价会虚增后者金额。"""
+    rows = {
+        0: ["0/15:00:02/1263.00/-0.45/385/48696228/M",
+            "1/15:17:30/38.83/0.00/2/7766/S"],
+    }
+    _patch_detail(monkeypatch, rows)
+    by_time = {r["time"]: r for r in prov.tick_trades("600519.SH", 10)["data"]["rows"]}
+    assert by_time["15:00:02"]["auction"] == "close"
+    assert by_time["15:17:30"]["auction"] == "after"
+
+
+def test_tick_newest_first(monkeypatch):
+    """成交明细的阅读习惯是盯最新一笔 —— 返回必须是时间倒序。"""
+    _patch_detail(monkeypatch, {0: _R0})
+    times = [r["time"] for r in prov.tick_trades("600519.SH", 10)["data"]["rows"]]
+    assert times == sorted(times, reverse=True)
+
+
+def test_tick_summary_neutral_kept_separate(monkeypatch):
+    """净额 = 买额 − 卖额, 中性单独计 —— 替交易所判定 M 的方向不是我们的事。"""
+    _patch_detail(monkeypatch, {0: _R0})
+    s = prov.tick_trades("600519.SH", 10)["data"]["summary"]
+    assert s["buy_amount"] == 24480690.0
+    assert s["sell_amount"] == 15960625.0
+    assert s["neutral_amount"] == 26350708.0
+    assert s["net_amount"] == round(24480690.0 - 15960625.0, 2)
+    assert s["count"] == 3
+
+
+def test_tick_bad_rows_dropped(monkeypatch):
+    """坏行(字段不足 / 价格 0 / 时间格式不对)整行丢, 不猜不补零。"""
+    _patch_detail(monkeypatch, {0: [
+        "0/09:25:02/1255.42/0.01/195/24480690/B",
+        "1/09:30:02",                                  # 字段不足
+        "2/09:30:05/0/1.60/209/26350708/B",            # 价格为 0 → 股数除不出来
+        "3/99:99:99/1260.01/1.60/209/26350708/B",      # 时间不是 HH:MM:SS
+        "4/09:30:08/1260.23/0.22/171/21581660/B",
+    ]})
+    rows = prov.tick_trades("600519.SH", 10)["data"]["rows"]
+    assert [r["time"] for r in rows] == ["09:30:08", "09:25:02"]
+
+
+def test_tick_empty_raises(monkeypatch):
+    """第一页就是空(停牌/今日无成交/不支持的标的) → fail-closed, 不返回空壳。"""
+    _patch_detail(monkeypatch, {})
+    with pytest.raises(ValueError):
+        prov.tick_trades("600519.SH", 10)
+
+
+def test_tick_tail_limited(monkeypatch):
+    """tail 是"最近 N 行", 超了要截, 不能把整日都塞给前端。"""
+    page_rows = [f"{i}/09:{30 + i // 20:02d}:{i % 60:02d}/100.00/0.10/{i + 1}/{100000 + i}/B"
+                 for i in range(70)]
+    _patch_detail(monkeypatch, {0: page_rows})
+    rows = prov.tick_trades("600519.SH", 5)["data"]["rows"]
+    assert len(rows) == 5
+
+
+def test_tick_page_probe_does_not_refetch(monkeypatch):
+    """找最后一页是倍增+二分, 同一个页码不该被重复请求。"""
+    pages = {i: [f"{i * 70}/14:00:{i:02d}/100.00/0.10/5/500/B"] for i in range(0, 70)}
+    calls = _patch_detail(monkeypatch, pages)
+    prov.tick_trades("600519.SH", 200)
+    urls = [u for u in calls if "detail" in u]
+    assert len(urls) == len(set(urls))
+
+
+def test_tick_date_from_quote_time(monkeypatch):
+    """明细接口本身不带日期 —— 从行情时间取, 免得"这是哪天的明细"说不清。"""
+    _patch_detail(monkeypatch, {0: _R0}, quote_time="20261009161459")
+    assert prov.tick_trades("600519.SH", 10)["data"]["date"] == "2026-10-09"
+
+
+def test_tick_source_is_real(monkeypatch):
+    _patch_detail(monkeypatch, {0: _R0})
+    r = prov.tick_trades("600519.SH", 10)
+    assert r["source"] == "live-tencent"
+    from app.services.source_gate import is_real
+    assert is_real(r)
+
+
+def test_api_ticks_bad_code(client):
+    body = client.get("/api/astock/ticks/abc").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_ticks_bad_tail(client):
+    body = client.get("/api/astock/ticks/600519.SH?tail=0").json()
+    assert body["available"] is False and "bad_tail" in body["reason"]
+
+
+def test_api_ticks_ok(client, monkeypatch):
+    _patch_detail(monkeypatch, {0: _R0})
+    body = client.get("/api/astock/ticks/600519.SH?tail=20").json()
+    assert body["available"] is True, body
+    assert body["source"] == "live-tencent"
+    assert len(body["data"]["rows"]) == 3
+    assert body["data"]["summary"]["count"] == 3

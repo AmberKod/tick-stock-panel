@@ -13,6 +13,8 @@
 - GET /api/astock/sectors/{code}: 所属板块/题材(东财 F10, 带入选理由)
 - GET /api/astock/index/{code}: 指数日K(腾讯) —— 对比页基准指数(沪深300/上证指数…
   本地 index 库不全, 走腾讯真源)
+- GET /api/astock/ticks/{code}: 成交明细(腾讯) —— **每 3 秒一行的成交快照**,
+  不是逐笔(逐笔需 Level-2)。尾部 N 行 + 该窗口的买卖净额汇总
 
 项目惯例(与 us_deep.py / us_financials.py 一致): 不可用是正常状态不是错误 →
 失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
@@ -47,6 +49,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     realtime_quote,
     research_reports,
     stock_sectors,
+    tick_trades,
 )
 from app.services.source_gate import is_real
 
@@ -291,4 +294,29 @@ def get_index_daily(code: str, limit: int = 320) -> dict:
         return {"available": False, "reason": f"bad_limit: {limit} (20..1000)",
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: index_daily(norm, limit=limit),
+                    required_key="rows", source=SOURCE_TENCENT)
+
+
+@router.get("/ticks/{code}")
+def get_tick_trades(code: str, tail: int = 200) -> dict:
+    """成交明细(腾讯) —— 个股页「成交明细」面板。
+
+    ⚠️ 粒度必须说清: 这是**每 3 秒一行的成交快照**("分笔"), 不是**逐笔**。
+    免费公开源只到这个粒度, 逐笔要 Level-2(付费)。UI 上写着"逐笔"就是误导,
+    面板标题与来源说明都由后端一并返回, 前端照抄, 不另编口径。
+
+    ⚠️ 买卖方向(B/S/M)是行情商按成交价与当时盘口的比较判定的,
+    **不是交易所披露字段**; M = 无法判断, 汇总时单独计一列, 不硬塞进买或卖。
+
+    ``tail`` = 取最近多少行(默认 200, 上限 3000)。接口只能从开盘往后翻页,
+    所以后端先对数级探到最后一页再回溯 —— 取最近 200 行约需十几次请求。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TENCENT}
+    if tail < 1 or tail > 3000:
+        return {"available": False, "reason": f"bad_tail: {tail} (1..3000)",
+                "source": SOURCE_TENCENT}
+    return _respond(norm, lambda: tick_trades(norm, tail=tail),
                     required_key="rows", source=SOURCE_TENCENT)
