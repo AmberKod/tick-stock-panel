@@ -44,6 +44,7 @@ from app.data_providers.jiuzhang_astock_provider import (
     financials,
     fund_flow,
     index_daily,
+    industry_peers,
     minute_bars,
     minute_kline,
     realtime_quote,
@@ -320,3 +321,26 @@ def get_tick_trades(code: str, tail: int = 200) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: tick_trades(norm, tail=tail),
                     required_key="rows", source=SOURCE_TENCENT)
+
+
+@router.get("/peers/{code}")
+def get_industry_peers(code: str, limit: int = 16) -> dict:
+    """同行公司对比 —— 东财 F10「行业对比」, 个股页「同行业对比」面板。
+
+    ⚠️ 名单口径(面板里也写同一句话): 这是**分三块各取其指标行业前列**的公司
+    再加本公司, **不是该行业全部成分股**。三块入选标准不同, 所以并非每家每列
+    都有数 —— 缺的返回 None, 前端显示 "—", 不插值不补零。
+
+    ⚠️ 同行而不"同三级行业": 逐核过 EM2016 后发现东财有时会把**产业链相关但
+    三级行业不同**的公司算进来(例宁德时代同行里的天赐材料/先导智能)。返回体
+    带了每家的 ``industry`` 与 ``same_industry``, 由前端标注, 不替东财否认。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_EM_F10}
+    if limit < 1 or limit > 30:
+        return {"available": False, "reason": f"bad_limit: {limit} (1..30)",
+                "source": SOURCE_EM_F10}
+    return _respond(norm, lambda: industry_peers(norm, limit=limit),
+                    required_key="peers", source=SOURCE_EM_F10)

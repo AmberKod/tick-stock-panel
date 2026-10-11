@@ -1580,3 +1580,331 @@ def test_api_ticks_ok(client, monkeypatch):
     assert body["source"] == "live-tencent"
     assert len(body["data"]["rows"]) == 3
     assert body["data"]["summary"]["count"] == 3
+
+
+# ════════════════════════════════════════════════════════════════════
+# 同行公司对比 —— GET /api/astock/peers/{code}
+# ════════════════════════════════════════════════════════════════════
+
+def _peer_row(corre: str, name: str, org: str | None = None, **fields: object) -> dict:
+    """拼一行东财 F10 同行数据。
+
+    ⚠️ 每行都照东财的真实形状: SECURITY_CODE/NAME 恒为**查询的那只股**,
+    真正的身份在 CORRE_* 列。按 SECURITY_CODE 取会拿到"同行全是它自己"。
+    """
+    row: dict[str, object] = {
+        "SECUCODE": "000651.SZ", "SECURITY_CODE": "000651",
+        "SECURITY_NAME_ABBR": "格力电器",
+        "CORRE_SECUCODE": f"{corre}.SZ", "CORRE_SECURITY_CODE": corre,
+        "CORRE_SECURITY_NAME": name,
+    }
+    if org is not None:
+        row["CORRE_ORG_CODE"] = org
+    row.update(fields)
+    return row
+
+
+# 成长性(czxbj): 美的 + 长虹美菱 A/B 股重复 + 本公司 + 中值/平均
+_PEERS_CZXBJ = [
+    _peer_row("000333", "美的集团", "ORGMIDEA", YYSRTB=12.0, JLRTB=8.0,
+              JLR_3Y=9.0, YYSR_3Y=6.0, MGSYTB=8.5,
+              REPORT_DATE="2025-12-31 00:00:00"),
+    _peer_row("000521", "长虹美菱", "ORGCHML", YYSRTB=6.32, JLRTB=-40.68,
+              JLR_3Y=15.76, REPORT_DATE="2025-12-31 00:00:00"),
+    _peer_row("000651", "格力电器", "ORGGREE", YYSRTB=-9.89, JLRTB=-10.84,
+              JLR_3Y=7.84, REPORT_DATE="2025-12-31 00:00:00"),
+    _peer_row("行业中值", "行业中值", YYSRTB=2.77, JLRTB=-7.65,
+              REPORT_DATE="2025-12-31 00:00:00"),
+    _peer_row("行业平均", "行业平均", YYSRTB=0.73, JLRTB=-51.56,
+              REPORT_DATE="2025-12-31 00:00:00"),
+]
+
+# 估值(gzbj): 报告期与成长块不同 —— 每块单独记, 不能只写一个日期
+_PEERS_GZBJ = [
+    _peer_row("行业中值", "行业中值", PE_TTM=11.94, PB=1.63,
+              REPORT_DATE="2024-12-31 00:00:00"),
+    _peer_row("行业平均", "行业平均", PE_TTM=18.45, PB=1.40,
+              REPORT_DATE="2024-12-31 00:00:00"),
+    _peer_row("600690", "海尔智家", "ORGHR", PE_TTM=10.85, PB=1.63,
+              PS_TTM=0.65, PEG=1.41, REPORT_DATE="2024-12-31 00:00:00"),
+    _peer_row("000651", "格力电器", "ORGGREE", PE_TTM=7.80, PB=1.49,
+              PS_TTM=1.33, PEG=0.72, REPORT_DATE="2024-12-31 00:00:00"),
+]
+
+_PEERS_DBFXBJ = [
+    _peer_row("行业中值", "行业中值", ROE_AVG=13.44, XSJLL_AVG=6.37,
+              REPORT_DATE="2024-12-31 00:00:00"),
+    _peer_row("600690", "海尔智家", "ORGHR", ROE_AVG=17.2, XSJLL_AVG=6.64,
+              REPORT_DATE="2024-12-31 00:00:00"),
+]
+
+# 公司规模: gsgm = 本公司本体; gsgm_zsz = 市值前几名
+_PEERS_GSGM = [_peer_row("000651", "格力电器", "ORGGREE",
+                         TOTAL_CAP=217_502_584_923.03, FREECAP=2140.66,
+                         TOTAL_OPERATEINCOME=89_672_955_427.92,
+                         NETPROFIT=13_322_833_444.57,
+                         TOTAL_CAP_RANK=2, TOTAL_OPERATEINCOME_RANK=3,
+                         NETPROFIT_RANK=2, REPORT_TYPE="2026年中报")]
+_PEERS_GSGM_ZSZ = [
+    _peer_row("000333", "美的集团", "ORGMIDEA", TOTAL_CAP=629_177_600_963.38,
+              TOTAL_CAP_RANK=1, REPORT_TYPE="2026年中报"),
+    # 只在市值榜里出现 → 除市值外没有别的指标, 那些列必须是 None 而不是 0
+    _peer_row("600690", "海尔智家", "ORGHR", TOTAL_CAP=193_597_264_692.84,
+              TOTAL_CAP_RANK=3, REPORT_TYPE="2026年中报"),
+]
+
+_PEER_PAYLOAD = {
+    "hyzx": None,
+    "czxbj": _PEERS_CZXBJ,
+    "gzbj": _PEERS_GZBJ,
+    "dbfxbj": _PEERS_DBFXBJ,
+    "gsgm": _PEERS_GSGM,
+    "gsgm_zsz": _PEERS_GSGM_ZSZ,
+}
+
+#: 二次核对用的 ORG 资料(一次 SECUCODE in (...) 查询)
+_PEER_ORG_ROWS = [
+    {"SECUCODE": "000651.SZ", "SECURITY_NAME_ABBR": "格力电器",
+     "ORG_CODE": "ORGGREE", "EM2016": "家电-白色家电-白色家电"},
+    {"SECUCODE": "000333.SZ", "SECURITY_NAME_ABBR": "美的集团",
+     "ORG_CODE": "ORGMIDEA", "EM2016": "家电-白色家电-白色家电"},
+    {"SECUCODE": "600690.SH", "SECURITY_NAME_ABBR": "海尔智家",
+     "ORG_CODE": "ORGHR", "EM2016": "家电-白色家电-白色家电"},
+    {"SECUCODE": "000521.SZ", "SECURITY_NAME_ABBR": "长虹美菱",
+     "ORG_CODE": "ORGCHML", "EM2016": "家电-白色家电-白色家电"},
+    {"SECUCODE": "200521.SZ", "SECURITY_NAME_ABBR": "虹美菱B",
+     "ORG_CODE": "ORGCHML", "EM2016": "家电-白色家电-白色家电"},
+]
+
+
+def _patch_peers(monkeypatch, payload=None, org_rows=None) -> dict[str, int]:
+    """拦截 F10 行业对比 + ORG 核对。返回各类请求的命中次数。"""
+    payload = _PEER_PAYLOAD if payload is None else payload
+    org_rows = _PEER_ORG_ROWS if org_rows is None else org_rows
+    hits = {"f10": 0, "org": 0}
+
+    real_json = prov._request_json
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        if "IndustryAnalysis" in url:
+            hits["f10"] += 1
+            return payload
+        return real_json(url, data=data, headers=headers, timeout=timeout)
+
+    def fake_datacenter(report_name, filter_str="", page_size=50,
+                        sort_columns="", sort_types="-1"):
+        if report_name == prov._REPORT_F10_ORG:
+            hits["org"] += 1
+            if " in (" in filter_str:
+                return org_rows
+            return [r for r in org_rows if r["SECUCODE"].startswith("000651")]
+        return []
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    monkeypatch.setattr(prov, "_datacenter", fake_datacenter)
+    prov._CACHE.clear()
+    return hits
+
+
+def test_peers_code_is_market_prefix_first(monkeypatch):
+    """🔴 F10 要 'SZ000651' 而不是 datacenter 的 '000651.SZ'。
+
+    传反了不报错, 只返回 ``{"hyzx":null,...}`` 的空结构 —— 那是"返回成功但没东西"
+    的假成功, 而且 peers 会空到 <del>0 行</del> 直接走 raise, 查起来极费时间。
+    """
+    seen: list[str] = []
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        seen.append(url)
+        return _PEER_PAYLOAD
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    monkeypatch.setattr(prov, "_datacenter", lambda *a, **k: _PEER_ORG_ROWS[:1])
+    prov._CACHE.clear()
+    prov.industry_peers("000651.SZ")
+    assert seen and "code=SZ000651" in seen[0]
+    _patch_peers(monkeypatch)
+    prov.industry_peers("600519.SH")
+    # 沪市同理: SH600519, 不是 600519.SH
+    assert prov._f10_code("600519.SH") == "SH600519"
+    assert prov._f10_code("000651.SZ") == "SZ000651"
+    assert prov._f10_code("832000.BJ") == "BJ832000"
+
+
+def test_peers_identity_from_corre_columns(monkeypatch):
+    """同行身份只认 CORRE_* —— SECURITY_CODE 列永远是被查询的那只股。"""
+    hits = _patch_peers(monkeypatch)
+    rows = prov.industry_peers("000651.SZ")["data"]["peers"]
+    codes = [r["code"] for r in rows]
+    assert codes == ["000651", "000333", "600690", "000521"]
+    # 同一家公司不能因为在多个块里出现就变成多行
+    assert len(codes) == len(set(codes))
+    assert hits["f10"] == 1
+
+
+def test_peers_b_share_deduped_by_org(monkeypatch):
+    """🔴 A/B 股是同一家公司的两个证券: 必须按 ORG_CODE 归并, 保留 A 股那行。
+
+    数值本来就在两份行里各给一份, 不合并会让人以为同行多了一家公司。
+    B 股那行独有的字段要补进保留行, 不能直接丢。
+    """
+    payload = dict(_PEER_PAYLOAD)
+    payload["czxbj"] = [
+        *_PEERS_CZXBJ,
+        _peer_row("200521", "虹美菱B", "ORGCHML", YYSRTB=6.32, JLRTB=-40.68,
+                  JLR_3Y=15.76, REPORT_DATE="2025-12-31 00:00:00"),
+    ]
+    # B 股行单独带一个 A 股行没有的字段, 用来验证合并不是简单丢弃
+    payload["gzbj"] = [
+        *_PEERS_GZBJ,
+        _peer_row("200521", "虹美菱B", "ORGCHML", PE_TTM=33.3,
+                  REPORT_DATE="2024-12-31 00:00:00"),
+    ]
+    _patch_peers(monkeypatch, payload)
+    rows = {r["code"]: r for r in prov.industry_peers("000651.SZ")["data"]["peers"]}
+    assert "200521" not in rows
+    assert rows["000521"]["pe_ttm"] == 33.3          # B 股行的值补进来了
+    assert rows["000521"]["revenue_yoy"] == 6.32     # A 股行原有的值没被覆盖
+
+
+def test_peers_total_cap_is_yuan_to_yi(monkeypatch):
+    """🔴 单位坑: TOTAL_CAP/营收/净利是**元**, 而同一份数据里的 FREECAP 已经是
+    **亿元**。不逐列处理, 格力总市值会显示成 2175 亿亿。"""
+    _patch_peers(monkeypatch)
+    self_row = prov.industry_peers("000651.SZ")["data"]["peers"][0]
+    assert self_row["total_cap"] == 2175.03
+    assert self_row["revenue"] == 896.73
+    assert self_row["net_profit"] == 133.23
+
+
+def test_peers_missing_metric_is_none_not_zero(monkeypatch):
+    """只在市值榜露面的公司, 估值列必须是 None(前端显示 —), 不能是 0。"""
+    _patch_peers(monkeypatch)
+    rows = {r["code"]: r for r in prov.industry_peers("000651.SZ")["data"]["peers"]}
+    assert rows["600690"]["pe_ttm"] == 10.85           # 在估值榜里有数
+    assert rows["000521"]["pe_ttm"] is None            # 估值榜里没有它
+
+
+def test_peers_industry_stats_split(monkeypatch):
+    """中值/平均要分开主打各指标 —— 混起来说"行业水平"是用一个数代表两件事。"""
+    _patch_peers(monkeypatch)
+    data = prov.industry_peers("000651.SZ")["data"]
+    assert data["industry_median"]["revenue_yoy"] == 2.77
+    assert data["industry_avg"]["revenue_yoy"] == 0.73
+    assert data["industry_median"]["pe_ttm"] == 11.94
+    assert data["industry_avg"]["pe_ttm"] == 18.45
+    # 占位行不能混进同行名单
+    assert all(r["code"] not in ("行业中值", "行业平均") for r in data["peers"])
+
+
+def test_peers_report_dates_per_block(monkeypatch):
+    """估值/成长/杜邦三块的报告期可能不同, 必须分块登记。"""
+    _patch_peers(monkeypatch)
+    dates = prov.industry_peers("000651.SZ")["data"]["report_dates"]
+    assert dates["growth"] == "2025-12-31"
+    assert dates["valuation"] == "2024-12-31"
+    assert dates["size"] == "2026年中报"
+
+
+def test_peers_self_row_first(monkeypatch):
+    _patch_peers(monkeypatch)
+    rows = prov.industry_peers("000651.SZ")["data"]["peers"]
+    assert rows[0]["is_self"] is True and rows[0]["code"] == "000651"
+    assert all(not r["is_self"] for r in rows[1:])
+
+
+def test_peers_same_industry_flag(monkeypatch):
+    """逐家核 EM2016: 东财偶尔把三级行业不同的公司也算作同行, 要标出来。"""
+    _patch_peers(monkeypatch)
+    data = prov.industry_peers("000651.SZ")["data"]
+    rows = {r["code"]: r for r in data["peers"]}
+    assert data["industry_checked"] is True
+    assert rows["000333"]["same_industry"] is True
+    rows_diff = {r["code"]: r for r in data["peers"]}
+    del rows_diff  # 占位: 下面的用例单独构造不同行业
+
+
+def test_peers_flags_cross_industry_peer(monkeypatch):
+    """不同 EM2016 三级的同行 → same_industry=False, 前端据此标注。"""
+    org_rows = [
+        {"SECUCODE": "000651.SZ", "SECURITY_NAME_ABBR": "格力电器",
+         "ORG_CODE": "ORGGREE", "EM2016": "家电-白色家电-白色家电"},
+        {"SECUCODE": "000333.SZ", "SECURITY_NAME_ABBR": "美的集团",
+         "ORG_CODE": "ORGMIDEA", "EM2016": "机械设备-通用设备-制冷设备"},
+        {"SECUCODE": "600690.SH", "SECURITY_NAME_ABBR": "海尔智家",
+         "ORG_CODE": "ORGHR", "EM2016": "家电-白色家电-白色家电"},
+        {"SECUCODE": "000521.SZ", "SECURITY_NAME_ABBR": "长虹美菱",
+         "ORG_CODE": "ORGCHML", "EM2016": "家电-白色家电-白色家电"},
+    ]
+    _patch_peers(monkeypatch, org_rows=org_rows)
+    rows = {r["code"]: r for r in prov.industry_peers("000651.SZ")["data"]["peers"]}
+    assert rows["000333"]["same_industry"] is False
+    assert rows["600690"]["same_industry"] is True
+
+
+def test_peers_unverified_flag_when_org_lookup_fails(monkeypatch):
+    """核对失败不能静默通过: industry_checked=False, 且 same_industry 不装作 True。"""
+    real_json = prov._request_json
+
+    def fake_json(url, data=None, headers=None, timeout=None):
+        return _PEER_PAYLOAD if "IndustryAnalysis" in url else real_json(
+            url, data=data, headers=headers, timeout=timeout)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("datacenter 挂了")
+
+    monkeypatch.setattr(prov, "_request_json", fake_json)
+    monkeypatch.setattr(prov, "_datacenter", boom)
+    prov._CACHE.clear()
+    data = prov.industry_peers("000651.SZ")["data"]
+    assert data["industry_checked"] is False
+    assert all(r["same_industry"] is None for r in data["peers"])
+    # 主数据还是照常给出 —— 辅助查询失败不该把整块功能打挂
+    assert data["peers"]
+
+
+def test_peers_empty_raises(monkeypatch):
+    """拿不到同行(F10 未覆盖 / 退市) → fail-closed, 不返回空壳。"""
+    _patch_peers(monkeypatch, payload={"hyzx": None, "gsgm": []})
+    with pytest.raises(ValueError):
+        prov.industry_peers("000651.SZ")
+
+
+def test_peers_limit_clamped(monkeypatch):
+    _patch_peers(monkeypatch)
+    d2 = prov.industry_peers("000651.SZ", 2)["data"]
+    assert len(d2["peers"]) == 2
+    assert d2["peer_count"] == 4          # 总数照实说, limit 只截返回
+    d_big = prov.industry_peers("000651.SZ", 999)["data"]
+    assert len(d_big["peers"]) == 4
+
+
+def test_peers_source_is_real(monkeypatch):
+    _patch_peers(monkeypatch)
+    r = prov.industry_peers("000651.SZ")
+    assert r["source"] == "live-eastmoney-f10"
+    from app.services.source_gate import is_real
+    assert is_real(r)
+
+
+def test_api_peers_bad_code(client):
+    body = client.get("/api/astock/peers/abc").json()
+    assert body["available"] is False and "bad_code" in body["reason"]
+
+
+def test_api_peers_bad_limit(client, monkeypatch):
+    _patch_peers(monkeypatch)
+    body = client.get("/api/astock/peers/000651.SZ?limit=99").json()
+    assert body["available"] is False and "bad_limit" in body["reason"]
+
+
+def test_api_peers_ok(client, monkeypatch):
+    _patch_peers(monkeypatch)
+    body = client.get("/api/astock/peers/000651.SZ?limit=8").json()
+    assert body["available"] is True, body
+    assert body["source"] == "live-eastmoney-f10"
+    assert body["data"]["code"] == "000651"
+    assert body["data"]["industry"]["em"] == "家电-白色家电-白色家电"
+    assert len(body["data"]["peers"]) == 4
+    assert body["data"]["self_size"]["cap_rank"] == 2
+    assert body["data"]["caveats"]

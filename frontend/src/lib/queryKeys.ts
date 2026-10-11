@@ -124,6 +124,8 @@ export const QK = {
   astockTicks:          (code: string, tail: number) => ['astock-ticks', code, tail] as const,
   /** 指数日K(腾讯) —— 对比页基准。按代码 + 根数分 key。 */
   astockIndexDaily:     (code: string, limit: number) => ['astock-index-daily', code, limit] as const,
+  /** 同行公司对比(东财 F10) —— 按代码 + 最多几家分 key。 */
+  astockPeers:          (code: string, limit: number) => ['astock-peers', code, limit] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

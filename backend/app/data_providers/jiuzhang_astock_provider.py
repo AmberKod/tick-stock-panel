@@ -131,6 +131,30 @@ _WAN = 1e4  # 元 → 万元
 #: orgId 是公司的永久标识, 不会变, 缓存一天足够。
 _ORG_TTL_S = 86400.0
 
+#: 东财 F10「行业对比」(成长性比较 / 估值比较 / 杜邦分析比较 / 公司规模)。
+#: ⚠️ 与 datacenter(_DATACENTER_URL)不是同一个服务: 这是 F10 静态站的 PageAjax,
+#: 实测容器内可达 —— push2.eastmoney.com 被墙, 但这个域名没被墙, 之前用它给
+#: 龙虎榜/板块取过数都正常。
+#: ⚠️ 传入的代码是 **SZ000651** 这种市场前缀在前的写法, 反过来(000651.SZ)返回
+#: 空结构体但不报错 —— 典型的"返回成功但没东西"的假成功。
+_EM_F10_INDUSTRY_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/IndustryAnalysis/PageAjax"
+#: 行业对比是财报级数据, 1 小时内不会有实质变化。
+_EM_F10_INDUSTRY_TTL_S = 3600.0
+
+#: 「元」→「亿元」。看总市值那个坑: 同一份响应里 TOTAL_CAP/营收/净利是**元**,
+#: 而 FREECAP 是**亿元**(贵州茅台: TOTAL_CAP=1.5788e12 元, FREECAP=15788.53 亿元)。
+#: 单位得逐列声明, 不能想当然地统一处理。
+_YI = 1e8
+
+#: "行业中值" / "行业平均" 占位行 —— SECURITY_CODE 列永远是查询的那只股,
+#: 东财把真实身份放在 CORRE_* 列里, 「中值/平均」就落在 CORRE_* 上。
+_EM_STAT_CODES = ("行业中值", "行业平均")
+
+#: B 股代码段: 深市 200xxx / 沪市 900xxx。同一家公司的 A 股与 B 股会被东财
+#: 当成两个"同行"(长虹美菱 000521 + 虹美菱B 200521, 数值完全一样), 去重时
+#: 保留 A 股那一行。⚠️ 别用 startswith("9") 判 B 股: 北交所是 920xxx。
+_B_SHARE_PREFIXES = ("200", "900")
+
 # 结果缓存: key -> (expire_at, payload)。东财/巨潮都限流, 个股页刷新不该每次都打。
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_LOCK = threading.Lock()
@@ -1485,6 +1509,308 @@ def _secucode(code: str) -> str:
     if c[0] in ("6", "9") or c.startswith("5"):
         return f"{c}.SH"
     return f"{c}.SZ"
+
+
+def _f10_code(code: str) -> str:
+    """'600519' → 'SH600519'(东财 F10 PageAjax 的代码写法)。
+
+    :func:`_secucode` 给的是 datacenter 的写法('600519.SH'), 这里只要把两段
+    倒过来 —— 直接传 '600519.SH' 会拿到 ``{"hyzx":null,...}`` 这种空结构。
+    """
+    symbol, _, market = _secucode(code).partition(".")
+    return f"{market}{symbol}"
+
+
+# 同行公司取值表: (逻辑块, 我方字段名, 东财字段名)。
+#: 逻辑块 → 东财响应里的实际 key(估值 gzbj / 成长 czxbj / 杜邦 dbfxbj)。
+_PEER_BLOCKS = {"valuation": "gzbj", "growth": "czxbj", "dupont": "dbfxbj"}
+# 只登记**已实现**数据; MGSY_1E/_2E/_3E(未来三年 EPS 预测)一律不取 ——
+# 那是分析师一致预期, 不是历史事实, 混进"同行业对比"会让人当成已发生数。
+_PEER_METRICS: tuple[tuple[str, str, str], ...] = (
+    # 估值比较(gzbj)
+    ("valuation", "pe_ttm", "PE_TTM"),
+    ("valuation", "pe", "PE"),
+    ("valuation", "pb", "PB"),
+    ("valuation", "ps_ttm", "PS_TTM"),
+    ("valuation", "pcf_ttm", "PCF_TTM"),
+    ("valuation", "peg", "PEG"),
+    # 成长性比较(czxbj): 同比 / 三年复合
+    ("growth", "revenue_yoy", "YYSRTB"),
+    ("growth", "profit_yoy", "JLRTB"),
+    ("growth", "eps_yoy", "MGSYTB"),
+    ("growth", "revenue_cagr3", "YYSR_3Y"),
+    ("growth", "profit_cagr3", "JLR_3Y"),
+    # 杜邦分析比较(dbfxbj): ROE / 净利率 / 周转率 / 权益乘数
+    ("dupont", "roe_avg", "ROE_AVG"),
+    ("dupont", "net_margin", "XSJLL_AVG"),
+    ("dupont", "asset_turnover", "TOAZZL_AVG"),
+    ("dupont", "equity_multiplier", "QYCS_AVG"),
+)
+
+#: 公司规模(gsgm_*)。⚠️ 单位见 :data:`_YI`: 除 FREECAP 是亿元外全是元。
+_PEER_SIZE = (
+    ("total_cap", "TOTAL_CAP", True),
+    ("revenue", "TOTAL_OPERATEINCOME", True),
+    ("net_profit", "NETPROFIT", True),
+)
+
+
+def industry_peers(code: str, limit: int = 16) -> dict:
+    """同行公司对比 —— 东财 F10「行业对比」, 全真源。
+
+    东财这一页把「和谁比」交给了自己: 成长性/估值/杜邦三块各给**该指标行业前 6
+    名 + 本公司**(本公司不进前 6 也照样列出), 公司规模再给市值等前 5 名。三块
+    取并集就是界面上的同行名单。
+
+    ⚠️ 必须讲清的三件事(面板里也写死了同一套说辞):
+      1. 名单**不是行业全部成分股**, 是"各指标排前列的公司", 而且三块的入选
+         标准不同 —— 所以并非每家公司每个指标都有数, 缺的就是缺的(不补也不猜)。
+      2. 同一家公司可能同时以 A/B 股两行出现, 按 ORG_CODE 去重保留 A 股。
+      3. SECURITY_CODE / SECURITY_NAME_ABBR 这两列永远是**查询的那只股**
+         (东财的坑), 真实身份在 CORRE_SECURITY_CODE / CORRE_SECURITY_NAME。
+         按 SECURITY_CODE 取会被当成"同行全是它自己"。
+
+    返回 data:
+      - ``peers``: 同行(含本公司, ``is_self=True``)及其估值/成长/杜邦/规模指标
+      - ``industry_median`` / ``industry_avg``: 东财给的行业中值/平均
+      - ``self_size``: 本公司规模及其行业名次
+      - ``report_dates``: 各块报告期(估值/成长/杜邦可能不同)
+    """
+    code = _norm_code(code)
+    # 下限是 1 不是 4: 调用方只要 2 家就该给 2 家, 悄悄升级成 4 属于自作主张。
+    limit = max(1, min(int(limit or 16), 30))
+    cache_key = f"f10-industry-peers:{code}:{limit}"
+    cached = _cache_get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    url = _EM_F10_INDUSTRY_URL + "?" + urllib.parse.urlencode({"code": _f10_code(code)})
+    payload = _request_json(url, headers={"Referer": "https://emweb.securities.eastmoney.com/"})
+    if not isinstance(payload, dict):
+        raise ValueError(f"东财 F10 行业对比返回结构异常: {code}")
+
+    peers: dict[str, dict] = {}
+    order: list[str] = []
+    stats: dict[str, dict[str, float | None]] = {}
+    size_report: str | None = None
+    self_size: dict[str, object] | None = None
+
+    def _blank(corre_code: str, corre_name: str) -> dict:
+        row: dict[str, object] = {
+            "code": corre_code,
+            "name": corre_name,
+            "is_self": corre_code == code,
+            "total_cap": None, "revenue": None, "net_profit": None,
+            "cap_rank": None, "industry": None, "same_industry": None,
+        }
+        # 所有指标列都先置 None: 只在市值榜露面的公司也带齐列 —— 缺列会让前端
+        # 拿到 undefined(而不是 null), "—" 显示不出来不说, 排序逻辑还得专门判。
+        for _, mkey, _field in _PEER_METRICS:
+            row[mkey] = None
+        return row
+
+    def _upsert(row: dict) -> dict | None:
+        """登记一行(同行公司), **按证券代码去重**。
+
+        返回 None 表示这行是「行业中值/行业平均」占位。
+
+        ⚠️ 为什么不能拿 CORRE_ORG_CODE 当 key: gzbj/czxbj/dbfxbj 三块**没有**
+        ORG 列, 只有 gsgm_* 有 —— 一旦混用两种 key, 同一家公司会被拆成两行
+        (一行只有估值, 一行只有市值), 而且本公司必然重复出现两次。
+        """
+        corre_code = str(row.get("CORRE_SECURITY_CODE") or "").strip()
+        corre_name = str(row.get("CORRE_SECURITY_NAME") or "").strip()
+        if not corre_code or corre_code in _EM_STAT_CODES:
+            return None
+        cur = peers.get(corre_code)
+        if cur is None:
+            peers[corre_code] = cur = _blank(corre_code, corre_name)
+            order.append(corre_code)
+        elif not cur["name"] and corre_name:
+            cur["name"] = corre_name
+        org = str(row.get("CORRE_ORG_CODE") or "").strip()
+        if org and org not in _EM_STAT_CODES:
+            cur["org_code"] = org
+        return cur
+
+    def _merge_missing(dst: dict, src: dict) -> None:
+        """把 src 里 dst 还没有的字段补过去(dst 优先, 不覆盖已有值)。"""
+        for k2, v2 in src.items():
+            if dst.get(k2) is None and v2 is not None:
+                dst[k2] = v2
+
+    def _report_date(value: object) -> str | None:
+        s = str(value or "").strip()
+        return (s.split(" ")[0] or None) if s else None
+
+    block_dates: dict[str, str | None] = {}
+    for block, key, field in _PEER_METRICS:
+        for row in payload.get(_PEER_BLOCKS[block]) or []:
+            if not isinstance(row, dict):
+                continue
+            corre = str(row.get("CORRE_SECURITY_CODE") or "").strip()
+            # 每一块的报告期可能不同(估值/成长/杜邦), 分块记录, 不混着说
+            if block not in block_dates:
+                block_dates[block] = _report_date(row.get("REPORT_DATE"))
+            v = _num(row.get(field))
+            if corre in _EM_STAT_CODES:
+                kind = "median" if corre.startswith("行业中值") else "avg"
+                stats.setdefault(key, {})[kind] = v
+                continue
+            peer = _upsert(row)
+            if peer is not None:
+                peer[key] = v
+
+    # 公司规模: gsgm_* 各给一份按不同指标的排名; 本公司单独在 gsgm。
+    for row in payload.get("gsgm") or []:
+        if not isinstance(row, dict):
+            continue
+        size = {"code": code}
+        for out_key, field, in_yuan in _PEER_SIZE:
+            v = _num(row.get(field))
+            size[out_key] = round(v / _YI, 2) if (v is not None and in_yuan) else v
+        size.update({
+            "name": str(row.get("CORRE_SECURITY_NAME") or "").strip() or None,
+            "cap_rank": _num(row.get("TOTAL_CAP_RANK")),
+            "revenue_rank": _num(row.get("TOTAL_OPERATEINCOME_RANK")),
+            "profit_rank": _num(row.get("NETPROFIT_RANK")),
+            "report_type": str(row.get("REPORT_TYPE") or "").strip() or None,
+        })
+        self_size = size
+        # 本公司也在同行名单里 —— 规模补回去(gsgm 是唯一给出本公司 营收/净利 的地方)
+        peer = _upsert(row)
+        if peer is not None:
+            for out_key, field, in_yuan in _PEER_SIZE:
+                v = _num(row.get(field))
+                peer[out_key] = round(v / _YI, 2) if (v is not None and in_yuan) else v
+            peer["cap_rank"] = _num(row.get("TOTAL_CAP_RANK"))
+
+    for row in payload.get("gsgm_zsz") or []:
+        if not isinstance(row, dict):
+            continue
+        peer = _upsert(row)
+        if peer is None:
+            continue
+        for out_key, field, in_yuan in _PEER_SIZE:
+            v = _num(row.get(field))
+            peer[out_key] = round(v / _YI, 2) if (v is not None and in_yuan) else v
+        peer["cap_rank"] = _num(row.get("TOTAL_CAP_RANK"))
+        if str(row.get("REPORT_TYPE") or "").strip():
+            size_report = str(row.get("REPORT_TYPE")).strip()
+
+    if not peers:
+        # 拿不到就是拿不到(北交所 / 退市 / F10 未覆盖), 不返回空壳装成功。
+        raise ValueError(f"东财 F10 未返回该股的同行对比数据: {code}")
+
+    # 二次查东财 F10 公司资料: 拿每个同行的 ORG_CODE / 正式简称 / EM2016 行业。
+    #   ① A/B 股去重必须靠 ORG_CODE 认同一家公司(gzbj/czxbj/dbfxbj 三块都不带 ORG 列);
+    #   ② 顺带核一遍东财挑的"同行"是不是真和本公司同一个 EM2016 行业, 核不到就
+    #      如实标注, 不默认它一定同行业。
+    peer_info: dict[str, dict] = {}
+    verified = True
+    try:
+        inlist = ",".join(f'"{_secucode(c)}"' for c in peers)
+        for row in _datacenter(_REPORT_F10_ORG, f"(SECUCODE in ({inlist}))",
+                               page_size=max(20, len(peers) + 2)):
+            c6 = str(row.get("SECUCODE") or "").split(".")[0].strip()
+            if c6:
+                peer_info[c6] = {
+                    "org": str(row.get("ORG_CODE") or "").strip() or None,
+                    "name": str(row.get("SECURITY_NAME_ABBR") or "").strip() or None,
+                    "industry": str(row.get("EM2016") or "").strip() or None,
+                }
+    except Exception:
+        # 辅助查询失败不拖垮主数据, 但必须写进结果 —— 不能悄悄少了一道核对。
+        verified = False
+
+    filt = f'(SECUCODE="{_secucode(code)}")'
+    industry: dict[str, object] = {}
+    name: str | None = None
+    try:
+        for row in _datacenter(_REPORT_F10_ORG, filt, page_size=1):
+            name = str(row.get("SECURITY_NAME_ABBR") or "").strip() or None
+            em = str(row.get("EM2016") or "").strip()
+            csrc = str(row.get("INDUSTRYCSRC1") or "").strip()
+            if em:
+                industry["em"] = em
+                industry["em_parts"] = [p for p in em.split("-") if p]
+            if csrc:
+                industry["csrc"] = csrc
+    except Exception:                                   # pylint: disable=broad-except
+        # 行业/简称是辅助信息 —— 查不到就不显示(gsgm 块里还有本公司简称兜底),
+        # 但 industry_checked 会被置 False, 结果里写清楚。
+        verified = False
+    if self_size and self_size.get("name"):
+        name = name or str(self_size["name"])
+    self_industry = str(industry.get("em") or "").strip() or None
+
+    # A/B 股归并: 保留 A 股那一行, 被丢掉那行的字段在缺的时候补进保留行。
+    rows_out: list[dict] = []
+    by_org: dict[str, dict] = {}
+    for key in order:
+        row = peers[key]
+        info = peer_info.get(key) or {}
+        if info.get("name"):
+            row["name"] = info["name"]
+        row["industry"] = info.get("industry")
+        row["same_industry"] = (None if not (info.get("industry") and self_industry)
+                                else info["industry"] == self_industry)
+        org = info.get("org")
+        if not org:
+            rows_out.append(row)
+            continue
+        keep = by_org.get(org)
+        if keep is None:
+            by_org[org] = row
+            rows_out.append(row)
+        elif (keep["code"][:3] in _B_SHARE_PREFIXES
+              and key[:3] not in _B_SHARE_PREFIXES):
+            _merge_missing(row, keep)
+            by_org[org] = row
+            rows_out[rows_out.index(keep)] = row
+        else:
+            _merge_missing(keep, row)
+
+    if verified and not peer_info:
+        # 名单里的代码一个都没核到 —— 这次核对等于没做, 照实说。
+        verified = False
+
+    # 本公司排最前(剩下的按总市值从大到小, 没市值的排在后面 —— 不用假数字排序)
+    rows_out.sort(key=lambda p: (not p["is_self"],
+                                 -(p["total_cap"] or -1),
+                                 p["code"]))
+
+    out = {
+        "source": SOURCE_EM_F10,
+        "data": {
+            "code": code,
+            "name": name,
+            "industry": industry or None,
+            "peers": rows_out[:limit],
+            "peer_count": len(rows_out),
+            "industry_median": {k: v.get("median") for k, v in stats.items()},
+            "industry_avg": {k: v.get("avg") for k, v in stats.items()},
+            "self_size": self_size,
+            "industry_checked": verified,
+            "report_dates": {
+                "valuation": block_dates.get("valuation"),
+                "growth": block_dates.get("growth"),
+                "dupont": block_dates.get("dupont"),
+                "size": size_report,
+            },
+            # 口径写在这里, 前端照抄: 「同行」是各指标前列, 不是全成分股;
+            # 估值/财务指标按最新定期报告, 快照时间由东财给, 不能当成实时行情。
+            "caveats": [
+                "同行名单来自东财 F10「行业对比」: 成长性/估值/杜邦三块各给出该指标行业前列的几家公司, "
+                "再加本公司(本公司不进前列也会列出)。**不是行业全部成分股**。",
+                "三块的入选标准不同, 因此不是每家公司每个指标都有数: 缺的显示 —, 不插值不补零。",
+                "估值与财务指标基于东财口径的最新定期报告(见各块报告期), 不是实时行情快照。",
+            ],
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    _cache_put(cache_key, out, _EM_F10_INDUSTRY_TTL_S)
+    return out
 
 
 def stock_sectors(code: str, limit: int = 24) -> dict:

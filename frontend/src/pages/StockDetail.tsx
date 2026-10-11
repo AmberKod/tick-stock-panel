@@ -13,6 +13,7 @@ import { computeChips } from '@/lib/chips'
 import { DRAW_TOOLS, loadDrawings, saveDrawings, type Drawing, type DrawTool } from '@/lib/chartDrawings'
 import { ChipDistributionPanel } from '@/components/ChipDistributionPanel'
 import { TickTapePanel } from '@/components/TickTapePanel'
+import { PeerComparisonPanel } from '@/components/PeerComparisonPanel'
 import { QK } from '@/lib/queryKeys'
 import { EstimateTag } from '@/components/EstimateNotice'
 import {
@@ -46,6 +47,9 @@ import {
  * 我方三纪律(不可用显式剔除不计分母 / 不引未回测打分 / fail-closed),
  * 宁可少一块也不放假数据。缺 PE/PB/总市值/换手 同理: 无真源就不显示。
  */
+
+/** 同行对比面板最多显示几家(后端上限 30; 十几家已经够长, 再多是噪声)。 */
+const PEER_LIMIT = 16
 
 const PERIODS = [
   { label: '3月', months: 3 },
@@ -486,6 +490,28 @@ export function StockDetail() {
   const aCode = astockCode(symbol)
   const isAStock = aCode != null
 
+  /** 同行对比最多显示几家(东财一次给十几家, 全列出来会很长)。 */
+  const [showPeersPref, setShowPeersPref] = useState<boolean>(() =>
+    localStorage.getItem('stockDetail:peers') === '1')
+  const changePeers = useCallback((on: boolean) => {
+    setShowPeersPref(on)
+    try { localStorage.setItem('stockDetail:peers', on ? '1' : '0') } catch { /* 忽略 */ }
+  }, [])
+  /**
+   * 同行业对比(东财 F10)。默认关 —— 打开才打上游。
+   * 取不到(北交所 / F10 未覆盖)时后端给 available:false, 这里整块不显示并说明原因。
+   */
+  const showPeers = showPeersPref && isAStock
+  const peersQuery = useQuery({
+    queryKey: QK.astockPeers(aCode ?? symbol, PEER_LIMIT),
+    queryFn: () => api.astockPeers(aCode ?? symbol, PEER_LIMIT),
+    enabled: showPeers,
+    staleTime: 6 * 3600_000,   // 财报级数据, 一天内不会变
+    retry: false,
+  })
+  const peers = peersQuery.data
+  const peersBlocked = showPeers && !peersQuery.isLoading && (!peers?.available || !peers.data)
+
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
 
   // 标注基于**当前周期那串 K**算(日K就用日K, 分钟K就用分钟K), 不跨周期混用。
@@ -849,6 +875,22 @@ export function StockDetail() {
                 成交明细
                 <EstimateTag className="ml-0.5" title="3 秒一行的成交快照, 不是逐笔成交">3秒快照</EstimateTag>
               </button>
+
+              {/* ── 同行业对比 ──
+                  东财 F10「行业对比」真源。名单是各指标行业前列, 不是全部成分股 ——
+                  按钮上就挂了这个标, 面板里还有完整口径说明。 */}
+              <button
+                type="button"
+                onClick={() => changePeers(!showPeersPref)}
+                title="同行业对比(东财 F10): 估值/成长/杜邦/规模与同行逐项对照。注意名单是各指标行业前列的公司, 不是行业全部成分股; 且东财有时会把产业链相关但三级行业不同的公司算进来(面板里逐行标注)"
+                className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                  showPeersPref
+                    ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-500'
+                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+              >
+                同行业对比
+                <EstimateTag className="ml-0.5" title="名单是各指标行业前列的几家公司, 不是行业全部成分股">非全成分</EstimateTag>
+              </button>
             </>
           )}
 
@@ -1052,6 +1094,38 @@ export function StockDetail() {
           成交明细取不到 —— {ticksQuery.data?.reason ?? '上游无返回'}。
           {' '}常见情形是当日无成交（停牌 / 尚未开盘）或该标的不在腾讯明细接口的覆盖范围内；
           这里不补一行占位数据。
+        </div>
+      )}
+
+      {/* ── 同行业对比 ──
+          东财 F10 真源。默认关闭(要打上游); 取不到(北交所 / F10 未覆盖)就明说,
+          不拿别的分类顶替。 */}
+      {showPeers && peersQuery.isLoading && (
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-fg-muted">
+          正在拉取同行业对比（东财 F10「行业对比」）…
+        </div>
+      )}
+      {showPeers && peers?.available && peers.data && (
+        <PeerComparisonPanel
+          code={peers.data.code}
+          name={peers.data.name ?? kline?.name ?? null}
+          industry={peers.data.industry}
+          peers={peers.data.peers}
+          peerCount={peers.data.peer_count}
+          median={peers.data.industry_median}
+          avg={peers.data.industry_avg}
+          selfSize={peers.data.self_size}
+          industryChecked={peers.data.industry_checked}
+          reportDates={peers.data.report_dates}
+          caveats={peers.data.caveats}
+          className="mt-2"
+        />
+      )}
+      {peersBlocked && (
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+          同行业对比取不到 —— {peers?.reason ?? '上游无返回'}。
+          {' '}常见情形是该标的不在东财 F10「行业对比」的覆盖范围内（例如部分北交所标的）；
+          不用别的分类方式凑一份名单。
         </div>
       )}
 

@@ -406,6 +406,40 @@ export interface TickRow {
   auction: 'open' | 'close' | 'after' | null
 }
 
+/** 同行对比可展示的指标列(与后端 _PEER_METRICS 对齐)。 */
+export type PeerMetricKey =
+  | 'pe_ttm' | 'pe' | 'pb' | 'ps_ttm' | 'pcf_ttm' | 'peg'
+  | 'revenue_yoy' | 'profit_yoy' | 'eps_yoy' | 'revenue_cagr3' | 'profit_cagr3'
+  | 'roe_avg' | 'net_margin' | 'asset_turnover' | 'equity_multiplier'
+
+export interface PeerRow {
+  code: string
+  name: string
+  is_self: boolean
+  /** 东财 EM2016 三级行业; 核对不到时 null */
+  industry?: string | null
+  /** 与本公司是否同一 EM2016 三级行业; 没核到 = null(不是 false) */
+  same_industry?: boolean | null
+  /** 总市值 / 营业收入 / 净利润, 单位: 亿元 */
+  total_cap: number | null
+  revenue: number | null
+  net_profit: number | null
+  cap_rank: number | null
+  [metric: string]: unknown
+}
+
+export interface PeerSelfSize {
+  code: string
+  name?: string | null
+  total_cap?: number | null
+  revenue?: number | null
+  net_profit?: number | null
+  cap_rank?: number | null
+  revenue_rank?: number | null
+  profit_rank?: number | null
+  report_type?: string | null
+}
+
 export interface TickSummary {
   count: number
   amount: number
@@ -2504,6 +2538,34 @@ export const api = {
         updated_at?: string
       }
     }>(`/api/astock/ticks/${encodeURIComponent(code)}?tail=${tail}`),
+  /**
+   * 同行公司对比(东财 F10「行业对比」)。
+   *
+   * ⚠️ 名单**不是行业全部成分股**: 是成长性/估值/杜邦三块各取该指标行业前列的
+   * 公司, 再加本公司。三块入选标准不同 → 不是每家每列都有数, 缺的是 null。
+   * ⚠️ same_industry 是拿 EM2016 三级行业逐家核出来的: 东财有时会把产业链相关
+   * 但三级行业不同的公司算作同行(如宁德时代同行里的天赐材料), 标注出来即可。
+   */
+  astockPeers: (code: string, limit = 16) =>
+    request<{
+      available: boolean
+      reason?: string
+      source?: string
+      data?: {
+        code: string
+        name?: string | null
+        industry?: { em?: string; em_parts?: string[]; csrc?: string } | null
+        peers: PeerRow[]
+        peer_count: number
+        industry_median: Partial<Record<PeerMetricKey, number | null>>
+        industry_avg: Partial<Record<PeerMetricKey, number | null>>
+        self_size?: PeerSelfSize | null
+        industry_checked: boolean
+        report_dates: { valuation?: string | null; growth?: string | null; dupont?: string | null; size?: string | null }
+        caveats?: string[]
+        updated_at?: string
+      }
+    }>(`/api/astock/peers/${encodeURIComponent(code)}?limit=${limit}`),
   klineMinuteBatch: (symbols: string[], date?: string) =>
     request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
       method: 'POST',
