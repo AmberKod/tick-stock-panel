@@ -162,6 +162,94 @@ def filings(code: str, market: str = "US", limit: int = 8,
     return {"source": SOURCE, "data": rows if isinstance(rows, list) else []}
 
 
+def institutional(code: str, market: str = "US", limit: int = 20) -> dict:
+    """机构持股(13F 位): 谁持有、增持还是减持。
+
+    走 ``nasdaq`` provider —— ⚠️ **不用** ``/ownership/form_13f``: 那个端点
+    只接受 ``provider=sec``, 而本机 OpenBB 的 SEC 出口取不到数(空返回),
+    nasdaq 版给的是同一类信息(机构名单 + 持股数 + 变动)且实测有数据。
+
+    ⚠️ ``market_value`` 是源站原值, **单位存疑**(实测 AAPL: Vanguard
+    14.26 亿股对应 market_value 4.8 亿, 与 14.26亿×336 美元差 1000 倍, 疑似
+    千美元口径)。所以这里**不做换算**, 字段命名带 ``_raw``, 前端不展示它 ——
+    持股数与变动百分比才是判断机构动向的可靠量, 不拿存疑数字充数。
+
+    返回 ``{"source": "openbb", "data": [机构持股行]}``。
+    """
+    sym = norm_symbol(code, market)
+    rows = _get("/equity/ownership/institutional", symbol=sym, provider="nasdaq", limit=limit)
+    out = []
+    for r in rows or []:
+        out.append({
+            "date": str(r.get("date"))[:10] if r.get("date") else None,
+            "owner": r.get("owner_name"),
+            "shares_held": r.get("shares_held"),
+            "shares_change": r.get("shares_change"),
+            "shares_change_pct": r.get("shares_change_percent"),
+            "market_value_raw": r.get("market_value"),
+            "url": r.get("url"),
+        })
+    return {"source": SOURCE, "data": out}
+
+
+def insider_trading(code: str, market: str = "US", limit: int = 20) -> dict:
+    """内部人交易(Form 4 明细): 高管/董事买卖了多少、什么价、交易后持股。
+
+    与 ``filings``(报送列表, 只有报送类型与日期)不同 —— 这里给的是**交易
+    本身**: 交易类型(Automatic Sell / Buy / Award 等)、股数、成交价、交易后
+    持股、持有人身份(Officer / Director)。走 nasdaq provider, 免费无 key。
+
+    返回 ``{"source": "openbb", "data": [交易行]}``。
+    """
+    sym = norm_symbol(code, market)
+    rows = _get("/equity/ownership/insider_trading", symbol=sym, provider="nasdaq", limit=limit)
+    out = []
+    for r in rows or []:
+        out.append({
+            "transaction_date": str(r.get("transaction_date"))[:10] if r.get("transaction_date") else None,
+            "owner": r.get("owner_name"),
+            "title": r.get("owner_title"),
+            "ownership_type": r.get("ownership_type"),
+            "transaction_type": r.get("transaction_type"),
+            "shares": r.get("securities_transacted"),
+            "price": r.get("transaction_price"),
+            "shares_held_after": r.get("shares_held"),
+            "url": r.get("url"),
+        })
+    return {"source": SOURCE, "data": out}
+
+
+def estimates(code: str, market: str = "US") -> dict:
+    """分析师一致预期: 目标价高/低/均值/中位数 + 评级 + 覆盖机构数。
+
+    走 ``yfinance`` provider。这是美股侧对标 A股「研报」位的数据 ——
+    ``recommendation`` 与 ``number_of_analysts`` 都是真实汇总, 不合成。
+
+    ⚠️ 空 results(比如被 yfinance 限流、或标的无覆盖)由 API 层转
+    available:false, 这里不做任何兜底填充。
+
+    返回 ``{"source": "openbb", "data": {...单标的预期 dict...}}``。
+    """
+    sym = norm_symbol(code, market)
+    rows = _get("/equity/estimates/consensus", symbol=sym, provider="yfinance")
+    if isinstance(rows, list):
+        row = rows[0] if rows else {}
+    else:
+        row = rows if isinstance(rows, dict) else {}
+    return {"source": SOURCE, "data": {
+        "symbol": row.get("symbol") or sym,
+        "currency": row.get("currency"),
+        "current_price": row.get("current_price"),
+        "target_high": row.get("target_high"),
+        "target_low": row.get("target_low"),
+        "target_consensus": row.get("target_consensus"),
+        "target_median": row.get("target_median"),
+        "recommendation": row.get("recommendation"),
+        "recommendation_mean": row.get("recommendation_mean"),
+        "number_of_analysts": row.get("number_of_analysts"),
+    }}
+
+
 def summary_text(code: str, market: str = "US") -> dict:
     """给前端/大模型用的一段摘要文本。
 
@@ -176,17 +264,15 @@ def summary_text(code: str, market: str = "US") -> dict:
 
     def f(v):
         try:
-            return ("%.2f" % float(v))
+            return f"{float(v):.2f}"
         except Exception:
             return "-"
 
-    text = ("%s 最新价 %s (bid %s / ask %s), 日内 %s~%s, "
-            "50日均线 %s, 200日均线 %s, 年内高低 %s / %s" % (
-                row.get("symbol", code), f(row.get("last_price")),
-                f(row.get("bid")), f(row.get("ask")),
-                f(row.get("low")), f(row.get("high")),
-                f(row.get("ma_50d")), f(row.get("ma_200d")),
-                f(row.get("year_low")), f(row.get("year_high"))))
+    text = (f"{row.get('symbol', code)} 最新价 {f(row.get('last_price'))} "
+            f"(bid {f(row.get('bid'))} / ask {f(row.get('ask'))}), "
+            f"日内 {f(row.get('low'))}~{f(row.get('high'))}, "
+            f"50日均线 {f(row.get('ma_50d'))}, 200日均线 {f(row.get('ma_200d'))}, "
+            f"年内高低 {f(row.get('year_low'))} / {f(row.get('year_high'))}")
     return {"source": SOURCE, "data": {"text": text}}
 
 
@@ -214,6 +300,15 @@ class JiuzhangOpenBBProvider:
     def filings(self, code: str, market: str = "US", limit: int = 8,
                 form_type: str | None = None) -> dict:
         return filings(code, market=market, limit=limit, form_type=form_type)
+
+    def institutional(self, code: str, market: str = "US", limit: int = 20) -> dict:
+        return institutional(code, market=market, limit=limit)
+
+    def insider_trading(self, code: str, market: str = "US", limit: int = 20) -> dict:
+        return insider_trading(code, market=market, limit=limit)
+
+    def estimates(self, code: str, market: str = "US") -> dict:
+        return estimates(code, market=market)
 
     def summary_text(self, code: str, market: str = "US") -> dict:
         return summary_text(code, market)

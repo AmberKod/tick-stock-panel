@@ -14,6 +14,11 @@ import { StockDailyKChart } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
 import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
+import {
+  USEstimatesPanel,
+  USInstitutionalPanel,
+  USInsiderPanel,
+} from '@/components/us/USDeepPanels'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import type { OHLC } from '@/components/EChartsCandlestick'
 
@@ -371,6 +376,17 @@ export function USStockAnalysisPage() {
             })}
           </ul>
         </Panel>
+      </div>
+
+      {/* 分析师一致预期 (OpenBB, 2026-10-12): 目标价区间 + 一致评级 + 覆盖机构数。
+          美股侧对标 A股「研报」位, 全部是真实券商汇总, 不合成。 */}
+      <USEstimatesPanel symbol={ticker} />
+
+      {/* 机构动向 (OpenBB/Nasdaq): 机构谁在增减持 + 高管内部人交易明细。
+          对标 A股「龙虎榜」位 —— 美股没有龙虎榜机制, 用这两块补同一信息位。 */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <USInstitutionalPanel symbol={ticker} limit={20} />
+        <USInsiderPanel symbol={ticker} limit={20} />
       </div>
 
       {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) —— 主图四类 / 标注 / 画图全开;

@@ -1,4 +1,5 @@
-import { AlertTriangle, BarChart3, FileText, Loader2 } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, BarChart3, FileText, Loader2, Star } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 
 import { request } from '@/lib/api'
@@ -320,5 +321,205 @@ export function HKFinancialsPanel({ symbol, periods = 8 }: {
     >
       {body()}
     </PanelShell>
+  )
+}
+
+
+// ───────────────────────────────────────── 券商盈利预测 / 评级 / 目标价
+// 源: 东财港股通口径(akshare_hk_forecast), 2026-10-12 实测 00700 返回 50 行。
+// 这是港股侧对标 A股「研报」位的数据 —— 每行都是**某家券商对某财年**的真实观点,
+// 汇总里的目标价区间与评级分布由这些行聚合得出, 不合成、不预测。
+//
+// ⚠️ 只有**最近财年**的行才带评级与目标价(券商习惯如此), 远财年只有盈利预测。
+//    所以默认「仅看有评级/目标价的」—— 否则一进来满屏 "—" 反而看不出重点。
+
+interface ForecastRow {
+  fiscal_year: string | null
+  broker: string | null
+  rating: string | null
+  rating_bucket: string | null
+  net_profit_raw: number | null
+  eps_raw: number | null
+  dps_raw: number | null
+  net_profit_yi_hkd: number | null
+  eps_hkd: number | null
+  dps_hkd: number | null
+  target_price: number | null
+  update_date: string | null
+}
+
+interface ForecastSummary {
+  count: number
+  brokers: number
+  target_high: number | null
+  target_low: number | null
+  target_mean: number | null
+  target_median: number | null
+  rating_dist: Record<string, number>
+  distinct_fiscal_years: string[]
+}
+
+interface ForecastResp {
+  available: boolean
+  source: string
+  reason?: string
+  symbol?: string
+  data?: {
+    symbol: string
+    currency: string
+    rows: ForecastRow[]
+    summary: ForecastSummary
+    note: string
+  }
+}
+
+const RATING_STYLE_HK: Record<string, string> = {
+  buy: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
+  overweight: 'bg-green-500/15 text-green-700 dark:text-green-400',
+  hold: 'bg-amber-500/15 text-amber-700 dark:text-amber-500',
+  sell: 'bg-rose-500/15 text-rose-700 dark:text-rose-400',
+}
+
+function RatingChip({ row }: { row: ForecastRow }) {
+  if (!row.rating) return <span className="text-xs text-fg-muted">—</span>
+  const cls = row.rating_bucket ? RATING_STYLE_HK[row.rating_bucket] : 'bg-elevated text-fg-secondary'
+  return <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}>{row.rating}</span>
+}
+
+function hkNum(v: number | null, digits = 2): string {
+  return v == null || Number.isNaN(v) ? '—' : v.toFixed(digits)
+}
+
+export function HKForecastsPanel({ symbol, limit = 60 }: {
+  symbol: string
+  limit?: number
+}) {
+  // 默认只看有评级/目标价的行: 远财年行几乎全空, 混在一起会稀释重点
+  const [onlyRated, setOnlyRated] = useState(true)
+
+  const query = useQuery({
+    queryKey: ['hk', 'forecasts', symbol, limit],
+    queryFn: () => request<ForecastResp>(
+      `/api/hk/forecasts/${encodeURIComponent(symbol)}?limit=${limit}`),
+    staleTime: 600_000,
+  })
+
+  const render = () => {
+    if (query.isLoading) return <StateLine loading text="加载中…" />
+    if (query.error) return <StateLine warn text={`请求失败: ${(query.error as Error).message}`} />
+    const resp = query.data
+    if (!resp?.available) return <StateLine warn text={`不可用: ${resp?.reason ?? '服务不可用'}`} />
+    const data = resp.data
+    if (!data) return <StateLine warn text="不可用: 返回结构异常" />
+
+    const rows = onlyRated
+      ? data.rows.filter(r => r.rating != null || r.target_price != null)
+      : data.rows
+    const s = data.summary
+    const distEntries = Object.entries(s.rating_dist ?? {})
+
+    return (
+      <div className="space-y-2.5">
+        {/* 汇总: 目标价区间 + 覆盖券商 + 评级分布 */}
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded border border-border/60 bg-elevated px-3 py-2">
+          <Metric label="覆盖券商" value={s.brokers ? `${s.brokers} 家` : '—'} />
+          <Metric label="目标价中位" value={hkNum(s.target_median, 1)} unit="港元" />
+          <Metric
+            label="目标价区间"
+            value={s.target_low != null && s.target_high != null
+              ? `${hkNum(s.target_low, 1)} ~ ${hkNum(s.target_high, 1)}` : '—'}
+            unit={s.target_low != null ? '港元' : undefined}
+          />
+          {distEntries.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-fg-muted">评级分布</span>
+              {distEntries.map(([bucket, n]) => (
+                <span key={bucket}
+                      className={`rounded px-1.5 py-0.5 text-xs ${RATING_STYLE_HK[bucket] ?? 'bg-elevated text-fg-secondary'}`}>
+                  {bucket} {n}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-fg-secondary">
+            <input
+              type="checkbox"
+              checked={onlyRated}
+              onChange={e => setOnlyRated(e.target.checked)}
+              className="h-3 w-3"
+            />
+            仅看有评级/目标价的（券商通常只给最近财年评级）
+          </label>
+          <span className="ml-auto text-xs text-fg-muted">
+            {rows.length} / {s.count} 条
+          </span>
+        </div>
+
+        {rows.length === 0
+          ? <StateLine text="该标的暂无券商给出的评级或目标价" />
+          : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-fg-muted">
+                    <th className="py-1 pr-2 text-left font-normal">财年</th>
+                    <th className="py-1 pr-2 text-left font-normal">券商</th>
+                    <th className="py-1 pr-2 text-left font-normal">评级</th>
+                    <th className="py-1 pr-2 text-right font-normal">目标价</th>
+                    <th className="py-1 pr-2 text-right font-normal">EPS</th>
+                    <th className="py-1 pr-2 text-right font-normal">纯利(亿)</th>
+                    <th className="py-1 text-right font-normal">更新</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={`${r.broker ?? 'bk'}-${r.fiscal_year ?? i}-${i}`}
+                        className="border-t border-border/60">
+                      <td className="py-1 pr-2 text-xs text-fg-muted">{r.fiscal_year ?? '—'}</td>
+                      <td className="py-1 pr-2">{r.broker ?? '—'}</td>
+                      <td className="py-1 pr-2"><RatingChip row={r} /></td>
+                      <td className="py-1 pr-2 text-right font-mono text-xs">{hkNum(r.target_price, 1)}</td>
+                      <td className="py-1 pr-2 text-right font-mono text-xs">{hkNum(r.eps_hkd, 2)}</td>
+                      <td className="py-1 pr-2 text-right font-mono text-xs">{hkNum(r.net_profit_yi_hkd, 1)}</td>
+                      <td className="py-1 text-right text-xs text-fg-muted">{r.update_date ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+        <p className="text-[11px] text-fg-muted">{data.note}</p>
+      </div>
+    )
+  }
+
+  return (
+    <PanelShell
+      icon={<Star className="h-3.5 w-3.5 text-fg-muted" />}
+      title="券商评级 · 目标价"
+      subtitle="东财港股通 · 各家券商实盘观点"
+    >
+      {render()}
+    </PanelShell>
+  )
+}
+
+function Metric({ label, value, unit }: {
+  label: string
+  value: string
+  unit?: string
+}) {
+  return (
+    <div>
+      <div className="text-xs text-fg-muted">{label}</div>
+      <div className="text-sm font-medium text-fg">
+        {value}
+        {unit && <span className="ml-0.5 text-xs font-normal text-fg-muted">{unit}</span>}
+      </div>
+    </div>
   )
 }

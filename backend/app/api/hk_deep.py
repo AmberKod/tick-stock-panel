@@ -2,6 +2,7 @@
 
 - GET /api/hk/announcements/{symbol}: 个股公告/公司行动(披露易, 全类别)
 - GET /api/hk/financials/{symbol}:   财务比率(东财公告原文, 逐字段带溯源)
+- GET /api/hk/forecasts/{symbol}:    券商盈利预测/评级/目标价(东财, 数十家券商)
 
 项目惯例(与 astock_deep.py / us_deep.py 一致): 不可用是正常状态不是错误 →
 失败也返回 HTTP 200 且 ``{available: false, reason: ...}``, 绝不返回占位值
@@ -25,8 +26,10 @@ from fastapi import APIRouter
 
 from app.data_providers.hk_deep_provider import (
     SOURCE_EM_HK_ANN,
+    SOURCE_HK_FORECAST,
     SOURCE_HKEX,
     HKNewsNotFoundError,
+    analyst_forecasts,
     announcements,
     financials,
 )
@@ -94,3 +97,24 @@ def get_financials(symbol: str, periods: int = 8) -> dict:
     """
     return _respond(symbol, lambda: financials(symbol, periods=periods),
                     required_key="rows", source=SOURCE_EM_HK_ANN)
+
+
+@router.get("/forecasts/{symbol}")
+def get_forecasts(symbol: str, limit: int = 60) -> dict:
+    """券商盈利预测 / 评级 / 目标价(东财港股通口径)。limit 1..200, 默认 60。
+
+    港股侧对标 A股「研报」位的数据 —— 数十家券商对同一财政年度的纯利、EPS、
+    派息预测, 外加各自的**评级与目标价**, ``summary`` 里给目标价高/低/均值/
+    中位数与评级分布(全部由真实券商观点聚合, 不合成不预测)。
+
+    单位口径见返回体 ``note``: 纯利原始=百万港元(已换算亿港元), 每股原始=
+    港仙(已换算港元), 目标价=港元; ``raw_*`` 保留未换算原值供核对。
+
+    ⚠️ 空 rows **不是**成功: 该页对未覆盖的标的会返回 0 行, 这里如实
+    available:false —— 与公告不同(公告的"窗口内安静"是真答案)。
+    """
+    if limit < 1 or limit > 200:
+        return {"available": False, "reason": f"bad_limit: {limit} (1..200)",
+                "source": SOURCE_HK_FORECAST}
+    return _respond(symbol, lambda: analyst_forecasts(symbol, limit=limit),
+                    required_key="rows", source=SOURCE_HK_FORECAST)

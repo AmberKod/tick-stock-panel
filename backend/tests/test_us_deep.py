@@ -308,3 +308,193 @@ class TestProviderUnit:
         assert mod._base() == settings.openbb_base_url.rstrip("/")
         assert mod._timeout() == settings.openbb_timeout_s
         assert settings.openbb_base_url.startswith("http://host.docker.internal:6900")
+
+
+# ─────────────── 机构持股 / 内部人交易 / 分析师预期 ───────────────
+# 2026-10-12 新增。mock provider, 不打真网。
+# 守护四条:
+#   1. 机构持股**必须走 nasdaq provider** —— OpenBB 的 /ownership/form_13f
+#      只收 provider=sec, 本机 SEC 出口取不到数(实测空返回);
+#   2. 源站 market_value 单位存疑(疑似千美元), **只以 _raw 透出不换算**,
+#      不许任何换算后的市值流向前端;
+#   3. 空列表 = 无覆盖 → no_data(不是空壳成功);
+#   4. 分析师预期会出现"只有 symbol 的壳"(yfinance 无覆盖), 光判 not data
+#      抓不到 → 核心值全 None 必须判 no_data。
+
+
+def _institutional_payload():
+    return {"source": "openbb", "data": [
+        {"date": "2025-12-31", "owner": "Vanguard Group Inc",
+         "shares_held": 1426283914.0, "shares_change": 26856752.0,
+         "shares_change_pct": 0.01919, "market_value_raw": 480144217.0,
+         "url": "https://example.invalid/v"}]}
+
+
+def _insider_payload():
+    return {"source": "openbb", "data": [
+        {"transaction_date": "2026-10-06", "owner": "NEWSTEAD JENNIFER",
+         "title": "Officer", "ownership_type": "Direct",
+         "transaction_type": "Automatic Sell", "shares": 2399.0,
+         "price": 332.01, "shares_held_after": 39593.0,
+         "url": "https://example.invalid/i"}]}
+
+
+def _estimates_payload(**over):
+    base = {"symbol": "AAPL", "currency": "USD", "current_price": 336.64,
+            "target_high": 405.0, "target_low": 215.0,
+            "target_consensus": 328.09384, "target_median": 340.0,
+            "recommendation": "buy", "recommendation_mean": 2.20455,
+            "number_of_analysts": 39}
+    base.update(over)
+    return {"source": "openbb", "data": base}
+
+
+class TestOwnershipAndEstimates:
+    def test_institutional_passes_gate(self, client, monkeypatch):
+        tc, us_deep = client
+        monkeypatch.setattr(us_deep._provider, "institutional",
+                            lambda s, limit=20: _institutional_payload())
+        body = tc.get("/api/us/deep/institutional/AAPL?limit=5").json()
+        assert body["available"] is True
+        assert body["source"] == "openbb"
+        assert body["data"][0]["owner"] == "Vanguard Group Inc"
+        assert body["data"][0]["shares_change_pct"] == pytest.approx(0.01919)
+
+    def test_institutional_bad_limit(self, client):
+        tc, _ = client
+        for q in ("limit=0", "limit=101"):
+            body = tc.get(f"/api/us/deep/institutional/AAPL?{q}").json()
+            assert body["available"] is False
+            assert body["reason"].startswith("bad_limit")
+
+    def test_institutional_empty_is_no_data(self, client, monkeypatch):
+        tc, us_deep = client
+        monkeypatch.setattr(us_deep._provider, "institutional",
+                            lambda s, limit=20: {"source": "openbb", "data": []})
+        body = tc.get("/api/us/deep/institutional/AAPL").json()
+        assert body["available"] is False
+        assert body["reason"].startswith("no_data")
+
+    def test_insider_passes_gate(self, client, monkeypatch):
+        tc, us_deep = client
+        monkeypatch.setattr(us_deep._provider, "insider_trading",
+                            lambda s, limit=20: _insider_payload())
+        body = tc.get("/api/us/deep/insider/AAPL").json()
+        assert body["available"] is True
+        row = body["data"][0]
+        assert row["owner"] == "NEWSTEAD JENNIFER"
+        assert row["transaction_type"] == "Automatic Sell"
+        assert row["shares"] == 2399.0
+        assert row["price"] == 332.01
+
+    def test_insider_bad_limit(self, client):
+        tc, _ = client
+        body = tc.get("/api/us/deep/insider/AAPL?limit=0").json()
+        assert body["available"] is False
+        assert body["reason"].startswith("bad_limit")
+
+    def test_estimates_passes_gate(self, client, monkeypatch):
+        tc, us_deep = client
+        monkeypatch.setattr(us_deep._provider, "estimates", lambda s: _estimates_payload())
+        body = tc.get("/api/us/deep/estimates/AAPL").json()
+        assert body["available"] is True
+        assert body["data"]["number_of_analysts"] == 39
+        assert body["data"]["recommendation"] == "buy"
+        assert body["data"]["target_median"] == 340.0
+
+    def test_estimates_shell_without_values_is_no_data(self, client, monkeypatch):
+        """yfinance 无覆盖时返回只有 symbol 的壳 —— 不许冒充成功。"""
+        tc, us_deep = client
+        monkeypatch.setattr(us_deep._provider, "estimates", lambda s: _estimates_payload(
+            currency=None, current_price=None, target_high=None, target_low=None,
+            target_consensus=None, target_median=None, recommendation=None,
+            recommendation_mean=None, number_of_analysts=None))
+        body = tc.get("/api/us/deep/estimates/ZZZZ").json()
+        assert body["available"] is False
+        assert body["reason"].startswith("no_data")
+
+    def test_provider_down_is_available_false(self, client, monkeypatch):
+        """OpenBB 没起时三个端点都必须 fail-closed, 不能崩也不能造假。"""
+        tc, us_deep = client
+
+        def _boom(*a, **k):
+            raise RuntimeError("<urlopen error [Errno 101] Network is unreachable>")
+
+        monkeypatch.setattr(us_deep._provider, "institutional", _boom)
+        monkeypatch.setattr(us_deep._provider, "insider_trading", _boom)
+        monkeypatch.setattr(us_deep._provider, "estimates", _boom)
+        for path in ("institutional/AAPL", "insider/AAPL", "estimates/AAPL"):
+            body = tc.get(f"/api/us/deep/{path}").json()
+            assert body["available"] is False
+            assert body["reason"].startswith("provider_error")
+
+
+class TestProviderFieldMapping:
+    """provider 层字段映射 —— 锁住"存疑单位只透 raw"与"走 nasdaq 不走 sec"。"""
+
+    def test_institutional_renames_and_keeps_raw_market_value(self, monkeypatch):
+        from app.data_providers import jiuzhang_openbb_provider as prov
+
+        seen = {}
+
+        def _fake(path, **kw):
+            seen.update(kw)
+            seen["path"] = path
+            return [{"symbol": "AAPL", "date": "2025-12-31", "owner_name": "Vanguard Group Inc",
+                     "shares_held": 1426283914.0, "shares_change": 26856752.0,
+                     "shares_change_percent": 0.01919, "market_value": 480144217.0,
+                     "url": "https://example.invalid/v"}]
+
+        monkeypatch.setattr(prov, "_get", _fake)
+        row = prov.institutional("AAPL", limit=5)["data"][0]
+        assert row["owner"] == "Vanguard Group Inc"
+        assert row["date"] == "2025-12-31"
+        # 存疑单位: 只透 raw, 不产出换算后的市值字段
+        assert row["market_value_raw"] == 480144217.0
+        assert "market_value" not in row
+
+    def test_institutional_uses_nasdaq_not_sec(self, monkeypatch):
+        """/ownership/form_13f 只收 provider=sec 且本机取不到数(实测空返回)。"""
+        from app.data_providers import jiuzhang_openbb_provider as prov
+
+        seen = {}
+
+        def _fake(path, **kw):
+            seen.update(kw)
+            seen["path"] = path
+            return []
+
+        monkeypatch.setattr(prov, "_get", _fake)
+        prov.institutional("AAPL")
+        assert seen["path"] == "/equity/ownership/institutional"
+        assert seen["provider"] == "nasdaq"
+
+    def test_insider_maps_transaction_fields(self, monkeypatch):
+        from app.data_providers import jiuzhang_openbb_provider as prov
+
+        monkeypatch.setattr(prov, "_get", lambda path, **kw: [
+            {"symbol": "AAPL", "transaction_date": "2026-10-06", "owner_name": "NEWSTEAD JENNIFER",
+             "owner_title": "Officer", "ownership_type": "Direct",
+             "transaction_type": "Automatic Sell", "securities_transacted": 2399.0,
+             "transaction_price": 332.01, "shares_held": 39593.0,
+             "url": "https://example.invalid/i"}])
+        row = prov.insider_trading("AAPL", limit=5)["data"][0]
+        assert row["owner"] == "NEWSTEAD JENNIFER"
+        assert row["title"] == "Officer"
+        assert row["shares"] == 2399.0
+        assert row["price"] == 332.01
+        assert row["shares_held_after"] == 39593.0
+
+    def test_estimates_maps_consensus_fields(self, monkeypatch):
+        from app.data_providers import jiuzhang_openbb_provider as prov
+
+        monkeypatch.setattr(prov, "_get", lambda path, **kw: [
+            {"symbol": "AAPL", "currency": "USD", "current_price": 336.64,
+             "target_high": 405.0, "target_low": 215.0, "target_consensus": 328.09384,
+             "target_median": 340.0, "recommendation": "buy",
+             "recommendation_mean": 2.20455, "number_of_analysts": 39}])
+        d = prov.estimates("AAPL")["data"]
+        assert d["number_of_analysts"] == 39
+        assert d["recommendation"] == "buy"
+        assert d["target_consensus"] == pytest.approx(328.09384)
+        assert d["currency"] == "USD"

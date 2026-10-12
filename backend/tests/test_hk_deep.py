@@ -399,3 +399,135 @@ class _FakeOpener:
                 return False
 
         return _Resp(self._text)
+
+
+# ─────────────────── 券商盈利预测 / 评级 / 目标价 ───────────────────
+# 源: akshare stock_hk_profit_forecast_et (2026-10-12 实测 00700 返回 50 行)。
+# 守护四条:
+#   1. 中文列正确映射到英文键, 且**单位换算**符合东财口径(纯利百万港元→亿港元,
+#      每股港仙→港元), raw_* 保留原值供核对;
+#   2. 东财用 "--" 表示"该券商没给这一年的评级" —— 必须当 None, 不能当评级文本;
+#   3. pandas 空单元格是 NaN 不是 None —— 必须转 None, **绝不补零**;
+#   4. 解析出 0 行是真失败(非"无预测"), API 层如实 available:false。
+
+
+def _fake_forecasts(monkeypatch, records):
+    """把 akshare 的港股盈利预测换成预设 pandas DataFrame。"""
+    import akshare as ak
+    import pandas as pd
+
+    monkeypatch.setattr(ak, "stock_hk_profit_forecast_et", lambda symbol: pd.DataFrame(records))
+
+
+#: 实测样本(2026-10-12, 00700): 美银给 2026 财年目标价 780「买入」,
+#: 2027/2028 财年只有盈利预测没有评级与目标价(东财原样给 "--")。
+_FC_RECORDS = [
+    {"财政年度": "2026", "纯利/亏损": 221651.0, "每股盈利": 2912.0, "每股派息": 472.0,
+     "证券商": "美银", "评级": "买入", "目标价": 780.0, "更新日期": "2026-10-08"},
+    {"财政年度": "2027", "纯利/亏损": 218652.0, "每股盈利": 2874.0, "每股派息": 486.0,
+     "证券商": "美银", "评级": "--", "目标价": None, "更新日期": "2026-10-08"},
+    {"财政年度": "2026", "纯利/亏损": 214511.0, "每股盈利": 2344.2, "每股派息": 451.7,
+     "证券商": "花旗", "评级": "买入", "目标价": 755.0, "更新日期": "2026-10-07"},
+    {"财政年度": "2026", "纯利/亏损": None, "每股盈利": None, "每股派息": None,
+     "证券商": "某券商", "评级": "中性", "目标价": 600.0, "更新日期": "2026-09-30"},
+]
+
+
+class TestAnalystForecasts:
+    def test_maps_columns_and_units(self, monkeypatch):
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        d = prov.analyst_forecasts("00700.HK")
+        assert d["source"] == prov.SOURCE_HK_FORECAST
+        rows = d["data"]["rows"]
+        by = {(r["broker"], r["fiscal_year"]): r for r in rows}
+
+        ml = by[("美银", "2026")]
+        assert ml["rating"] == "买入"
+        assert ml["rating_bucket"] == "buy"
+        assert ml["target_price"] == 780.0
+        # 单位换算: 百万港元 → 亿港元, 港仙 → 港元
+        assert ml["net_profit_yi_hkd"] == pytest.approx(2216.51)
+        assert ml["eps_hkd"] == pytest.approx(29.12)
+        assert ml["dps_hkd"] == pytest.approx(4.72)
+        # raw 原值保留, 口径可核对
+        assert ml["net_profit_raw"] == 221651.0
+        assert ml["eps_raw"] == 2912.0
+
+    def test_placeholder_rating_is_none(self, monkeypatch):
+        """东财 "--" 表示没给评级 —— 不能当评级文本, 也不能归进任何档位。"""
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        rows = prov.analyst_forecasts("00700.HK")["data"]["rows"]
+        by = {(r["broker"], r["fiscal_year"]): r for r in rows}
+        assert by[("美银", "2027")]["rating"] is None
+        assert by[("美银", "2027")]["rating_bucket"] is None
+
+    def test_nan_becomes_none_not_zero(self, monkeypatch):
+        """pandas 空单元格是 NaN —— 必须是 None, 补 0 就是造假。"""
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        rows = prov.analyst_forecasts("00700.HK")["data"]["rows"]
+        row = next(r for r in rows if r["broker"] == "某券商")
+        assert row["net_profit_raw"] is None
+        assert row["eps_hkd"] is None
+        assert row["dps_hkd"] is None
+        assert row["target_price"] == 600.0
+
+    def test_summary_aggregates_real_broker_views(self, monkeypatch):
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        s = prov.analyst_forecasts("00700.HK")["data"]["summary"]
+        assert s["count"] == 4
+        assert s["brokers"] == 3
+        assert s["target_high"] == 780.0
+        assert s["target_low"] == 600.0
+        assert s["target_median"] == 755.0
+        assert s["rating_dist"] == {"buy": 2, "hold": 1}
+
+    def test_zero_rows_is_failure_not_empty_success(self, monkeypatch):
+        """0 行 = 该公司不在这份覆盖表里, 是真失败(实测 00011 抛 No tables found)。"""
+        _fake_forecasts(monkeypatch, [])
+        with pytest.raises(ValueError):
+            prov.analyst_forecasts("00011.HK")
+
+    def test_cached(self, monkeypatch):
+        calls = []
+        import akshare as ak
+
+        def _spy(symbol):
+            calls.append(symbol)
+            import pandas as pd
+            return pd.DataFrame(_FC_RECORDS)
+
+        monkeypatch.setattr(ak, "stock_hk_profit_forecast_et", _spy)
+        prov.analyst_forecasts("00700.HK")
+        prov.analyst_forecasts("00700.HK")
+        assert len(calls) == 1
+
+    def test_symbol_normalized(self, monkeypatch):
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        assert prov.analyst_forecasts("0700.HK")["data"]["symbol"] == "00700.HK"
+
+
+class TestForecastsEndpoint:
+    def test_happy_path(self, client, monkeypatch):
+        _fake_forecasts(monkeypatch, _FC_RECORDS)
+        body = client.get("/api/hk/forecasts/00700.HK").json()
+        assert body["available"] is True
+        assert body["source"] == prov.SOURCE_HK_FORECAST
+        assert body["data"]["summary"]["target_high"] == 780.0
+
+    def test_bad_limit(self, client):
+        for q in ("limit=0", "limit=201"):
+            body = client.get(f"/api/hk/forecasts/00700.HK?{q}").json()
+            assert body["available"] is False
+            assert body["reason"].startswith("bad_limit")
+
+    def test_zero_rows_is_unavailable(self, client, monkeypatch):
+        _fake_forecasts(monkeypatch, [])
+        body = client.get("/api/hk/forecasts/00011.HK").json()
+        assert body["available"] is False
+        assert "provider_error" in body["reason"]
+
+    def test_source_passes_gate(self):
+        """新 source 必须登记白名单, 否则闸门会把它拦成假数据。"""
+        from app.services.source_gate import is_real
+
+        assert is_real({"source": prov.SOURCE_HK_FORECAST}) is True

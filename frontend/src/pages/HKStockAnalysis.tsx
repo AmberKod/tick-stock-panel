@@ -6,21 +6,29 @@ import { StockDailyKChart } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
 import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
-import { HKAnnouncementsPanel, HKFinancialsPanel } from '@/components/hk/HKDeepPanels'
+import {
+  HKAnnouncementsPanel,
+  HKFinancialsPanel,
+  HKForecastsPanel,
+} from '@/components/hk/HKDeepPanels'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import { cn } from '@/lib/cn'
 import type { OHLC } from '@/components/EChartsCandlestick'
 
 /**
- * 港股深度 tab —— 只放**有免费真源**的两块。
+ * 港股深度 tab —— 只放**有免费真源**的三块。
  *
- * ⚠️ 刻意不为「对齐 A股」而补空面板: 港股没有 A股那套龙虎榜 / 资金流 / 研报的
- * 免费真源(新浪港股资金流实测返回空数组, 东财 push2 被墙), 硬摆上去只会得到
- * 一排"不可用"。这里只接已实测可取的: 公告(披露易) + 财报(东财公告原文)。
+ * ⚠️ 刻意不为「对齐 A股」而补空面板: 港股没有 A股那套龙虎榜 / 资金流的免费真源
+ * (新浪港股资金流实测返回空数组, 东财 push2 被墙), 硬摆上去只会得到一排"不可用"。
+ * 这里只接已实测可取的: 券商评级(东财港股通) + 公告(披露易) + 财报(东财公告原文)。
+ *
+ * 「券商评级」补齐的是 A股「研报」那个信息位 —— 2026-10-12 实测: 东财港股通口径
+ * 有数十家券商对同一财年的盈利预测 + 评级 + 目标价(00700 返回 50 行), 全真实观点。
  */
-type DeepTab = 'announcements' | 'financials'
+type DeepTab = 'forecasts' | 'announcements' | 'financials'
 
 const DEEP_TABS: { key: DeepTab; label: string }[] = [
+  { key: 'forecasts', label: '券商评级' },
   { key: 'announcements', label: '公告' },
   { key: 'financials', label: '财报' },
 ]
@@ -74,7 +82,7 @@ export function HKStockAnalysisPage() {
   // 港美股都只支持 日/周/月/年 —— 分钟K无真源(见 DeepCapabilityNote)
   const [kPeriod, setKPeriod] = useState<KPeriod>('day')
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
-  const [deepTab, setDeepTab] = useState<DeepTab>('announcements')
+  const [deepTab, setDeepTab] = useState<DeepTab>('forecasts')
 
   const caps = <DeepCapabilityNote market="HK" />
   const signalMarkers = useMemo(
@@ -192,12 +200,12 @@ export function HKStockAnalysisPage() {
         onDrawToolChange={tools.setDrawTool}
       />
 
-      {/* ── 深度数据 2 tab ── */}
+      {/* ── 深度数据 3 tab ── */}
       <div className="rounded-lg border border-border bg-surface p-3">
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold text-fg">深度数据</h3>
           <span className="text-xs text-fg-muted">
-            港股真源 · 公告走港交所披露易，财报走东财公告原文
+            港股真源 · 评级走东财港股通，公告走港交所披露易，财报走东财公告原文
           </span>
           <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
             {DEEP_TABS.map(t => (
@@ -213,6 +221,7 @@ export function HKStockAnalysisPage() {
             ))}
           </div>
         </div>
+        {deepTab === 'forecasts' && <HKForecastsPanel symbol={symbol} limit={60} />}
         {deepTab === 'announcements' && <HKAnnouncementsPanel symbol={symbol} days={180} limit={40} />}
         {deepTab === 'financials' && <HKFinancialsPanel symbol={symbol} periods={8} />}
       </div>

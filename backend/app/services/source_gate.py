@@ -61,6 +61,9 @@ REAL_SOURCES: frozenset[str] = frozenset({
     # hk_deep_provider.py:SOURCE_HKEX (港交所披露易公告, 2026-10-11 实测真数据:
     # 00700 半年 106 条 / 00939 56 条 / 09988 52 条)
     "live-hkexnews",
+    # hk_deep_provider.py:SOURCE_HK_FORECAST (akshare stock_hk_profit_forecast_et,
+    # 2026-10-12 实测: 00700 返回 50 行券商预测, 带券商名/评级/目标价, 全真实观点)
+    "akshare_hk_forecast",
     # jiuzhang_openbb_provider.py:51 (SOURCE)
     "openbb",
     # ── provider 数据链路真实标记 (services/hk_data_adapter.py) ──

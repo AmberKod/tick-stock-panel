@@ -35,6 +35,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -50,6 +51,8 @@ logger = logging.getLogger(__name__)
 SOURCE_HKEX = "live-hkexnews"
 #: 东财港股公告原文解析(hk_financial_provider 的内置 source 名)。
 SOURCE_EM_HK_ANN = "eastmoney_hk_announcement"
+#: 券商盈利预测/评级/目标价(akshare stock_hk_profit_forecast_et)。已登记 source_gate。
+SOURCE_HK_FORECAST = "akshare_hk_forecast"
 
 _HKEX_WEB = "https://www1.hkexnews.hk"
 _HKEX_PREFIX_URL = f"{_HKEX_WEB}/search/prefix.do"
@@ -65,6 +68,8 @@ _HKEX_STOCKID_TTL_S = 86400.0
 _HK_FIN_TTL_S = 21600.0
 #: 降级结果(被东财限流、只拿到最新一期)的缓存(秒) —— 比正常短得多, 见 financials 末尾注释。
 _HK_FIN_DEGRADED_TTL_S = 600.0
+#: 券商预测缓存(秒)。券商调整评级/目标价是日级事件, 缓存 3h。
+_HK_FC_TTL_S = 10800.0
 
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_LOCK = threading.Lock()
@@ -411,3 +416,148 @@ def financials(symbol: str, periods: int = 8, timeout: float = 15.0) -> dict:
     # 大概率已恢复成完整多期 —— 长缓存会把"只有 1 期"钉死 6 小时。
     _cache_put(key, payload, _HK_FIN_DEGRADED_TTL_S if degraded else _HK_FIN_TTL_S)
     return payload
+
+
+# ── 券商盈利预测 / 评级 / 目标价 ────────────────────────────────────────
+
+#: 中文评级 → 归一档位。东财给的是券商自己的自由文本, 只做**归类**不做
+#: 改写: 归不进的照原样返回(档位 None), 前端显示为中性色而不是硬塞 buy。
+_RATING_BUCKETS: tuple[tuple[str, str], ...] = (
+    ("买入", "buy"), ("强烈推荐", "buy"), ("推荐", "buy"),
+    ("增持", "overweight"), ("跑赢大市", "overweight"), ("优于大市", "overweight"),
+    ("持有", "hold"), ("中性", "hold"), ("大市同步", "hold"), ("同步大市", "hold"),
+    ("减持", "sell"), ("卖出", "sell"), ("跑输大市", "sell"), ("弱于大市", "sell"),
+)
+
+
+#: 东财用 "--" / "-" 表示"该券商没给这一年的评级", 不是真评级文本。
+_RATING_PLACEHOLDERS = frozenset({"", "-", "--", "---", "N/A", "NA", "NAN"})
+
+
+def _rating_bucket(rating: str | None) -> str | None:
+    if rating is None:
+        return None
+    r = str(rating).strip()
+    if r.upper() in _RATING_PLACEHOLDERS:
+        return None
+    for zh, bucket in _RATING_BUCKETS:
+        if zh in r:
+            return bucket
+    return None
+
+
+def _num_or_none(value: object) -> float | None:
+    """pandas 空单元格是 NaN 不是 None —— 判 isnan, 且**不补零**。"""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+def analyst_forecasts(symbol: str, limit: int = 60) -> dict:
+    """券商盈利预测 + 评级 + 目标价 (akshare ``stock_hk_profit_forecast_et``)。
+
+    实测 (2026-10-12, 00700): 1.0s 返回 50 行, 覆盖数十家券商对同一财政年度
+    的纯利/EPS/派息预测、评级与目标价。这是港股侧对标 A股「研报」位的数据,
+    **全部是券商实盘观点, 无任何合成**。
+
+    单位: 东财这一页的原始口径是 纯利=百万港元、每股盈利/每股派息=港仙(分)、
+    目标价=港元。为便于阅读这里**同时**下发原始值(raw_*)与换算值, 换算依据
+    写在 ``note`` 里 —— 不隐藏口径, 一旦东财改单位前端能立刻看出来。
+
+    返回 ``{"source": ..., "data": {rows, summary, ...}}``; 拿不到就抛异常
+    (由 API 层转 available:false)。
+    """
+    norm = _norm_symbol(symbol)
+    code5 = norm.split(".")[0]
+    if limit < 1 or limit > 200:
+        raise ValueError(f"bad_limit: {limit} (1..200)")
+
+    key = f"hkfc:{norm}:{limit}"
+    cached = _cache_get(key)
+    if isinstance(cached, dict):
+        return cached
+
+    # 局部 import: akshare 很重(拉 pandas 生态), 只在真用到券商预测时付这个代价。
+    import akshare as ak
+
+    frame = ak.stock_hk_profit_forecast_et(symbol=code5)
+    # akshare 这一路返回 **pandas**(不是 polars), 且空单元格是 NaN。
+    records = frame.to_dict(orient="records") if hasattr(frame, "to_dict") else []
+    if not records:
+        raise ValueError(f"券商预测解析出 0 行: {norm}")
+
+    rows: list[dict] = []
+    for r in records:
+        raw_rating = str(r.get("评级") or "").strip()
+        rating = None if raw_rating.upper() in _RATING_PLACEHOLDERS else raw_rating
+        rows.append({
+            "fiscal_year": str(r.get("财政年度") or "").strip() or None,
+            "broker": str(r.get("证券商") or "").strip() or None,
+            "rating": rating,
+            "rating_bucket": _rating_bucket(rating),
+            # 原始口径
+            "net_profit_raw": _num_or_none(r.get("纯利/亏损")),
+            "eps_raw": _num_or_none(r.get("每股盈利")),
+            "dps_raw": _num_or_none(r.get("每股派息")),
+            # 换算后(纯利 百万→亿港元; 每股 港仙→港元)
+            "net_profit_yi_hkd": (lambda v: None if v is None else round(v / 100.0, 2))(
+                _num_or_none(r.get("纯利/亏损"))),
+            "eps_hkd": (lambda v: None if v is None else round(v / 100.0, 3))(
+                _num_or_none(r.get("每股盈利"))),
+            "dps_hkd": (lambda v: None if v is None else round(v / 100.0, 3))(
+                _num_or_none(r.get("每股派息"))),
+            "target_price": _num_or_none(r.get("目标价")),
+            "update_date": str(r.get("更新日期") or "").strip()[:10] or None,
+        })
+
+    # 最新更新在前 —— 券商观点是有时效的, 三个月前的目标价不该压在上面。
+    rows.sort(key=lambda x: (x["update_date"] or "", x["fiscal_year"] or ""), reverse=True)
+    rows = rows[:limit]
+
+    targets = [r["target_price"] for r in rows if r["target_price"] is not None]
+    buckets: dict[str, int] = {}
+    for r in rows:
+        b = r["rating_bucket"]
+        if b:
+            buckets[b] = buckets.get(b, 0) + 1
+
+    summary = {
+        "count": len(rows),
+        "brokers": len({r["broker"] for r in rows if r["broker"]}),
+        "target_high": max(targets) if targets else None,
+        "target_low": min(targets) if targets else None,
+        "target_mean": round(sum(targets) / len(targets), 2) if targets else None,
+        "target_median": _median(targets),
+        "rating_dist": buckets,
+        "distinct_fiscal_years": sorted({r["fiscal_year"] for r in rows if r["fiscal_year"]},
+                                        reverse=True),
+    }
+
+    payload = {
+        "source": SOURCE_HK_FORECAST,
+        "data": {
+            "symbol": norm,
+            "currency": "HKD",
+            "rows": rows,
+            "summary": summary,
+            "note": "纯利原始口径=百万港元(已换算为亿港元); 每股盈利/派息原始口径=港仙(已换算为港元); 目标价=港元。raw_* 为未换算原值, 用于核对口径。",
+        },
+    }
+    _cache_put(key, payload, _HK_FC_TTL_S)
+    return payload
+
+
+def _median(values: list[float]) -> float | None:
+    """中位数。偶数个取中间两数均值, 不插值不补数。"""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return round(float(s[mid]), 2)
+    return round((float(s[mid - 1]) + float(s[mid])) / 2.0, 2)
