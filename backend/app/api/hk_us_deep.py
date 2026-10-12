@@ -11,7 +11,7 @@
 - GET  /capabilities                能力矩阵: 哪些可用、不可用的原因
 - GET  /period/{symbol}?period=week 周期K(week/month/quarter/year)
 - GET  /index/{code}?limit=120      指数日K(HSI/HSCEI/DJI/IXIC/INX)
-- GET  /minute/{symbol}             分钟K —— 恒不可用, 带原因
+- GET  /minute/{symbol}             分钟K —— 通达信扩展市场(MAC-EX 7727), 上限 700 根
 - GET  /adjratio/{symbol}           复权系数 —— 恒不可用, 带原因
 
 契约: 成功 HTTP 200 + available:true; 拿不到**也是 HTTP 200** + available:false
@@ -85,9 +85,13 @@ def _attach(router: APIRouter, market: str) -> None:
 
     @router.get("/minute/{symbol}")
     def _minute(symbol: str, period: str = "m30", limit: int = 320) -> dict:
-        """分钟 K —— 港美股均无真源, 恒返回 available:false + 原因。"""
+        """分钟 K —— 通达信扩展市场(MAC-EX 7727), m1/m5/m15/m30/m60。
+
+        上游单次上限 700 根, 超出截断并在 payload 里标注 —— 前端须据此说明
+        "只有近日日内深度"。
+        """
         return _respond(lambda: prov.minute_bars(symbol, period=period, limit=limit),
-                        required_key="rows", source_hint=source_hint)
+                        required_key="rows", source_hint=prov.SOURCE_TDX_EX)
 
     @router.get("/adjratio/{symbol}")
     def _adjratio(symbol: str, mode: str = "qfq", limit: int = 640) -> dict:

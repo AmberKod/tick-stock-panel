@@ -211,8 +211,51 @@ def test_index_source_is_real(monkeypatch):
 
 # ───────────────────────────────────────────── 明确不可用
 
-def test_minute_is_unavailable():
-    with pytest.raises(CapabilityUnavailableError, match="param error"):
+def _patch_minute(monkeypatch, rows):
+    """把通达信扩展市场取数打桩 —— 分钟K 走裸 TCP, 单元测试不应联网。"""
+    from app.data_providers import tdx_ex_provider
+
+    def fake(symbol, period="m30", limit=320):
+        return {"source": "tdx-ex", "market": "HK", "symbol": symbol, "period": period,
+                "requested": limit, "rows": rows, "timezone": "Asia/Shanghai",
+                "truncated": False, "max_bars": 700, "cached": False, "note": None}
+
+    monkeypatch.setattr(tdx_ex_provider, "minute_bars", fake)
+
+
+_MINUTE_ROWS = [
+    {"datetime": "2026-10-12 10:30:00", "open": 428.0, "high": 429.0,
+     "low": 427.0, "close": 428.5, "volume": 1000.0, "amount": 428500.0},
+    {"datetime": "2026-10-12 11:00:00", "open": 428.5, "high": 430.0,
+     "low": 428.0, "close": 429.0, "volume": 1200.0, "amount": 514800.0},
+]
+
+
+def test_minute_goes_through_tdx_ex(monkeypatch):
+    """分钟K 不再是"无真源": 走通达信扩展市场, 原样透传 payload。"""
+    _patch_minute(monkeypatch, _MINUTE_ROWS)
+    body = prov.minute_bars("00700.HK", period="m30", limit=10)
+    assert body["source"] == "tdx-ex"
+    assert body["rows"] == _MINUTE_ROWS
+    assert body["timezone"] == "Asia/Shanghai"
+
+
+def test_minute_empty_rows_is_error_not_empty_table(monkeypatch):
+    """取得到连接但 0 行 —— 必须 fail-closed, 不能给 available:true + 空表。"""
+    _patch_minute(monkeypatch, [])
+    with pytest.raises(ValueError, match="无该标的分钟数据"):
+        prov.minute_bars("00700.HK")
+
+
+def test_minute_node_failure_surfaces(monkeypatch):
+    """所有节点连不上是**故障**, 不是"没有源" —— 异常类型必须区分开。"""
+    from app.data_providers import tdx_ex_provider
+
+    def boom(symbol, period="m30", limit=320):
+        raise tdx_ex_provider.TdxExUnavailableError("全部 2 个节点均失败: timeout")
+
+    monkeypatch.setattr(tdx_ex_provider, "minute_bars", boom)
+    with pytest.raises(tdx_ex_provider.TdxExUnavailableError, match="节点均失败"):
         prov.minute_bars("00700.HK")
 
 
@@ -223,7 +266,10 @@ def test_adjratio_is_unavailable():
 
 def test_capabilities_marks_them_false():
     items = prov.capabilities("HK")["items"]
-    assert items["minute"]["available"] is False and items["minute"]["reason"]
+    # 分钟K 2026-10-12 起可用(通达信扩展市场), 复权仍无真源。
+    assert items["minute"]["available"] is True
+    assert items["minute"]["source"] == "tdx-ex"
+    assert "700" in items["minute"]["note"]  # 上限必须写进能力矩阵, 前端据此说明深度
     assert items["adjratio"]["available"] is False and items["adjratio"]["reason"]
     assert items["week"]["available"] is True
     assert items["week"]["derivation"] == "native"
@@ -256,13 +302,44 @@ def test_api_us_period_derived(client, monkeypatch):
     assert body["derived_from"] == "daily"
 
 
-def test_api_minute_is_http200_with_reason(client):
-    """fail-closed: 拿不到也是 200 + available:false, 不抛 5xx。"""
+def test_api_minute_ok(client, monkeypatch):
+    _patch_minute(monkeypatch, _MINUTE_ROWS)
+    resp = client.get("/api/us/deep/minute/AAPL.US?period=m30&limit=10")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True and body["source"] == "tdx-ex"
+    assert len(body["rows"]) == 2
+
+
+def test_api_minute_failure_is_http200_with_reason(client, monkeypatch):
+    """fail-closed: 节点全挂也是 200 + available:false, 不抛 5xx。"""
+    from app.data_providers import tdx_ex_provider
+
+    def boom(symbol, period="m30", limit=320):
+        raise tdx_ex_provider.TdxExUnavailableError("全部 2 个节点均失败: timeout")
+
+    monkeypatch.setattr(tdx_ex_provider, "minute_bars", boom)
     resp = client.get("/api/us/deep/minute/AAPL.US")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["available"] is False
-    assert "capability_unavailable" in body["reason"]
+    assert body["available"] is False and "provider_error" in body["reason"]
+
+
+def test_api_minute_rejects_unregistered_source(client, monkeypatch):
+    """provider 若谎报 source(如 demo), source_gate 必须拦下。"""
+    _patch_minute(monkeypatch, _MINUTE_ROWS)
+    from app.data_providers import tdx_ex_provider
+
+    orig = tdx_ex_provider.minute_bars
+
+    def fake(symbol, period="m30", limit=320):
+        payload = orig(symbol, period=period, limit=limit)
+        payload["source"] = "demo"
+        return payload
+
+    monkeypatch.setattr(tdx_ex_provider, "minute_bars", fake)
+    body = client.get("/api/us/deep/minute/AAPL.US").json()
+    assert body["available"] is False and "source_gate_rejected" in body["reason"]
 
 
 def test_api_adjratio_is_http200_with_reason(client):

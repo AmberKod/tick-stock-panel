@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, Link } from 'react-router-dom'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
-import { StockDailyKChart } from '@/components/StockDailyKChart'
+import { StockDailyKChart, type MklinePeriod } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
-import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
+import { DeepCapabilityNote, KPeriodTabs, MinutePeriodTabs } from '@/components/KPeriodTabs'
 import {
   HKAnnouncementsPanel,
   HKFinancialsPanel,
@@ -79,9 +79,16 @@ export function HKStockAnalysisPage() {
    */
   const tools = useKlineTools(symbol, 'day||none', 'hkDetail')
   const [klineRows, setKlineRows] = useState<OHLC[]>([])
-  // 港美股都只支持 日/周/月/年 —— 分钟K无真源(见 DeepCapabilityNote)
   const [kPeriod, setKPeriod] = useState<KPeriod>('day')
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
+  /**
+   * 分钟档。null = 看日/周/月/年。
+   *
+   * 2026-10-12 之前这里是"港美股分钟K无真源"(依据是腾讯 mkline 返回 param
+   * error)。实测发现那只针对腾讯源 —— 通达信扩展市场(MAC-EX 7727) 对港美股
+   * 都返回真实分钟K, 所以这里现在**有数据**。
+   */
+  const [mkPeriod, setMkPeriod] = useState<MklinePeriod | null>(null)
   const [deepTab, setDeepTab] = useState<DeepTab>('forecasts')
 
   const caps = <DeepCapabilityNote market="HK" />
@@ -178,13 +185,15 @@ export function HKStockAnalysisPage() {
       <div className="flex flex-wrap items-center gap-2">
         <KPeriodTabs
           value={kPeriod}
-          onChange={(p, bars) => { setKPeriod(p); if (bars > 0) setVisibleBars(bars) }}
+          onChange={(p, bars) => { setKPeriod(p); setMkPeriod(null); if (bars > 0) setVisibleBars(bars) }}
         />
+        <MinutePeriodTabs value={mkPeriod} onChange={setMkPeriod} />
       </div>
       <StockDailyKChart
         symbol={symbol}
         height={560}
         period={kPeriod}
+        deepMinutePeriod={mkPeriod ?? undefined}
         visibleBars={visibleBars}
         showLimitMarkers={false}
         adjust="none"

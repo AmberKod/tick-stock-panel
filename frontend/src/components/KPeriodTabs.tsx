@@ -10,6 +10,7 @@ import { AlertTriangle } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
+import { MK_PERIODS, type MklinePeriod } from '@/components/StockDailyKChart'
 
 export const K_PERIODS: { label: string; value: KPeriod }[] = [
   { label: '日K', value: 'day' },
@@ -44,6 +45,45 @@ export function KPeriodTabs({ value, onChange, periods = K_PERIODS, className }:
   )
 }
 
+/**
+ * 分钟档切换 —— 港美股专用。
+ *
+ * 为什么单独一组而不是并进 K_PERIODS: 分钟K 是**另一份数据**(通达信扩展市场
+ * MAC-EX 7727), 不是日K聚合出来的, 与日/周/月/年不是一个坐标系。混在一组 tabs
+ * 里会让人以为"切到 30 分"和"切到周K"是同一种操作。
+ *
+ * 「关」回到日K链路 —— 分钟K 上限 700 根, 看长周期必须切回去。
+ */
+export function MinutePeriodTabs({ value, onChange, className }: {
+  value: MklinePeriod | null
+  onChange: (period: MklinePeriod | null) => void
+  className?: string
+}) {
+  return (
+    <div className={cn('inline-flex items-center rounded border border-border bg-elevated p-0.5', className)}>
+      <button
+        type="button"
+        onClick={() => onChange(null)}
+        className={cn('rounded px-2 py-0.5 text-xs transition-colors',
+          value == null ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+      >
+        关
+      </button>
+      {MK_PERIODS.filter(p => p.value !== 'm1').map(p => (
+        <button
+          key={p.value}
+          type="button"
+          onClick={() => onChange(p.value)}
+          className={cn('rounded px-2 py-0.5 text-xs transition-colors',
+            value === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+        >
+          {p.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 interface Caps {
   market: string
   items: Record<string, {
@@ -58,9 +98,12 @@ interface Caps {
 /**
  * 能力说明: 把后端判定为「无真源」的能力连同原因显示出来。
  *
- * 不是装饰 —— 分钟K / 复权这两项在港美股确实没有真源(腾讯 mkline 返回
- * param error; fqkline 的 qfq/hfq 与未复权价逐日相同)。与其让前端留空让用户
- * 猜, 不如把"为什么没有"写出来。
+ * 不是装饰 —— 复权这项在港美股确实没有真源(fqkline 的 qfq/hfq 与未复权价
+ * 逐日相同)。与其让前端留空让用户猜, 不如把"为什么没有"写出来。
+ *
+ * 分钟K 曾长期归在这一类(依据是腾讯 mkline 对港美股返回 param error), 但
+ * 2026-10-12 实测发现那条结论只对腾讯源成立 —— 现在走通达信扩展市场
+ * (MAC-EX 7727), 见 MinutePeriodTabs。
  */
 export function DeepCapabilityNote({ market }: { market: 'HK' | 'US' }) {
   const prefix = market === 'HK' ? '/api/hk' : '/api/us'

@@ -64,6 +64,9 @@ REAL_SOURCES: frozenset[str] = frozenset({
     # hk_deep_provider.py:SOURCE_HK_FORECAST (akshare stock_hk_profit_forecast_et,
     # 2026-10-12 实测: 00700 返回 50 行券商预测, 带券商名/评级/目标价, 全真实观点)
     "akshare_hk_forecast",
+    # tdx_ex_provider.py:SOURCE (通达信扩展市场 MAC-EX 7727 分钟K, 2026-10-12 实测:
+    # 容器内裸 TCP 直连可达; 美股/港股 MIN_1..MIN_60 均有真实分钟线)
+    "tdx-ex",
     # jiuzhang_openbb_provider.py:51 (SOURCE)
     "openbb",
     # ── provider 数据链路真实标记 (services/hk_data_adapter.py) ──

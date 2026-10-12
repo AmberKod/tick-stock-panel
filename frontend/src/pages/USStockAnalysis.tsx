@@ -10,10 +10,10 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
-import { StockDailyKChart } from '@/components/StockDailyKChart'
+import { StockDailyKChart, type MklinePeriod } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
-import { DeepCapabilityNote, KPeriodTabs } from '@/components/KPeriodTabs'
+import { DeepCapabilityNote, KPeriodTabs, MinutePeriodTabs } from '@/components/KPeriodTabs'
 import {
   USEstimatesPanel,
   USInstitutionalPanel,
@@ -149,9 +149,10 @@ export function USStockAnalysisPage() {
    */
   const tools = useKlineTools(symbol, 'day||none', 'usDetail')
   const [klineRows, setKlineRows] = useState<OHLC[]>([])
-  // 港美股都只支持 日/周/月/年 —— 分钟K无真源(见 DeepCapabilityNote)
   const [kPeriod, setKPeriod] = useState<KPeriod>('day')
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
+  /** 分钟档(通达信扩展市场 MAC-EX 7727)。null = 看日/周/月/年。上限 700 根。 */
+  const [mkPeriod, setMkPeriod] = useState<MklinePeriod | null>(null)
 
   const caps = <DeepCapabilityNote market="US" />
   const signalMarkers = useMemo(
@@ -396,13 +397,15 @@ export function USStockAnalysisPage() {
       <div className="flex flex-wrap items-center gap-2">
         <KPeriodTabs
           value={kPeriod}
-          onChange={(p, bars) => { setKPeriod(p); if (bars > 0) setVisibleBars(bars) }}
+          onChange={(p, bars) => { setKPeriod(p); setMkPeriod(null); if (bars > 0) setVisibleBars(bars) }}
         />
+        <MinutePeriodTabs value={mkPeriod} onChange={setMkPeriod} />
       </div>
       <StockDailyKChart
         symbol={symbol}
         height={560}
         period={kPeriod}
+        deepMinutePeriod={mkPeriod ?? undefined}
         visibleBars={visibleBars}
         showLimitMarkers={false}
         adjust="none"

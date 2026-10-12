@@ -110,6 +110,9 @@ packages = ["app"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# app/_vendor/** 是第三方源码(见 app/_vendor/__init__.py 说明): 保持上游原样
+# 便于对照 diff 升级, 不按本项目规范改写, 因此也不参与 lint。
+exclude = ["app/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]

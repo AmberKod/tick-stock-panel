@@ -39,6 +39,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from app.data_providers import tdx_ex_provider
+
 _TENCENT_KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/kline"
 
 #: 腾讯对无 UA 的请求可能返回空串而不报错, 表现为 rows 恒空 —— 必须带浏览器风格 UA。
@@ -63,6 +65,9 @@ INDICES: dict[str, tuple[str, str]] = {
 
 SOURCE_TENCENT = "tencent"
 SOURCE_YFINANCE = "yfinance"
+#: 通达信扩展市场(MAC-EX 7727) —— 与 tdx_ex_provider.SOURCE 同值, 这里显式重声明
+#: 是为了让 capabilities 的 source 字段不必 import 那个模块才能读常量。
+SOURCE_TDX_EX = "tdx-ex"
 
 
 class CapabilityUnavailableError(RuntimeError):
@@ -359,15 +364,22 @@ def index_bars(code: str, limit: int = 120) -> dict:
 # ───────────────────────────────────────────── 明确不可用的两项
 
 def minute_bars(symbol: str, period: str = "m30", limit: int = 320) -> dict:
-    """分钟 K —— 港美股**均无真源**。
+    """分钟 K —— 走通达信扩展市场(MAC-EX, TCP 7727)。
 
-    实测腾讯 mkline 对 hk/us 一律 ``{"code":-1,"msg":"param error"}``
-    (试过 hk00700,m30 / usAAPL,m30 / usAAPL.OQ,m30 三种形态)。
+    历史: 之前判定"港美股分钟K 无真源", 依据是腾讯 mkline 对 hk/us 一律
+    ``{"code":-1,"msg":"param error"}``。2026-10-12 实测发现该结论**只对腾讯源
+    成立** —— MAC-EX 协议(7727) 对美股/港股均返回真实分钟K, 且容器内裸 TCP
+    直连可达。详见 ``tdx_ex_provider`` 模块头。
+
+    仍然存在的上游硬限制: 单次最多 700 根 ⇒ 只有近日日内深度。这个限制如实
+    下发给前端(payload.truncated / max_bars), **不用日K降采样凑数**。
     """
-    raise CapabilityUnavailableError(
-        "分钟K无真源: 腾讯 mkline 对港股/美股返回 param error, 无替代源; "
-        "缺的不补, 界面应显式标不可用而非用日K降采样冒充"
-    )
+    payload = tdx_ex_provider.minute_bars(symbol, period=period, limit=limit)
+    if not payload.get("rows"):
+        # 取得到连接但没数据 —— 多半是代码/市场组合不对(如港股创业板走主板码)。
+        # 抛错让端点 fail-closed, 不要返回 available:true + 空表冒充"今日无成交"。
+        raise ValueError(f"通达信扩展市场无该标的分钟数据: {symbol} {period}")
+    return payload
 
 
 def adjust_ratios(symbol: str, mode: str = "qfq", limit: int = 640) -> dict:
@@ -402,18 +414,11 @@ def capabilities(market: str) -> dict:
             items[p] = {"available": True, "source": SOURCE_YFINANCE if m == "US" else SOURCE_TENCENT,
                         "derivation": "aggregated_from_daily",
                         "note": "由真实日K确定性聚合, 非交易所原生周期K"}
-    items["minute"] = {"available": False, "source": None, "reason": str(minute_unavailable_reason())}
+    items["minute"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+                       "note": tdx_ex_provider.capabilities_note()}
     items["adjratio"] = {"available": False, "source": None, "reason": str(adjust_unavailable_reason())}
     items["index"] = {"available": True, "source": SOURCE_TENCENT, "derivation": "native"}
     return {"market": m, "items": items}
-
-
-def minute_unavailable_reason() -> str:
-    try:
-        minute_bars("dummy.HK")
-    except CapabilityUnavailableError as exc:
-        return str(exc)
-    return ""  # pragma: no cover
 
 
 def adjust_unavailable_reason() -> str:

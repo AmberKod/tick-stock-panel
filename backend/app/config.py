@@ -175,6 +175,16 @@ class Settings(BaseSettings):
     # 腾讯IFZQ 结果缓存(秒)。个股页切周期会反复请求同一个 param, 不开缓存会被限流。
     tencent_deep_cache_ttl_s: float = 180.0
 
+    # 通达信扩展市场(MAC-EX, TCP 7727) —— 港美股分钟K 唯一实测可用的真源。
+    # 2026-10-12 实测容器内裸 TCP 直连可达(不像 SEC 被 SNI 挡), 无需宿主从转发。
+    # 节点列表取自上游 config 的 _FALLBACK_MAC_EX_HOSTS, 逗号分隔, 逐个降级。
+    tdx_ex_hosts: str = "116.205.135.205,121.37.232.167"
+    tdx_ex_port: int = 7727
+    # 单次取数是「连 + 登录 + 取K线」三步, 8s 足够; 失败立刻换下一个节点。
+    tdx_ex_timeout_s: float = 8.0
+    # 分钟K 结果缓存(秒)。盘中刷新页面不该每次都建一次 TCP 连接。
+    tdx_ex_cache_ttl_s: float = 60.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()

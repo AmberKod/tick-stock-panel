@@ -62,6 +62,27 @@ interface MklineResp {
   }
 }
 
+/**
+ * 港美股分钟K响应(与后端 app/api/hk_us_deep.py::/minute 对齐)。
+ *
+ * 与 A股 mkline 响应的三个区别, 别按同一套结构解析:
+ * 1. rows 是**顶层字段**(不在 data 里);
+ * 2. 时间字段叫 ``datetime`` 且精确到秒;
+ * 3. 多带 ``truncated`` / ``max_bars`` / ``timezone`` —— 上游单次上限 700 根,
+ *    前端必须如实说明深度有限, 不能让用户以为这是完整历史。
+ */
+interface DeepMinuteResp {
+  available: boolean
+  source: string
+  reason?: string
+  rows?: { datetime: string; open: number; high: number; low: number; close: number;
+           volume: number | null; amount: number | null }[]
+  truncated?: boolean
+  max_bars?: number
+  timezone?: string
+  note?: string | null
+}
+
 /** 分钟K → OHLC。与 toOHLC 唯一的区别: **保留时间部分**。 */
 function toOHLCMinute(rows: { date: string; open: number; close: number; high: number; low: number; volume: number }[]): OHLC[] {
   return rows
@@ -102,8 +123,18 @@ interface Props {
   /**
    * 分钟档('m1'|'m5'|'m15'|'m30'|'m60')。给了就走腾讯 mkline 真源而不是日K ——
    * 本地 kline_minute 库目前是空的, 这个端点直连就有数据。
+   * ⚠️ 仅 A 股可用: 腾讯 mkline 对港股/美股返回 param error, 港美股请用
+   * ``deepMinutePeriod``。
    */
   mklinePeriod?: MklinePeriod
+  /**
+   * 港美股分钟档 —— 走 /api/{hk|us}/deep/minute(通达信扩展市场 MAC-EX 7727)。
+   *
+   * 为什么另开一个 prop 而不是复用 mklinePeriod: 两者是**不同的源**, 市场由
+   * symbol 后缀(.HK/.US)判定。混用一个参数会让"港美股走了腾讯源"这种错误
+   * 静默发生 —— 实测那条路是 100% 失败的。
+   */
+  deepMinutePeriod?: MklinePeriod
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -204,6 +235,7 @@ export function StockDailyKChart({
   visibleBars = 60,
   period = 'day',
   mklinePeriod,
+  deepMinutePeriod,
   linkedPrice,
   onDateClick,
   onPriceDoubleClick,
@@ -252,6 +284,20 @@ export function StockDailyKChart({
     placeholderData: (prev) => prev,
   })
 
+  // 港美股分钟K: 通达信扩展市场(MAC-EX 7727)。市场由 symbol 后缀判定 —— 与 A股
+  // mkline 是两条完全不同的路, 腾讯那条对港美股 100% 失败(param error)。
+  const deepMinuteMarket = symbol.toUpperCase().endsWith('.HK') ? 'hk'
+    : symbol.toUpperCase().endsWith('.US') ? 'us' : ''
+  const deepMinute = useQuery({
+    queryKey: ['deep-minute', deepMinuteMarket, symbol, deepMinutePeriod ?? ''],
+    queryFn: () => request<DeepMinuteResp>(
+      `/api/${deepMinuteMarket}/deep/minute/${encodeURIComponent(symbol)}`
+      + `?period=${deepMinutePeriod}&limit=700`),
+    enabled: !!symbol && !!deepMinutePeriod && !!deepMinuteMarket,
+    staleTime: 30_000,
+    placeholderData: (prev) => prev,
+  })
+
   // 复权系数(腾讯 fqkline)。只在**日K链路**要 —— 分钟K/分时没有复权概念。
   // 不复权档不打接口: 本地 enriched 本来就是不复权价(后端 adj_factor 为空), 乘 1 无意义。
   const isAdjustable = !mklinePeriod && adjust !== 'none'
@@ -271,15 +317,28 @@ export function StockDailyKChart({
     if (!isAdjustable || !ratios || ratios.length === 0) return dayRowsRaw
     return computeIndicators(applyAdjust(dayRowsRaw, ratios))
   }, [dayRowsRaw, adjRatio.data?.data?.ratios, isAdjustable])
+  // 港美股分钟K: 时间字段是 datetime(精确到秒), 先对齐成 A股 mkline 的 row 形状,
+  // 再走同一套「在这串 bar 上重算指标」的逻辑 —— 两条源共用一份指标实现。
+  const deepMkRows = useMemo(
+    () => deepMinutePeriod
+      ? computeIndicators(toOHLCMinute((deepMinute.data?.rows ?? []).map(r => ({
+          date: r.datetime, open: r.open, close: r.close,
+          high: r.high, low: r.low, volume: r.volume ?? 0,
+        }))))
+      : [],
+    [deepMinute.data?.rows, deepMinutePeriod],
+  )
   // 分钟K: 后端只给 OHLCV, 指标必须在这串分钟 bar 上重算(不能沿用日K的指标值)。
   const mkRows = useMemo(
-    () => mklinePeriod ? computeIndicators(toOHLCMinute(mkline.data?.data?.rows ?? [])) : [],
-    [mkline.data?.data?.rows, mklinePeriod],
+    () => deepMinutePeriod ? deepMkRows
+      : mklinePeriod ? computeIndicators(toOHLCMinute(mkline.data?.data?.rows ?? [])) : [],
+    [mkline.data?.data?.rows, mklinePeriod, deepMinutePeriod, deepMkRows],
   )
+  const isMinute = !!mklinePeriod || !!deepMinutePeriod
   // 周/月/年在日K基础上聚合; 日K原样透传(后端算好的指标就是权威值)
   const rows = useMemo(
-    () => mklinePeriod ? mkRows : aggregateKline(dayRows, period),
-    [dayRows, period, mklinePeriod, mkRows],
+    () => isMinute ? mkRows : aggregateKline(dayRows, period),
+    [dayRows, period, isMinute, mkRows],
   )
   // 成交量分布: 按可见区间切片统计。分时档(kPeriod='minute')不走这里 ——
   // 它是独立的当日分钟组件, 没有蜡烛可对齐。
@@ -412,13 +471,26 @@ export function StockDailyKChart({
           )}
         </div>
       )}
-      {(kline.isLoading || mkline.isLoading) && <div className="text-sm text-muted py-4">加载中…</div>}
-      {(kline.isError || mkline.isError) && <div className="text-sm text-danger py-2">
-        {mklinePeriod ? '分钟K加载失败' : '日K加载失败'}
+      {(kline.isLoading || mkline.isLoading || deepMinute.isLoading) && <div className="text-sm text-muted py-4">加载中…</div>}
+      {(kline.isError || mkline.isError || deepMinute.isError) && <div className="text-sm text-danger py-2">
+        {isMinute ? '分钟K加载失败' : '日K加载失败'}
       </div>}
       {mklinePeriod && !mkline.isLoading && !mkline.isError && mkline.data && !mkline.data.available && (
         <div className="px-1 py-2 text-xs text-muted">
           分钟K不可用：{mkline.data.reason ?? '未知原因'} —— 不画空图，也不拿日K冒充分钟K。
+        </div>
+      )}
+      {deepMinutePeriod && !deepMinute.isLoading && !deepMinute.isError && deepMinute.data
+        && !deepMinute.data.available && (
+        <div className="px-1 py-2 text-xs text-muted">
+          分钟K不可用：{deepMinute.data.reason ?? '未知原因'} —— 不画空图，也不拿日K冒充分钟K。
+        </div>
+      )}
+      {/* 上游单次上限 700 根 —— 主动说明深度, 别让用户以为看到的是完整历史。 */}
+      {deepMinutePeriod && deepMinute.data?.available && deepMinute.data.truncated && (
+        <div className="px-1 py-1 text-xs text-muted">
+          已取满上游单次上限 {deepMinute.data.max_bars ?? 700} 根（时间为北京时间）
+          —— 分钟K 仅有近日日内深度，不覆盖完整历史。
         </div>
       )}
       {!mklinePeriod && !kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
