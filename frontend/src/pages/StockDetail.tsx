@@ -25,6 +25,7 @@ import {
 } from '@/components/StockDailyKChart'
 import type { ChartPriceLine } from '@/components/EChartsCandlestick'
 import { StockMinuteChart } from '@/components/StockMinuteChart'
+import { HKUSIntradayChart } from '@/components/HKUSIntradayChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
   AnnouncementsPanel,
@@ -1000,17 +1001,13 @@ export function StockDetail() {
           </div>
         )}
 
-        {/* 分时走独立的当日分钟源(腾讯), 日/周/月/年走日K聚合 —— 两条路不混。 */}
+        {/* 分时走独立的当日分钟源: A股腾讯, 港美股由 m1 合成 —— 两条路不混。
+            既不是 A股又没市场后缀的代码(如裸指数名)由组件自己说清原因。 */}
         {kPeriod === 'minute' ? (
           aCode ? (
             <StockMinuteChart code={aCode} height={430} />
           ) : (
-            <div className="flex h-[430px] flex-col items-center justify-center gap-1 px-4 text-center text-xs text-fg-muted">
-              <span>当日分时仅覆盖 A股</span>
-              <span className="text-[11px] opacity-70">
-                {symbol} 不是 A股代码（腾讯分时端点只认沪深北） —— 不拿别的品种的曲线冒充
-              </span>
-            </div>
+            <HKUSIntradayChart symbol={symbol} height={430} />
           )
         ) : (
           <>

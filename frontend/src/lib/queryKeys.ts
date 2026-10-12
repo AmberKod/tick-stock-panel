@@ -130,6 +130,8 @@ export const QK = {
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>
                            ['index-minute', symbol, date] as const,
+  /** 港美股当日分时(MAC-EX 7727 的 m1 合成) —— 与 A股 astockMinute 不同源, 别共用 key。 */
+  hkusIntraday:         (symbol: string) => ['hkus-intraday', symbol] as const,
 
   // Schema
   extDataSchemaAll:     ['ext-data-schema-all'] as const,

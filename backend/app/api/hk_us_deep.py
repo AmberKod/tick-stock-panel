@@ -12,6 +12,7 @@
 - GET  /period/{symbol}?period=week 周期K(week/month/quarter/year)
 - GET  /index/{code}?limit=120      指数日K(HSI/HSCEI/DJI/IXIC/INX)
 - GET  /minute/{symbol}             分钟K —— 通达信扩展市场(MAC-EX 7727), 上限 700 根
+- GET  /intraday/{symbol}           当日分时 —— 由上述 m1 合成(会话/昨收/均价)
 - GET  /adjratio/{symbol}           复权系数 —— 恒不可用, 带原因
 
 契约: 成功 HTTP 200 + available:true; 拿不到**也是 HTTP 200** + available:false
@@ -92,6 +93,19 @@ def _attach(router: APIRouter, market: str) -> None:
         """
         return _respond(lambda: prov.minute_bars(symbol, period=period, limit=limit),
                         required_key="rows", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/intraday/{symbol}")
+    def _intraday(symbol: str, limit: int = 700) -> dict:
+        """当日分时 —— 由 1 分钟 K 合成(最近一个会话)。
+
+        会话未必是"今天"(美股跨零点、且上游可能滞后), 所以响应里带 session_date /
+        as_of / session_complete —— 前端照着标, 不要把昨天的曲线说成今日分时。
+        """
+        if limit < 1 or limit > 700:
+            return {"available": False, "reason": f"bad_limit: {limit} (1..700)",
+                    "source": prov.SOURCE_TDX_EX}
+        return _respond(lambda: prov.intraday(symbol, limit=limit),
+                        required_key="points", source_hint=prov.SOURCE_TDX_EX)
 
     @router.get("/adjratio/{symbol}")
     def _adjratio(symbol: str, mode: str = "qfq", limit: int = 640) -> dict:

@@ -69,6 +69,25 @@ SOURCE_YFINANCE = "yfinance"
 #: 是为了让 capabilities 的 source 字段不必 import 那个模块才能读常量。
 SOURCE_TDX_EX = "tdx-ex"
 
+#: m1 分钟线的成交量单位 → 股数换算系数。
+#:
+#: 2026-10-12 实证(amount/(volume*close) 跨标的验算): 港股恒 ≈ 100, 美股恒 ≈ 1 ——
+#:   00700.HK 100.0 / 00939.HK 99.9 / 01211.HK 100.0 / 09988.HK 100.0 (含换手)
+#:   AAPL.US 1.0 / NVDA.US 1.0 / MSFT.US 1.0
+#: 即港股按"每手 100 股"计数(注意是**固定的 100**, 不是该股的交易单位 —— 00939
+#: 实际一手 1000 股, 算出来仍是 100), 美股就是股。系数写错均价线会错两个数量级,
+#: 所以取实测值而不是猜; 换算出股数后 amount/shares 才是可核对的均价。
+_LOT_SHARES: dict[str, float] = {"HK": 100.0, "US": 1.0}
+
+#: 分时最多回去多少根 m1 —— 与上游单次上限对齐, 再大也只是被截断。
+_MAX_INTRADAY_BARS = tdx_ex_provider.MAX_BARS_PER_REQUEST
+
+#: 一个完整常规会话的时间跨度(分钟)。
+#: 港股 09:30~16:00(含 12:00~13:00 午休, 休市仍在跨度里)与美股开盘→收盘都是
+#: 6.5 小时; 差别只是美股这段跨北京时间零点。判"会话走没走完"用同一条线。
+_REGULAR_SPAN_MIN = 390
+_COMPLETE_TOLERANCE_MIN = 5
+
 
 class CapabilityUnavailableError(RuntimeError):
     """该能力**没有真数据源** —— 与取数失败区分开, API 层据此给不同的 UI 文案。"""
@@ -382,6 +401,182 @@ def minute_bars(symbol: str, period: str = "m30", limit: int = 320) -> dict:
     return payload
 
 
+# ───────────────────────────────────────────── 当日分时
+
+def _session_key(dt_str: str, market: str) -> str:
+    """一根 m1 bar 属于哪个**交易日**(会话) —— 两个市场都直接取日期部分。
+
+    ⚠️ 别做「美股减 12 小时」那种时区换算(第一版就是这么写的, 错的)。上游给的时间戳
+    是**「同一个会话日期 + 北京时间」**: 夏令时会话标 ``D 21:30~D 04:00``(凌晨那段
+    的日期**不翻页**, 仍与当晚段同属一个标签 ``D``), 冬令时同理(``D 22:30~D 05:00``)。
+
+    2026-10-12 实证(AAPL / NVDA / MSFT / TSLA, 逐个与腾讯日K对表): 按日期标签分组后,
+    同一组的「当晚段 21:31~23:59」+「凌晨段 00:00~04:00」加起来正好 390 根 = 6.5 小时
+    一个完整常规会话, 且重排后的首根开盘、末根收盘与当天日K的开/收吻合到分位。
+    改按 -12h 换算会把一个会话切成两天, 昨收跟着错整整一个交易日。
+    """
+    return str(dt_str)[:10]
+
+
+#: 会话内**真实时间顺序**的排序键几何点 —— 见 ``_session_key``。
+#:
+#: 因为凌晨段与当晚段共用同一个日期标签, 按 datetime 字符串升序排出来的顺序是
+#: "凌晨在前、当晚在后", 而真实成交顺序相反(当晚开盘 → 次日凌晨收盘)。20:00 之后的
+#: bar 属该会话的前半段。港股 09:30~16:00 全体落在后半段, 排序不受影响(用了就退化
+#: 成按时间升序)。
+_US_SESSION_PHASE_SPLIT = 20
+
+
+def _session_order_key(dt_str: str) -> tuple[int, str]:
+    """会话内的真实先后: 当晚段(>=20:00)在前, 凌晨段在后, 段内按时间升序。"""
+    stamp = str(dt_str)
+    try:
+        hour = int(stamp[11:13])
+    except (TypeError, ValueError):
+        hour = 0
+    return (0 if hour >= _US_SESSION_PHASE_SPLIT else 1, stamp)
+
+
+def intraday(symbol: str, limit: int = _MAX_INTRADAY_BARS) -> dict:
+    """当日(最近一段)分时 —— **由真实 1 分钟 K 合成**, 不是另一份数据源。
+
+    ⚠️ 为什么这里重新合成, 而不是直接转发腾讯 ``minute/query``:
+       ``app/api/kline.py::get_minute`` 那条路对港股只给价格线, 成交量是**当日累计值**
+       且 amount 恒为 0, 昨日收盘也不返回 —— 拿来画分时要么差分还原(多一层猜),
+       要么就得再去别处借昨收。而 m1 那一份本身就带每根的量额, 自洽可核对。
+
+    三件必须做对的事:
+
+    1. **会话切分与排序**: 上游只给"最近 N 根", 而且时间戳是「会话日期 + 北京时间」
+       (见 ``_session_key`` / ``_session_order_key``) —— 直接按时间排会把美股会话的
+       凌晨段摆到当晚段前面。
+    2. **昨日收盘**: 优先取窗口内**上一个会话的最后一根收盘**(同源真数据, 与图上
+       价格同一口径); 窗口里只有一个会话时回退到落盘真日K, 并把它的 source 写进
+       ``prev_close_from`` —— 出处不明的昨收会把涨跌幅整条线带偏。
+    3. **量与均价**: 成交量按市场换回**股数**(见 ``_LOT_SHARES``), 均价 =
+       累计成交额/累计股数(可核对: 不换单位会错 100 倍)。
+
+    会话没走完就如实标 ``session_complete:false`` + ``as_of``, 不补齐、不外推。
+    """
+    market, _ = _split(symbol)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = _MAX_INTRADAY_BARS
+    limit = max(1, min(limit, _MAX_INTRADAY_BARS))
+
+    payload = minute_bars(symbol, period="m1", limit=limit)
+    rows = payload.get("rows") or []
+    if not rows:  # minute_bars 正常情况下已抛空, 这里是双保险
+        raise ValueError(f"通达信扩展市场无该标的分钟数据: {symbol} m1")
+
+    keys = [_session_key(r["datetime"], market) for r in rows]
+    session_date = keys[-1]
+    # 美股会话的两段共用一个日期标签, 必须按真实成交顺序重排, 否则图会从"凌晨 4 点"
+    # 画起、昨晚那半截跑到后面去。
+    session_rows = sorted((r for r, key in zip(rows, keys, strict=True) if key == session_date),
+                          key=lambda r: _session_order_key(r["datetime"]))
+
+    # ── 昨收: 同源 > 落盘日K; 两个都拿不到就 fail-closed(宁可不画, 不猜一个值) ──
+    prior_keys = [k for k in dict.fromkeys(keys) if k < session_date]
+    daily_source = ""
+    if prior_keys:
+        prior_rows = sorted((r for r, key in zip(rows, keys, strict=True) if key == prior_keys[-1]),
+                            key=lambda r: _session_order_key(r["datetime"]))
+        prev_close = _f(prior_rows[-1]["close"])
+        prev_close_from = "prev_session_close"
+    else:
+        daily, daily_source = _daily_rows(symbol, "day", 40)
+        earlier = [r for r in daily if str(r["date"]) < session_date]
+        prev_close = _f(earlier[-1]["close"]) if earlier else None
+        prev_close_from = f"daily:{daily_source}"
+    if not prev_close:
+        raise ValueError(
+            f"{symbol} {session_date} 取不到昨收: "
+            f"{'日K分区没有更早的交易日' if not prior_keys else '上一会话收盘为空'}"
+        )
+
+    lot = _LOT_SHARES[market]
+    points: list[dict] = []
+    cum_shares = 0.0
+    cum_amount = 0.0
+    for row in session_rows:
+        close = _f(row.get("close"))
+        if close is None:
+            continue
+        shares = float(row.get("volume") or 0.0) * lot
+        amount = float(row.get("amount") or 0.0)
+        cum_shares += shares
+        cum_amount += amount
+        points.append({
+            "dt": str(row["datetime"]),
+            "t": str(row["datetime"])[11:16],
+            "price": close,
+            "avg": round(cum_amount / cum_shares, 4) if cum_shares > 0 else close,
+            "pct": round((close - prev_close) / prev_close * 100, 4),
+            "volume": round(shares, 2),
+            "amount": round(amount, 2),
+        })
+    if not points:
+        raise ValueError(f"{symbol} {session_date} 会话内无有效价格点")
+
+    highs = [r["high"] for r in session_rows if _f(r.get("high")) is not None]
+    lows = [r["low"] for r in session_rows if _f(r.get("low")) is not None]
+    first_open = _f(session_rows[0].get("open"))
+    span_minutes = _span_minutes(session_rows[0]["datetime"], session_rows[-1]["datetime"], market)
+    complete = span_minutes >= _REGULAR_SPAN_MIN - _COMPLETE_TOLERANCE_MIN
+
+    source = SOURCE_TDX_EX if prev_close_from == "prev_session_close" \
+        else f"{SOURCE_TDX_EX}+{daily_source}"
+    return {
+        "source": source,
+        "market": market,
+        "symbol": str(symbol).upper(),
+        "session_date": session_date,
+        "timezone": payload.get("timezone", "Asia/Shanghai"),
+        "prev_close": prev_close,
+        "prev_close_from": prev_close_from,
+        "open": first_open,
+        "high": max(highs) if highs else None,
+        "low": min(lows) if lows else None,
+        "last": points[-1]["price"],
+        "pct": points[-1]["pct"],
+        "volume": round(cum_shares, 2),
+        "amount": round(cum_amount, 2),
+        "volume_unit": "share",
+        "as_of": session_rows[-1]["datetime"],
+        "bars": len(points),
+        "session_complete": complete,
+        "covered_minutes": span_minutes,
+        "expected_minutes": _REGULAR_SPAN_MIN,
+        "cached": bool(payload.get("cached")),
+        "note": None if complete else
+                (f"该会话截至 {session_rows[-1]['datetime']} 只走了 "
+                 f"{span_minutes}/{_REGULAR_SPAN_MIN} 分钟(北京时间), 未收盘 —— 不是完整分时"),
+        "points": points,
+    }
+
+
+def _session_clock_minutes(dt_str: str, market: str) -> int:
+    """会话内的单调分钟刻度 —— 美股凌晨段按**次日**计(加 24h)。
+
+    不加这一步, 美股会话的首根(当晚 21:3x)与末根(凌晨 04:00)相减会得**负数**,
+    跨度判据随之失效(明明是完整会话却报"未收盘")。
+    """
+    from datetime import datetime
+
+    moment = datetime.strptime(str(dt_str)[:19], "%Y-%m-%d %H:%M:%S")
+    minutes = moment.hour * 60 + moment.minute
+    if market == "US" and moment.hour < _US_SESSION_PHASE_SPLIT:
+        minutes += 24 * 60
+    return minutes
+
+
+def _span_minutes(start: str, end: str, market: str) -> int:
+    """首末两根之间的分钟跨度(含终点那根)。"""
+    return _session_clock_minutes(end, market) - _session_clock_minutes(start, market) + 1
+
+
 def adjust_ratios(symbol: str, mode: str = "qfq", limit: int = 640) -> dict:
     """复权系数 —— 港美股**均无真源**。
 
@@ -416,6 +611,10 @@ def capabilities(market: str) -> dict:
                         "note": "由真实日K确定性聚合, 非交易所原生周期K"}
     items["minute"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
                        "note": tdx_ex_provider.capabilities_note()}
+    items["intraday"] = {"available": True, "source": SOURCE_TDX_EX,
+                         "derivation": "composed_from_m1",
+                         "note": "当日分时由同一份 1 分钟K 合成(会话切分/昨收/均价都在后端算好), "
+                                 f"窗口上限 {_MAX_INTRADAY_BARS} 根"}
     items["adjratio"] = {"available": False, "source": None, "reason": str(adjust_unavailable_reason())}
     items["index"] = {"available": True, "source": SOURCE_TENCENT, "derivation": "native"}
     return {"market": m, "items": items}

@@ -286,6 +286,172 @@ def test_capabilities_bad_market():
         prov.capabilities("JP")
 
 
+# ───────────────────────────────────────────── 当日分时(由 m1 合成)
+
+def _mk_rows(start: str, count: int, *, base: float = 10.0, vol: float = 10.0,
+             lot: float = 100.0, minute_step: int = 1):
+    """生成一串自洽的分钟 K: amount = 股数 × 价, 便于核对均价。"""
+    from datetime import datetime, timedelta
+
+    t0 = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
+    rows = []
+    for i in range(count):
+        price = round(base + i * 0.01, 4)
+        shares = vol * lot
+        rows.append({
+            "datetime": (t0 + timedelta(minutes=i * minute_step)).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": round(price - 0.01, 4), "high": round(price + 0.02, 4),
+            "low": round(price - 0.02, 4), "close": price,
+            "volume": vol, "amount": round(shares * price, 4),
+        })
+    return rows
+
+
+def test_intraday_takes_last_session_only(monkeypatch):
+    """窗口里混着上一个会话的部分 K —— 只能画最后一个会话, 不能连着画线。"""
+    prior = _mk_rows("2026-10-09 09:30:00", 3, base=9.0)          # 09:30~09:32
+    today = _mk_rows("2026-10-12 09:30:00", 4, base=10.0)         # 09:30~09:33
+    _patch_minute(monkeypatch, prior + today)
+    d = prov.intraday("00700.HK")
+    assert d["session_date"] == "2026-10-12"
+    assert d["bars"] == 4 and next(p["t"] for p in d["points"]) == "09:30"
+    assert d["prev_close"] == 9.02                                 # 上一会话最后一根收盘
+    assert d["prev_close_from"] == "prev_session_close"
+    assert d["source"] == "tdx-ex"
+    assert d["last"] == 10.03
+
+
+def _mk_us_session(day: str, *, evening: int = 149, morning: int = 241, base: float = 100.0,
+                   evening_start: str = "21:30:00"):
+    """模拟上游的**美股**会话形状(2026-10-12 实测):
+
+    同一日期标签下两段 —— 当晚 ``21:30~23:59`` + 次日凌晨 ``00:00~04:00``,
+    ``datetime`` 升序时凌晨段在前。别按"-12 小时"去算交易日, 也别直接当跨两天切。
+    """
+    from datetime import datetime, timedelta
+
+    rows: list[dict] = []
+    starts = [f"{day} 00:00:00", f"{day} {evening_start}"]
+    counts = [morning, evening]
+    price = base
+    for start, count in zip(starts, counts, strict=True):
+        for i in range(count):
+            stamp = (datetime.strptime(start, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=i))
+            rows.append({
+                "datetime": stamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": price, "high": price + 0.02, "low": price - 0.02,
+                "close": round(price + 0.001, 4), "volume": 100.0,
+                "amount": round(100.0 * price, 4),
+            })
+            price += 0.01
+    # 上游返回就是 datetime 升序 —— 凌晨段在前, 当晚段在后
+    return sorted(rows, key=lambda r: r["datetime"])
+
+
+def test_intraday_us_session_keeps_midnight_together(monkeypatch):
+    """同一个日期标签下的当晚段 + 凌晨段 = **一个**完整会话(390 根 = 6.5 小时)。"""
+    _patch_minute(monkeypatch, _mk_us_session("2026-10-09"))
+    d = prov.intraday("AAPL.US")
+    assert d["session_date"] == "2026-10-09"
+    assert d["points"][0]["t"] == "21:30"            # 真实开盘在前
+    assert d["points"][-1]["t"] == "04:00"           # 凌晨收盘在后
+    assert d["bars"] == 390
+    assert d["session_complete"] is True             # 不再被误判成"盘中半截"
+    assert d["note"] is None
+
+
+def test_intraday_us_prev_close_is_previous_session_close(monkeypatch):
+    """昨收 = 上一会话**最后一根**(即它凌晨 04:00 那根), 不是按时间排的最后一根。"""
+    prior = _mk_us_session("2026-10-08", evening=69, base=90.0)
+    today = _mk_us_session("2026-10-09", evening=149, morning=241, base=100.0)
+    _patch_minute(monkeypatch, prior + today)
+    d = prov.intraday("AAPL.US")
+    last_prior = prior[-1]["close"]                  # 10-08 当晚段最后一根(按时间排的末根)
+    wanted = max((r for r in prior if r["datetime"][:10] == "2026-10-08"
+                  and r["datetime"][11:13] < "20"), key=lambda r: r["datetime"])["close"]
+    assert d["prev_close"] == wanted                 # 凌晨段那根才是真收盘
+    assert d["prev_close"] != last_prior
+    assert d["prev_close_from"] == "prev_session_close"
+
+
+def test_intraday_winter_session_also_single_session(monkeypatch):
+    """冬令时会话(北京时间 22:30~次日05:00)同样是一个会话 —— 最容易判错的一支。"""
+    rows = _mk_us_session("2026-01-08", evening=89, morning=301, evening_start="22:30:00")
+    _patch_minute(monkeypatch, rows)
+    d = prov.intraday("AAPL.US")
+    assert d["session_date"] == "2026-01-08"
+    assert d["points"][0]["t"] == "22:30" and d["points"][-1]["t"] == "05:00"
+    assert d["bars"] == 390 and d["session_complete"] is True
+
+
+def test_intraday_hk_volume_is_converted_to_shares(monkeypatch):
+    """港股成交量单位是"每手100股" —— 不换算, 均价会错两个数量级。"""
+    _patch_minute(monkeypatch, _mk_rows("2026-10-12 09:30:00", 2, vol=10.0))
+    d = prov.intraday("00700.HK")
+    first = d["points"][0]
+    assert first["volume"] == 1000.0                  # 10 手 → 1000 股
+    assert d["volume_unit"] == "share"
+    # 均价 = 累计额 / 累计股数, 这里每根价格不同, 均价应落在两根之间
+    assert first["avg"] == pytest.approx(first["price"], abs=0.02)
+
+
+def test_intraday_us_volume_is_already_shares(monkeypatch):
+    rows = _mk_rows("2026-10-09 21:30:00", 2, vol=100.0, lot=1.0)
+    _patch_minute(monkeypatch, rows)
+    d = prov.intraday("AAPL.US")
+    assert d["points"][0]["volume"] == 100.0
+
+
+def test_intraday_prev_close_falls_back_to_local_daily(monkeypatch):
+    """窗口里只有一个会话(没有上一会话可参照) → 借落盘真日K, 并把它的 source 带上。"""
+    monkeypatch.setattr(prov, "_daily_rows", lambda s, p, lim: (
+        [{"date": "2026-10-08", "open": 1.0, "high": 1.0, "low": 1.0, "close": 424.8,
+          "volume": 1.0, "amount": 1.0},
+         {"date": "2026-10-09", "open": 1.0, "high": 1.0, "low": 1.0, "close": 999.0,
+          "volume": 1.0, "amount": 1.0}], "sina_hk_daily"))
+    _patch_minute(monkeypatch, _mk_rows("2026-10-09 09:30:00", 3))
+    d = prov.intraday("00700.HK")
+    assert d["session_date"] == "2026-10-09"
+    assert d["prev_close"] == 424.8                   # 取**更早**那天的收盘, 不是当天
+    assert d["prev_close_from"] == "daily:sina_hk_daily"
+    assert d["source"] == "tdx-ex+sina_hk_daily"      # 组合 source 必须在白名单里
+    from app.services.source_gate import is_real
+    assert is_real(d) is True
+
+
+def test_intraday_no_prev_close_is_fail_closed(monkeypatch):
+    """拿不到昨收就该明确失败 —— 昨收错了, 整条涨跌幅都是假的。"""
+    monkeypatch.setattr(prov, "_daily_rows", lambda s, p, lim: ([], "sina_hk_daily"))
+    _patch_minute(monkeypatch, _mk_rows("2026-10-09 09:30:00", 3))
+    with pytest.raises(ValueError, match="取不到昨收"):
+        prov.intraday("00700.HK")
+
+
+def test_intraday_incomplete_session_is_marked(monkeypatch):
+    """盘中(未收盘)必须标出来: 不是"当天只有这么多分钟"。"""
+    _patch_minute(monkeypatch, _mk_rows("2026-10-12 09:30:00", 120))   # 只到 11:29
+    d = prov.intraday("00700.HK")
+    assert d["session_complete"] is False
+    assert d["covered_minutes"] == 120 and d["expected_minutes"] == 390
+    assert d["as_of"] == "2026-10-12 11:29:00"
+    assert "未收盘" in (d["note"] or "")
+
+
+def test_intraday_empty_rows_raises(monkeypatch):
+    _patch_minute(monkeypatch, [])
+    with pytest.raises(ValueError, match="无该标的分钟数据"):
+        prov.intraday("00700.HK")
+
+
+def test_intraday_pct_uses_prev_close(monkeypatch):
+    prior = _mk_rows("2026-10-09 09:30:00", 1, base=100.0)   # 收 100.00
+    today = _mk_rows("2026-10-12 09:30:00", 1, base=101.0)   # 收 101.00
+    _patch_minute(monkeypatch, prior + today)
+    d = prov.intraday("00700.HK")
+    assert d["pct"] == pytest.approx(1.0)
+    assert d["points"][0]["pct"] == pytest.approx(1.0)
+
+
 # ───────────────────────────────────────────── API 层
 
 def test_api_hk_period_ok(client, monkeypatch):
@@ -361,6 +527,57 @@ def test_api_index_ok(client, monkeypatch):
 def test_api_capabilities_endpoint(client):
     body = client.get("/api/us/deep/capabilities").json()
     assert body["market"] == "US" and "minute" in body["items"]
+
+
+def test_api_intraday_ok(client, monkeypatch):
+    prior = _mk_rows("2026-10-09 09:30:00", 2, base=9.0)
+    today = _mk_rows("2026-10-12 09:30:00", 3, base=10.0)
+    _patch_minute(monkeypatch, prior + today)
+    body = client.get("/api/hk/deep/intraday/00700.HK").json()
+    assert body["available"] is True and body["source"] == "tdx-ex"
+    assert body["session_date"] == "2026-10-12" and len(body["points"]) == 3
+    assert body["prev_close_from"] == "prev_session_close"
+
+
+def test_api_intraday_us_ok(client, monkeypatch):
+    _patch_minute(monkeypatch, _mk_us_session("2026-10-09"))
+    body = client.get("/api/us/deep/intraday/AAPL.US").json()
+    assert body["available"] is True and body["market"] == "US"
+    assert body["session_complete"] is True
+
+
+def test_api_intraday_failure_is_http200_with_reason(client, monkeypatch):
+    _patch_minute(monkeypatch, [])
+    resp = client.get("/api/us/deep/intraday/AAPL.US")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False and "provider_error" in body["reason"]
+
+
+def test_api_intraday_bad_limit(client):
+    body = client.get("/api/hk/deep/intraday/00700.HK?limit=0").json()
+    assert body["available"] is False and "bad_limit" in body["reason"]
+
+
+def test_api_intraday_rejects_unregistered_source(client, monkeypatch):
+    """provider 谎报 source 时闸门必须拦 —— 分时是新端点, 同样不许例外。
+
+    为什么直接替换 provider 而不是篡改上游 payload: intraday 会**自己重算**
+    source 字段, 上游 minute_bars 里改成假源名传不到响应 —— 必须在合成之后那层动手。
+    """
+    monkeypatch.setattr(
+        prov, "intraday",
+        lambda s, limit=700: {"source": "fail-http-500", "points": [{"t": "09:30", "price": 1}]})
+    body = client.get("/api/us/deep/intraday/AAPL.US").json()
+    assert body["available"] is False and "source_gate_rejected" in body["reason"]
+
+
+def test_capabilities_includes_intraday():
+    for market in ("HK", "US"):
+        item = prov.capabilities(market)["items"]["intraday"]
+        assert item["available"] is True
+        assert item["source"] == "tdx-ex"
+        assert item["derivation"] == "composed_from_m1"
 
 
 def test_api_source_gate_blocks_fake_source(client, monkeypatch):
