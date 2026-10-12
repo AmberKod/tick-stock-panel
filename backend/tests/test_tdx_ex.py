@@ -901,3 +901,51 @@ def test_multiday_cache_hit(monkeypatch):
     n_after_first = len(calls)
     assert prov.multi_day_ticks("00700.HK", days=3)["cached"] is True
     assert len(calls) == n_after_first    # 第二次不再打上游
+
+
+def test_minute_range_skips_all_zero_placeholder_pack(monkeypatch):
+    """回归: 上游对"还没发生的日期"回一整包 **price=0 的填充数据**(不是空包)。
+
+    实测北京 2026-10-13 00:19 请求 date=20261013: 港股 330 根 0.0、美股 390 根
+    0.0。只按"非空"判断会把它当成交易日 → 图上多一条 0 元线, 多日分时还会因为
+    "日历里没有这天"被守卫①整体拦掉。必须按价格有效性过滤。
+    """
+    state = {"n": 0}
+
+    def fake(host, cmd_factory):
+        cmd_factory()
+        state["n"] += 1
+        if state["n"] == 1:                      # 最新一个候选日 = 未来 → 全 0 包
+            return [_FakeMinuteBar(9, 30 + i, price=0.0, avg=0.0, volume=0)
+                    for i in range(330)]
+        return [_FakeMinuteBar(9, 30, price=416.8), _FakeMinuteBar(15, 59, price=424.8)]
+
+    monkeypatch.setattr(prov, "_exec_once", fake)
+    body = prov.minute_range("00700.HK", days=2)
+    assert [d["date"] for d in body["days"]]        # 有数据
+    assert all(any((p["price"] or 0) > 0 for p in d["bars"]) for d in body["days"])
+
+
+def test_multiday_ignores_all_zero_placeholder_pack(monkeypatch):
+    """上面那条 bug 的连锁: 填充包进了多日分时 → 守卫①会把整个面板拦掉。
+
+    只在"最新一个候选日"上插一次全 0 包, 其余照旧走 `_md_patch` 的桩 ——
+    这样验证的是"过滤掉了", 而不是"恰好两边都改成了同一个错值"。
+    """
+    _md_patch(monkeypatch, n_days=3)
+    upstream = prov._exec_once          # _md_patch 打好的桩
+    state = {"n": 0}
+
+    def fake_exec(host, cmd_factory):
+        state["n"] += 1
+        if state["n"] == 1:
+            cmd_factory()
+            return [_FakeMinuteBar(9, 30 + i, price=0.0, avg=0.0, volume=0)
+                    for i in range(330)]
+        return upstream(host, cmd_factory)
+
+    monkeypatch.setattr(prov, "_exec_once", fake_exec)
+    # 没被守卫①整体拦掉(旧行为会抛 TdxExUnavailableError), 且下发的都是真价格
+    body = prov.multi_day_ticks("00700.HK", days=3)
+    assert body["days"]
+    assert all((p["price"] or 0) > 0 for d in body["days"] for p in d["points"])

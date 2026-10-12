@@ -464,6 +464,12 @@ def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
         bars = _exec(lambda y=ymd: GetExHistoryMinuteTimeDataCmd(_market_code(market), code, y))
         if not bars:
             continue    # 非交易日: 上游给空包, 不是故障
+        if not any((_round(getattr(b, "price", None), 4) or 0) > 0 for b in bars):
+            # 🔴 上游对"还没发生的日期"不回空包, 而是回**一整包价格为 0 的填充数据**
+            # (实测北京 10-13 00:19 请求 10-13: HK 330 根 0.0 / US 390 根 0.0)。
+            # 只判"非空"会把它当成交易日, 于是图上出现一条 0 元线、多日分时还会
+            # 因为"日历里没这天"被守卫①拦掉。必须按价格有效性过滤。
+            continue
         collected.append({
             "date": f"{ymd // 10000:04d}-{(ymd // 100) % 100:02d}-{ymd % 100:02d}",
             "bars": _rows_from_minute_bars(bars, ymd, step),
