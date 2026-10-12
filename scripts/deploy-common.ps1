@@ -832,6 +832,9 @@ function Test-WriteInProgress {
     }
 
     # --- 写入证据 2: data 目录新鲜度 ---
+    # ⚠️ *.log **不算**写入证据: 服务在运行就会持续写 backend.log, 把它当证据
+    # 会让闸门恒命中 —— 实测 2026-10-12 无活动任务时仍被拦(active_id=null)。
+    # 日志只作为上下文信息展示; 真正的写入证据是 *.lock 与一级子目录的更新时间。
     $dataPath = Join-Path $ProjectRoot 'data'
     if (Test-Path -LiteralPath $dataPath) {
         $now = Get-Date
@@ -839,7 +842,18 @@ function Test-WriteInProgress {
 
         $logFiles = Get-ChildItem -LiteralPath $dataPath -Filter '*.log' -File -ErrorAction SilentlyContinue
         if ($null -ne $logFiles) {
-            $freshTargets += @($logFiles)
+            $newestLog = $null
+            $newestLogName = ''
+            foreach ($f in @($logFiles)) {
+                if ($null -eq $newestLog -or $f.LastWriteTime -gt $newestLog) {
+                    $newestLog = $f.LastWriteTime
+                    $newestLogName = $f.Name
+                }
+            }
+            if ($null -ne $newestLog) {
+                $logAge = [int]($now - $newestLog).TotalSeconds
+                $null = $contextSignals.Add(('日志文件 ' + $newestLogName + ' ' + $logAge + ' 秒前有更新(服务在跑属正常, 不作为拦截依据)'))
+            }
         }
         $lockFiles = Get-ChildItem -LiteralPath $dataPath -Filter '*.lock' -File -ErrorAction SilentlyContinue
         if ($null -ne $lockFiles) {
