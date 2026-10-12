@@ -13,6 +13,12 @@
 - GET  /index/{code}?limit=120      指数日K(HSI/HSCEI/DJI/IXIC/INX)
 - GET  /minute/{symbol}             分钟K —— 通达信扩展市场(MAC-EX 7727), 上限 700 根
 - GET  /intraday/{symbol}           当日分时 —— 由上述 m1 合成(会话/昨收/均价)
+- GET  /snapshot/{symbol}           实时快照 —— MAC-EX: 昨收/均价/换手率/内外盘
+- GET  /orderbook/{symbol}          五档盘口 —— MAC-EX: 真五档(港股无档时显式标注)
+- GET  /boards/{symbol}             所属板块 —— MAC-EX: 行业/概念归类 + 板块涨跌
+- GET  /board/{code}/members        板块成分股 —— 涨跌/量比/市值/PE/股息率
+- GET  /boardlist?kind=US_HY        板块概念榜 —— 板块指数 + 领涨股
+- GET  /multiday/{symbol}?days=5     多日分时 —— 仅港股(美股日期不自洽, 不给)
 - GET  /adjratio/{symbol}           复权系数 —— 恒不可用, 带原因
 
 契约: 成功 HTTP 200 + available:true; 拿不到**也是 HTTP 200** + available:false
@@ -106,6 +112,70 @@ def _attach(router: APIRouter, market: str) -> None:
                     "source": prov.SOURCE_TDX_EX}
         return _respond(lambda: prov.intraday(symbol, limit=limit),
                         required_key="points", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/snapshot/{symbol}")
+    def _snapshot(symbol: str) -> dict:
+        """实时快照(MAC-EX) —— 中文名 / **上游直给昨收** / 均价 / 换手率 / 内外盘。
+
+        与 /intraday 的区别: 那条是用 m1 反推昨收并合成曲线, 这条是上游一次给齐的
+        位行情。turnover_pct / change / pct 是推导值, payload 里用 derived 标了。
+        """
+        return _respond(lambda: prov.snapshot(symbol),
+                        required_key="last", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/orderbook/{symbol}")
+    def _orderbook(symbol: str) -> dict:
+        """五档盘口(MAC-EX)。
+
+        港股常见情况是买卖价/量全 0(上游不返回), 此时 available 仍为 true —— 总量/
+        内外盘是真数据 —— 但 depth_available=false + note, 前端据此写"上游不返回"
+        而不是画一排 0。
+        """
+        return _respond(lambda: prov.orderbook(symbol),
+                        required_key="bids", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/boards/{symbol}")
+    def _boards(symbol: str) -> dict:
+        """所属板块(MAC-EX) —— 该票归类到哪些行业/概念板块, 各板块今日涨跌。
+
+        实测 00700 有 23 条、AAPL 有 17 条(如"港股-网络游戏" / "美股-科技巨头")。
+        板块自身带 close/pre_close, 涨跌在后端算好 —— pct 是推导值。
+        """
+        return _respond(lambda: prov.belong_boards(symbol),
+                        required_key="boards", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/board/{board_code}/members")
+    def _board_members(board_code: str, limit: int = 50, start: int = 0) -> dict:
+        """板块成分股(MAC-EX) —— 涨跌幅 / 量比 / 市值 / 动态PE / 股息率 / 股本。
+
+        board_code 形如 ``US0026`` / ``HK0211``(来自 /boards 或 /boardlist)。单位已核:
+        市值=绝对金额、股息率=百分数、总股本=股(由上游万股换算)。
+        """
+        return _respond(lambda: prov.board_members(board_code, limit=limit, start=start),
+                        required_key="members", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/boardlist")
+    def _boardlist(kind: str = "US_HY", limit: int = 50) -> dict:
+        """板块/概念榜(MAC-EX) —— 每个板块的指数价、涨跌与**板块内领涨股**。
+
+        kind ∈ US_ALL/US_HY/US_GN/HK_ALL/HK_HY/HK_GN; limit 1..150。按涨跌降序。
+        """
+        return _respond(lambda: prov.board_list(kind=kind, limit=limit),
+                        required_key="boards", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/multiday/{symbol}")
+    def _multiday(symbol: str, days: int = 5) -> dict:
+        """多日分时(MAC-EX) —— 仅港股。
+
+        美股这里是**故意不给**的: 上游那几块数据不是"一天一块", 且日期标签与内容
+        不对应(实测: 港股 day_i 收盘 == 次日昨收, 美股这条链对不上)。要给就只能由
+        我们指定日期 = 编数据, 所以 fail-closed 并说明原因。
+        """
+        if days < 1 or days > 5:
+            return {"available": False, "reason": f"bad_days: {days} (1..5)",
+                    "source": prov.SOURCE_TDX_EX}
+        return _respond(lambda: prov.multiday(symbol, days=days),
+                        required_key="days", source_hint=prov.SOURCE_TDX_EX)
 
     @router.get("/adjratio/{symbol}")
     def _adjratio(symbol: str, mode: str = "qfq", limit: int = 640) -> dict:

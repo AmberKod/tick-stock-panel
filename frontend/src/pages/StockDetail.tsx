@@ -26,6 +26,9 @@ import {
 import type { ChartPriceLine } from '@/components/EChartsCandlestick'
 import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { HKUSIntradayChart } from '@/components/HKUSIntradayChart'
+import { HKUSQuoteBox } from '@/components/HKUSQuoteBox'
+import { HKUSBoardsPanel } from '@/components/HKUSBoardsPanel'
+import { HKMultiDayChart } from '@/components/HKMultiDayChart'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
   AnnouncementsPanel,
@@ -658,6 +661,9 @@ export function StockDetail() {
 
       {/* 右列 —— 用 order 保证窄屏时仍排在图表之后(DOM 顺序不改, 只改视觉序) */}
       <aside className="order-2 min-w-0 space-y-3">
+        {/* 港美股: MAC-EX 实时快照 + 真五档(A股不带后缀, 组件内部自行不渲染) */}
+        <HKUSQuoteBox symbol={symbol} />
+
         {/* ── 行情条 ── */}
         <QuoteStrip kline={kline} quote={quote} />
 
@@ -1131,10 +1137,19 @@ export function StockDetail() {
           fail-closed 是对的, 但把五个"不可用"面板摆上去观感很差 —— 非 A股
           直接整块不渲染, 并说明原因, 而不是让用户看到一排空面板。 */}
       {!isAStock ? (
-        <div className="rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">
-          深度数据（资金流 / 龙虎榜 / 研报 / 公告 / 财务摘要）当前仅覆盖 A股 ——
-          非 A股代码不显示这五块，也不会用占位内容冒充。
-        </div>
+        <>
+          {/* 港美股: 所属板块 + 同业联动(MAC-EX 真数据) */}
+          <HKUSBoardsPanel symbol={symbol} className="mt-2" />
+          {/* 多日分时: 上游按交易日给且日期自洽的那一支(当前仅港股自证通过) */}
+          <HKMultiDayChart symbol={symbol} className="mt-2" />
+          <div className="mt-2 rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">
+            深度数据（资金流 / 龙虎榜 / 研报 / 公告 / 财务摘要）当前仅覆盖 A股 ——
+            非 A股代码不显示这五块，也不会用占位内容冒充。
+            {(symbol.trim().toUpperCase().endsWith('.HK') || symbol.trim().toUpperCase().endsWith('.US')) && (
+              <> 港股/美股的实时快照与五档盘口在上面右侧（通达信 MAC-EX 真数据）。</>
+            )}
+          </div>
+        </>
       ) : (
         <div className="rounded-lg border border-border bg-surface p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">

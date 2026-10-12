@@ -58,6 +58,8 @@ const MarketModulePage = lazy(() => import('./pages/MarketModulePage').then(m =>
 
 // ===== A股个股详情整页 (九章式研究主页; 弹窗降级为快速预览) =====
 const StockDetail = lazy(() => import('./pages/StockDetail').then(m => ({ default: m.StockDetail })))
+// 港美股板块/概念榜(MAC-EX): 与个股详情页共用同一套成分股端点
+const HKUSBoards = lazy(() => import('./pages/HKUSBoards').then(m => ({ default: m.HKUSBoardsPage })))
 // 多股对比: 归一化走势叠加 + 区间指标 + 相关性
 const Compare = lazy(() => import('./pages/Compare').then(m => ({ default: m.Compare })))
 // 跨市场总览: 一屏并置 A股/港股/美股(三市场态势 + 关键量)
@@ -182,6 +184,7 @@ export const router = createBrowserRouter([
       { path: 'us/:symbol', element: <USStockAnalysis /> },
       // A股个股详情整页: /stock/300308
       { path: 'stock/:symbol', element: <StockDetail /> },
+      { path: 'hkus-boards', element: <HKUSBoards /> },
       // 多股对比: /compare?symbols=600519.SH,000651.SZ&days=250
       { path: 'compare', element: <Compare /> },
       // 港美股菜单对应的统一页面位置

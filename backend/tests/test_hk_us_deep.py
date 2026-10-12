@@ -585,3 +585,198 @@ def test_api_source_gate_blocks_fake_source(client, monkeypatch):
     monkeypatch.setattr(prov, "period_bars", lambda *a, **k: {"source": "us_demo", "rows": []})
     body = client.get("/api/us/deep/period/AAPL.US?period=week").json()
     assert body["available"] is False and "source_gate_rejected" in body["reason"]
+
+
+# ───────────────────────────────────────────── 快照 / 五档盘口 API
+
+
+def _patch_snapshot(monkeypatch, *, body=None):
+    from app.data_providers import tdx_ex_provider
+
+    def snapshot(symbol):
+        base = {"source": "tdx-ex", "market": "HK", "symbol": symbol, "name": "腾讯控股",
+                "prev_close": 424.8, "open": 428.4, "high": 430.4, "low": 423.4,
+                "last": 425.8, "avg_price": 427.05, "volume": 14011738.0,
+                "amount": 5983558144.0, "turnover_pct": 0.01541,
+                "inside_volume": 7005907.0, "outside_volume": 7005831.0,
+                "activity": 23033.0, "change": 1.0, "pct": 0.2354,
+                "volume_unit": "share", "timezone": "Asia/Shanghai",
+                "server_time": "2026-10-12 16:08:24",
+                "derived": ["turnover_pct", "change", "pct"], "cached": False}
+        return {**base, **(body or {})}
+
+    def orderbook(symbol):
+        mk = {"source": "tdx-ex", "market": "US", "symbol": symbol, "prev_close": 336.64,
+              "last": 336.68, "bid_levels": 1, "ask_levels": 1, "depth_available": True,
+              "volume_unit": "share", "current_volume": 14.0, "total_volume": 116649.0,
+              "inside_volume": 55615.0, "outside_volume": 61034.0,
+              "timezone": "Asia/Shanghai", "note": None, "cached": False}
+        def level(p: float, v: float) -> dict:
+            return {"price": p, "volume": v}
+
+        mk["bids"] = [level(336.67, 6.0)] + [level(0.0, 0.0)] * 4
+        mk["asks"] = [level(336.84, 6.0)] + [level(0.0, 0.0)] * 4
+        return mk
+
+    monkeypatch.setattr(tdx_ex_provider, "snapshot", snapshot)
+    monkeypatch.setattr(tdx_ex_provider, "orderbook", orderbook)
+
+
+def test_api_snapshot_ok(client, monkeypatch):
+    _patch_snapshot(monkeypatch)
+    body = client.get("/api/hk/deep/snapshot/00700.HK").json()
+    assert body["available"] is True
+    assert body["prev_close"] == 424.8 and body["last"] == 425.8
+    assert body["source"] == "tdx-ex"
+
+
+def test_api_snapshot_missing_last_key_is_fail_closed(client, monkeypatch):
+    """last 缺失(该标的拿不到价)必须判不可用, 不能 available:true 带着 None。"""
+    from app.data_providers import tdx_ex_provider
+
+    def snapshot(symbol):
+        return {"source": "tdx-ex", "prev_close": 424.8}
+
+    monkeypatch.setattr(tdx_ex_provider, "snapshot", snapshot)
+    body = client.get("/api/hk/deep/snapshot/00700.HK").json()
+    assert body["available"] is False and "last" in body["reason"]
+
+
+def test_api_snapshot_upstream_node_down(client, monkeypatch):
+    """节点全挂 = 可重试的故障, 不是能力缺失: reason 走 provider_error。"""
+    from app.data_providers import tdx_ex_provider
+    from app.data_providers.tdx_ex_provider import TdxExUnavailableError
+
+    def snapshot(symbol):
+        raise TdxExUnavailableError("全部 2 个节点均失败: timeout")
+
+    monkeypatch.setattr(tdx_ex_provider, "snapshot", snapshot)
+    body = client.get("/api/hk/deep/snapshot/00700.HK").json()
+    assert body["available"] is False and body["reason"].startswith("provider_error")
+
+
+def test_api_orderbook_ok_us(client, monkeypatch):
+    _patch_snapshot(monkeypatch)
+    body = client.get("/api/us/deep/orderbook/AAPL.US").json()
+    assert body["available"] is True
+    assert body["depth_available"] is True and body["bids"][0]["price"] > 0
+
+
+def test_api_orderbook_hk_zero_depth_still_200_with_note(client, monkeypatch):
+    """港股五档恒 0: 仍是 200 + available:true(总量/内外盘为真), 靠 note 说清没档。"""
+    _patch_snapshot(monkeypatch)
+
+    from app.data_providers import tdx_ex_provider
+
+    def orderbook(symbol):
+        return {"source": "tdx-ex", "market": "HK", "symbol": symbol, "prev_close": 424.8,
+                "last": 425.8, "bids": [{"price": 0.0, "volume": 0.0}] * 5,
+                "asks": [{"price": 0.0, "volume": 0.0}] * 5,
+                "bid_levels": 0, "ask_levels": 0, "depth_available": False,
+                "volume_unit": "share", "current_volume": 1253000.0,
+                "total_volume": 14011738.0, "inside_volume": 7005907.0,
+                "outside_volume": 7005831.0, "timezone": "Asia/Shanghai",
+                "note": "上游(MAC-EX)对该市场不返回买卖档", "cached": False}
+
+    monkeypatch.setattr(tdx_ex_provider, "orderbook", orderbook)
+    body = client.get("/api/hk/deep/orderbook/00700.HK").json()
+    assert body["available"] is True
+    assert body["depth_available"] is False and "不返回买卖档" in body["note"]
+
+
+def test_api_snapshot_source_gate_rejects_unregistered(client, monkeypatch):
+    _patch_snapshot(monkeypatch, body={"source": "fail-http-500"})
+    body = client.get("/api/hk/deep/snapshot/00700.HK").json()
+    assert body["available"] is False and "source_gate_rejected" in body["reason"]
+
+
+def test_capabilities_lists_snapshot_and_orderbook():
+    caps = prov.capabilities("US")
+    assert caps["items"]["snapshot"]["available"] is True
+    assert caps["items"]["orderbook"]["source"] == prov.SOURCE_TDX_EX
+
+
+# ───────────────────────────────────────────── 板块 API(所属 / 成分股 / 榜单)
+
+
+def _patch_boards(monkeypatch):
+    from app.data_providers import tdx_ex_provider
+
+    def belong_boards(symbol):
+        return {"source": "tdx-ex", "market": "HK", "symbol": symbol,
+                "boards": [{"board_code": "HK0279", "board_name": "港股-远程办公",
+                            "close": 1152.46, "pre_close": 1125.81, "pct": 2.3672}],
+                "derived": ["pct"], "cached": False}
+
+    def board_members(board_code, limit=50, start=0):
+        return {"source": "tdx-ex", "board_code": board_code,
+                "members": [{"code": "PANW", "name": "派拓网络", "close": 419.19,
+                             "pre_close": 418.78, "pct": 0.0979, "amount": 16096128.0,
+                             "volume": 38272.0, "vol_ratio": 3.3848,
+                             "market_cap": 342897426432.0, "total_shares": 818000000.0,
+                             "eps": 4.09, "pe_dynamic": 100.0, "pe_ttm": 102.0,
+                             "dividend_yield": 3.59, "net_assets": 33.73}],
+                "requested": limit, "start": start,
+                "derived": ["pct", "total_shares"], "note": None, "cached": False}
+
+    def board_list(kind="US_HY", limit=50):
+        return {"source": "tdx-ex", "kind": kind,
+                "boards": [{"board_code": "US0212", "board_name": "美股-大麻",
+                            "close": 434.54, "pre_close": 424.84, "pct": 2.2832,
+                            "rise_speed": 0.0, "leader_code": "GRWG",
+                            "leader_name": "GrowGeneration", "leader_pct": 16.3067}],
+                "derived": ["pct", "leader_pct"], "cached": False}
+
+    monkeypatch.setattr(tdx_ex_provider, "belong_boards", belong_boards)
+    monkeypatch.setattr(tdx_ex_provider, "board_members", board_members)
+    monkeypatch.setattr(tdx_ex_provider, "board_list", board_list)
+
+
+def test_api_boards_ok(client, monkeypatch):
+    _patch_boards(monkeypatch)
+    body = client.get("/api/hk/deep/boards/00700.HK").json()
+    assert body["available"] is True
+    assert body["boards"][0]["board_name"] == "港股-远程办公"
+    assert body["boards"][0]["pct"] == pytest.approx(2.3672, abs=1e-3)
+
+
+def test_api_board_members_ok(client, monkeypatch):
+    _patch_boards(monkeypatch)
+    body = client.get("/api/us/deep/board/US0026/members?limit=5").json()
+    assert body["available"] is True
+    m = body["members"][0]
+    assert m["code"] == "PANW" and m["total_shares"] == 818_000_000
+
+
+def test_api_boardlist_ok(client, monkeypatch):
+    _patch_boards(monkeypatch)
+    body = client.get("/api/us/deep/boardlist?kind=US_HY&limit=10").json()
+    assert body["available"] is True
+    assert body["boards"][0]["leader_pct"] == pytest.approx(16.3067, abs=1e-3)
+
+
+def test_api_boardlist_bad_kind_is_fail_closed(client, monkeypatch):
+    """bad_kind 走 provider 的 ValueError ⇒ available:false + provider_error, 不 5xx。"""
+    _patch_boards(monkeypatch)
+
+    from app.data_providers import tdx_ex_provider
+
+    def board_list(kind="US_HY", limit=50):
+        raise ValueError("bad_kind: NOWHERE")
+
+    monkeypatch.setattr(tdx_ex_provider, "board_list", board_list)
+    body = client.get("/api/us/deep/boardlist?kind=NOWHERE").json()
+    assert body["available"] is False and "bad_kind" in body["reason"]
+
+
+def test_api_boards_source_gate(client, monkeypatch):
+    _patch_boards(monkeypatch)
+
+    from app.data_providers import tdx_ex_provider
+
+    def belong_boards(symbol):
+        return {"source": "fail-http-500", "boards": []}
+
+    monkeypatch.setattr(tdx_ex_provider, "belong_boards", belong_boards)
+    body = client.get("/api/hk/deep/boards/00700.HK").json()
+    assert body["available"] is False and "source_gate_rejected" in body["reason"]

@@ -61,21 +61,36 @@ class TickChartsCmd(BaseCommand[MacMultiTickChart]):
         # count(2) + send_last(1) + page_size(2) + total(2)
         (count, send_last, page_size, total) = unpack_from("<HBHH", body, 64, "tick_charts header2")
 
+        # TSP 改动(2026-10-12): 用 **实际存在的 tick 数**而不是 count*page_size。
+        # 上游 "count 个块、每块 page_size 根" 只是名义值 —— 实测美股
+        # count=5 / page_size=390 (=1950) 而 total 只有 1561 根, 按名义值读会在
+        # 最后一块越界("数据不足...偏移 22037, 实际剩余 8 字节")。以 body 长度和
+        # total 取小者为真实根数, 顺带把尾部元数据的偏移也按真实根数算。
+        max_by_len = max(0, (len(body) - 71) // 14)
+        real_ticks = min(total, max_by_len)
+
         days: list[MacMultiTickDay] = []
         for d in range(count):
             ticks: list[MacTick] = []
             for t in range(page_size):
                 index = d * page_size + t
+                if index >= real_ticks:
+                    break
                 offset = 71 + index * 14
                 (minutes, price, avg, vol, tick_reserved) = unpack_from(
                     "<HffHH", body, offset, f"tick_charts tick[{d}][{t}]"
                 )
+                # TSP 改动(2026-10-12): minutes 可 > 1439(美股会话跨北京时间零点,
+                # 实测最大 1678 = 次日 03:58)。原写法 time(minutes//60, ...) 会抛
+                # ValueError; 钟点取 mod 24, 原始分钟数保留在 MacTick.minutes。
+                hour = (minutes // 60) % 24
                 ticks.append(
                     MacTick(
-                        time=time(minutes // 60, minutes % 60),
+                        time=time(hour, minutes % 60),
                         price=price,
                         avg=avg,
                         vol=vol,
+                        minutes=minutes,
                     )
                 )
 
@@ -89,8 +104,8 @@ class TickChartsCmd(BaseCommand[MacMultiTickChart]):
                 )
             )
 
-        # 尾部元数据
-        tail_offset = 71 + count * page_size * 14
+        # 尾部元数据 —— 偏移必须跟着真实根数走(见上方 TSP 改动说明)
+        tail_offset = 71 + real_ticks * 14
         (
             name_raw,
             _decimal,

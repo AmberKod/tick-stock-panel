@@ -617,7 +617,73 @@ def capabilities(market: str) -> dict:
                                  f"窗口上限 {_MAX_INTRADAY_BARS} 根"}
     items["adjratio"] = {"available": False, "source": None, "reason": str(adjust_unavailable_reason())}
     items["index"] = {"available": True, "source": SOURCE_TENCENT, "derivation": "native"}
+    items["boards"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+                       "note": "所属板块/同业成分/板块榜(MAC-EX): 港美股此前没有的归类维度"}
+    items["multiday"] = (
+        {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+         "note": ("多日分时(MAC-EX)仅港股: 上游每日一块且日期自洽(逐个交易日校验), "
+                  f"最多 {_MAX_MULTIDAY_DAYS} 日")}
+        if m == "HK" else
+        {"available": False, "source": None,
+         "reason": multiday_unavailable_reason()}
+    )
+    items["snapshot"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+                         "note": ("实时快照(MAC-EX): 上游直给昨收/均价/换手率/内外盘, "
+                                  "换手率按千分比口径换算(derived)")}
+    items["orderbook"] = {
+        "available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+        "note": ("五档盘口(MAC-EX): 美股为真五档; 上游对港股买卖档恒返回 0, "
+                 "届时 payload 里 depth_available=false 并带 note, 不画空档"),
+    }
     return {"market": m, "items": items}
+
+
+def snapshot(symbol: str) -> dict:
+    """实时快照 —— 转发 MAC-EX ``symbol_info``(取数细节见 tdx_ex_provider)。
+
+    编排层故意不加料: 这串数据上游一次给齐(含昨收), 再加工只会多一层口径。
+    节点全挂属于**故障**而非"没有源", 故 TdxExUnavailableError 原样上抛
+    (端点落到 provider_error, 允许前端重试), 不转成 CapabilityUnavailableError。
+    """
+    return tdx_ex_provider.snapshot(symbol)
+
+
+def orderbook(symbol: str) -> dict:
+    """五档盘口 —— 转发 MAC-EX ``GetInstrumentQuote``。港股无档时由 payload 自证。"""
+    return tdx_ex_provider.orderbook(symbol)
+
+
+def belong_boards(symbol: str) -> dict:
+    """个股所属板块 —— 转发 MAC-EX ``SymbolBelongBoard``。"""
+    return tdx_ex_provider.belong_boards(symbol)
+
+
+def board_members(board_code: str, limit: int = 50, start: int = 0) -> dict:
+    """板块成分股报价 —— 转发 MAC-EX ``BoardMembersQuotes``。"""
+    return tdx_ex_provider.board_members(board_code, limit=limit, start=start)
+
+
+def board_list(kind: str = "US_HY", limit: int = 50) -> dict:
+    """板块榜 —— 转发 MAC-EX ``BoardList``。"""
+    return tdx_ex_provider.board_list(kind=kind, limit=limit)
+
+
+def multiday(symbol: str, days: int = 5) -> dict:
+    """多日分时 —— 转发 MAC-EX ``TickCharts``(仅港股可接, 原因见 tdx_ex_provider)。"""
+    return tdx_ex_provider.multi_day_ticks(symbol, days=days)
+
+
+#: 多日分时最多几日(上游 dialog 上限)。
+_MAX_MULTIDAY_DAYS = 5
+
+
+def multiday_unavailable_reason() -> str:
+    """美股多日分时为什么没有 —— 文案要讲清"不是不接, 是接了就得编日期"。"""
+    try:
+        multiday("AAPL.US")
+    except Exception as exc:  # 只取它的说明文案
+        return str(exc)
+    return ""  # pragma: no cover
 
 
 def adjust_unavailable_reason() -> str:

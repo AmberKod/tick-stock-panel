@@ -56,13 +56,22 @@ class MacBar:
 
 @dataclass(frozen=True)
 class MacTick:
-    """分时数据点。"""
+    """分时数据点。
+
+    TSP 改动(2026-10-12): 新增 ``minutes`` 保留**上游原始分钟数**。
+
+    原因: 扩展市场的分钟数是**跨零点累加**的(美股实测到 1678 分钟 = 27:58,
+    即次日凌晨 03:58), 直接 ``time(minutes//60, minutes%60)`` 会抛
+    ``ValueError: hour must be in 0..23``。``time`` 字段现在按 mod 24 归一化
+    (只表示钟点, 不含日期), ``minutes`` 留给上层判"有没有翻页"。
+    """
 
     time: time
     price: float
     avg: float
     vol: int
     momentum: float = 0.0
+    minutes: int = 0
 
 
 @dataclass(frozen=True)

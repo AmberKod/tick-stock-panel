@@ -22,3 +22,39 @@ This project was inspired by and incorporates ideas from:
 
 Both upstream projects are licensed under the MIT License.
 Their original copyright notices are preserved in the LICENSE file.
+
+===============================================================================
+Local modifications made by TSP (this repo)
+===============================================================================
+
+Everything below is a change WE made to the vendored copy. Nothing here is
+upstream behaviour; do not assume upstream has (or wants) these fixes.
+
+1. Deleted directories before vendoring
+   - offline/  : its gbbq XOR key is ported from pytdx, and pytdx ships no
+                 license file (all rights reserved). We do not ship it.
+   - cli/      : pulls an extra dependency we do not need.
+
+2. mac/commands/tick_charts.py + mac/models.py  (2026-10-12)
+   MacTick gained a `minutes` field holding the RAW upstream minute-of-day,
+   and the `time` field is now built as `time((minutes // 60) % 24, ...)`.
+
+   Why: MAC-EX minute numbers are cumulative across local midnight. For a US
+   session the last tick is minute 1678 (= 27:58, i.e. 03:58 next day), so the
+   original `time(minutes // 60, minutes % 60)` raised
+   "ValueError: hour must be in 0..23". The fix keeps the clock readable
+   without losing the "did we roll over?" information.
+
+   Worth knowing before using this command further: for HK each data block is
+   one trading day (5 blocks x 330 ticks, minutes 570..959), but for US the
+   blocks are ~390-tick PAGES, not days -- dates[] does NOT line up with the
+   blocks one-to-one. Do not label US blocks with dates[].
+
+3. mac/commands/tick_charts.py  (2026-10-12, second fix)
+   The tick loop and the trailing metadata offset now use `min(total, ...)`
+   computed from body length, instead of `count * page_size`.
+
+   Why: those two numbers disagree upstream. A US request returns
+   count=5 / page_size=390 (=1950 nominal) but total=1561 actual, so reading
+   to the nominal end walked off the buffer ("数据不足…实际剩余 8 字节").
+   HK is unaffected (1650 == 5*330) and still parses identically.
