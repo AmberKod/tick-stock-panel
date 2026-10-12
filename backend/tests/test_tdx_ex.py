@@ -618,3 +618,221 @@ def test_vendor_tick_survives_cross_midnight_minutes():
 
     tk = MacTick(time=__import__("datetime").time(3, 58), price=1.0, avg=1.0, vol=1, minutes=1678)
     assert tk.time.hour == 3 and tk.minutes == 1678
+
+
+# ───────────────────────────────────────────── 逐笔成交(港股 0x23FC/0x2406 vs 美股 0x122F)
+
+
+class _FakeExTx:
+    """上游 ex 逐笔记录: 价格是**整数**(425000 → 425.0 HKD)。"""
+
+    def __init__(self, hour=15, minute=59, second=0, price=425000, volume=1500, nature=0):
+        self.hour, self.minute, self.second = hour, minute, second
+        self.price, self.volume = price, volume
+        self.zengcang, self.nature = 0, nature
+
+
+class _FakeMacTx:
+    """上游 MAC 逐笔(0x122F): 价格已是浮点, 且带 trade_count。"""
+
+    def __init__(self, hour=21, minute=12, price=337.79998779296875, vol=35, bs=2):
+        import datetime as _dt
+
+        self.time = _dt.time(hour, minute, 0)
+        self.price, self.vol = price, vol
+        self.trade_count, self.bs_flag = 3, bs
+
+
+def test_transactions_hk_uses_ex_protocol_and_divides_price(monkeypatch):
+    """港股逐笔: 走 0x23FC(当日), price_int/1000 = 港元 —— 0x122F 对港股恒空。"""
+    calls = _patch_exec(monkeypatch, [_FakeExTx(15, 59), _FakeExTx(9, 30, price=416800)])
+    body = prov.transactions("00700.HK", limit=2)
+    assert type(calls[0]).__name__ == "GetExTransactionDataCmd"
+    assert body["protocol"] == "0x23FC/0x2406"
+    # 上游倒序返回, 下发必须升序
+    assert [r["time"] for r in body["rows"]] == ["09:30:00", "15:59:00"]
+    assert body["rows"][0]["price"] == 416.8 and body["rows"][1]["price"] == 425.0
+    assert body["price_unit"].startswith("HKD") and body["volume_unit"] == "share"
+
+
+def test_transactions_hk_history_uses_2406(monkeypatch):
+    calls = _patch_exec(monkeypatch, [_FakeExTx()])
+    body = prov.transactions("00700.HK", date="2026-10-09")
+    assert type(calls[0]).__name__ == "GetExHistoryTransactionDataCmd"
+    assert calls[0].date == 20261009
+    assert body["date"] == "20261009"
+
+
+@pytest.mark.parametrize("given", ["20261009", "2026-10-09", "2026/10/09"])
+def test_transactions_date_shapes(given, monkeypatch):
+    calls = _patch_exec(monkeypatch, [_FakeExTx()])
+    prov.transactions("00700.HK", date=given)
+    assert calls[0].date == 20261009
+
+
+def test_transactions_us_uses_122f_and_keeps_float_price(monkeypatch):
+    """美股 0x122F 本来就能用: 价格不除 1000, 且带 trade_count / bs_flag。"""
+    calls = _patch_exec(monkeypatch, [_FakeMacTx()])
+    body = prov.transactions("AAPL.US", limit=1)
+    assert type(calls[0]).__name__ == "SymbolTransactionCmd"
+    assert body["protocol"] == "0x122F"
+    row = body["rows"][0]
+    assert row["price"] == pytest.approx(337.8)
+    assert row["trade_count"] == 3 and row["bs_flag"] == 2
+    assert "bs_flag" in body["note"]
+
+
+def test_transactions_hk_does_not_invent_trade_count(monkeypatch):
+    """ex 协议没有 trade_count —— 给 None, 不给 0 冒充(0 会被当成"0 笔成交")。"""
+    _patch_exec(monkeypatch, [_FakeExTx()])
+    assert prov.transactions("00700.HK")["rows"][0]["trade_count"] is None
+
+
+def test_transactions_empty_is_unavailable_not_empty_table(monkeypatch):
+    _patch_exec(monkeypatch, [])
+    with pytest.raises(TdxExUnavailableError, match="上游返回空"):
+        prov.transactions("00700.HK")
+
+
+@pytest.mark.parametrize("limit", [0, 1801, -1, 2.5])
+def test_transactions_bad_limit(limit, monkeypatch):
+    _patch_exec(monkeypatch, [_FakeExTx()])
+    with pytest.raises(ValueError, match="bad_limit"):
+        prov.transactions("00700.HK", limit=limit)
+
+
+@pytest.mark.parametrize("bad", ["2026-13-01", "2026100", "abc", "2026-10-32"])
+def test_transactions_bad_date(bad, monkeypatch):
+    """日期格式不宽容 —— 任何"猜格式"都可能把 9 月读成 10 月。"""
+    _patch_exec(monkeypatch, [_FakeExTx()])
+    with pytest.raises(ValueError, match="bad_date"):
+        prov.transactions("00700.HK", date=bad)
+
+
+# ───────────────────────────────────────────── 分钟价格线(0x240C 按日循环)
+
+
+class _FakeMinuteBar:
+    """上游 0x240C 一根: 只有 price + avg_price + volume, **没有 OHLC**。"""
+
+    def __init__(self, hour=9, minute=30, price=416.8, avg=415.6, volume=859434):
+        self.hour, self.minute = hour, minute
+        self.price, self.avg_price = price, avg
+        self.volume, self.open_interest = volume, 0
+
+
+def test_minute_range_loops_by_day(monkeypatch):
+    """按日循环: 一天一包, 长度不再受 700 根约束。"""
+    calls = _patch_exec(monkeypatch, [_FakeMinuteBar() for _ in range(330)])
+    body = prov.minute_range("00700.HK", days=3, period="m1")
+    assert body["protocol"] == "0x240C"
+    assert len(body["days"]) == 3 and body["bar_count"] == 990
+    assert len(calls) >= 3     # 每天一次请求(非交易日会多扫几个候选日)
+    assert body["ohlc"] == "single_price" and body["derived"] == []
+
+
+def test_minute_range_m1_does_not_fake_ohlc_but_flags_it(monkeypatch):
+    """m1 档上游只给该分钟价格: 四价同值, 但必须用 ohlc/note 说清楚不是原生蜡烛。"""
+    _patch_exec(monkeypatch, [_FakeMinuteBar(9, 30), _FakeMinuteBar(9, 31, price=417.0)])
+    row = prov.minute_range("00700.HK", days=1)["days"][0]["bars"][0]
+    assert row["open"] == row["high"] == row["low"] == row["close"] == 416.8
+    body = prov.minute_range("00700.HK", days=1)
+    assert body["ohlc"] == "single_price"
+    assert "开高低" in body["note"] or "开/高/低" in body["note"]
+
+
+def test_minute_range_aggregate_m5_is_declared(monkeypatch):
+    """更长周期由 m1 确定性聚合 —— close 取组内末根, 高/低取组内极值, 且必须声明。"""
+    bars = [_FakeMinuteBar(9, 30 + i, price=100.0 + i) for i in range(10)]
+    _patch_exec(monkeypatch, bars)
+    body = prov.minute_range("00700.HK", days=1, period="m5")
+    assert body["ohlc"] == "aggregated_from_m1"
+    assert body["derived"] == ["open", "high", "low"]
+    first, second = body["days"][0]["bars"][0], body["days"][0]["bars"][1]
+    assert (first["open"], first["high"], first["low"], first["close"]) == (100.0, 104.0, 100.0, 104.0)
+    assert second["open"] == 105.0 and second["close"] == 109.0
+    assert first["volume"] == sum(859434 for _ in range(5))
+
+
+def test_minute_range_us_hour_mod_24(monkeypatch):
+    """美股 hour 可到 27(21:30 + 6.5h): mod 24 后落在凌晨段, 与 minute_bars 同口径。"""
+    _patch_exec(monkeypatch, [_FakeMinuteBar(27, 59, price=336.64)])
+    row = prov.minute_range("AAPL.US", days=1)["days"][0]["bars"][0]
+    assert row["datetime"].endswith("03:59:00")
+
+
+def test_minute_range_skips_non_trading_days(monkeypatch):
+    """取到空包 = 非交易日, 跳过而不是当成故障(fail-open 只在"有数据"这件事上)。"""
+    state = {"n": 0}
+
+    def fake(host, cmd_factory):
+        state["n"] += 1
+        cmd_factory()
+        return [] if state["n"] == 1 else [_FakeMinuteBar()]
+
+    monkeypatch.setattr(prov, "_exec_once", fake)
+    body = prov.minute_range("00700.HK", days=2)
+    assert len(body["days"]) == 2
+
+
+def test_minute_range_all_days_empty_is_unavailable(monkeypatch):
+    _patch_exec(monkeypatch, [])
+    with pytest.raises(TdxExUnavailableError, match="均无分钟数据"):
+        prov.minute_range("00700.HK", days=2)
+
+
+@pytest.mark.parametrize("days", [0, 21, -1, 2.5])
+def test_minute_range_bad_days(days, monkeypatch):
+    _patch_exec(monkeypatch, [_FakeMinuteBar()])
+    with pytest.raises(ValueError, match="bad_days"):
+        prov.minute_range("00700.HK", days=days)
+
+
+def test_minute_range_bad_period(monkeypatch):
+    _patch_exec(monkeypatch, [_FakeMinuteBar()])
+    with pytest.raises(ValueError, match="bad_period"):
+        prov.minute_range("00700.HK", period="m10")
+
+
+def test_minute_range_carries_upstream_avg(monkeypatch):
+    """0x240C 自带当日累计均价 —— 比我们 m1 自己合成的均价权威, 直接透出。"""
+    _patch_exec(monkeypatch, [_FakeMinuteBar(avg=415.5966796875)])
+    row = prov.minute_range("00700.HK", days=1)["days"][0]["bars"][0]
+    assert row["avg"] == pytest.approx(415.5967)
+
+
+def test_minute_range_candidates_are_newest_first():
+    """回归: 候选日必须**由新到旧**。
+
+    第一版写成自旧向新扫, days=3 拿到的是"最近一段里最老的 3 天"(实测 00700
+    拿到 10-02 而漏掉 10-12) —— 图看着像数据好几天没更新。
+    """
+    from datetime import date, timedelta
+
+    cands = prov._recent_trading_candidates(3)
+    assert len(cands) >= 3
+    assert cands == sorted(cands, reverse=True)
+    today = date.today()
+    newest = next(today - timedelta(days=b) for b in range(8)
+                  if (today - timedelta(days=b)).weekday() < 5)
+    assert cands[0] == newest.year * 10000 + newest.month * 100 + newest.day
+
+
+def test_minute_range_returns_most_recent_trading_days(monkeypatch):
+    """只有最新那天有数据时, 返回的就该是那天, 而不是扫到的第一个老日子。"""
+    from datetime import date, timedelta
+
+    state = {"n": 0}
+
+    def fake(host, cmd_factory):
+        cmd_factory()
+        state["n"] += 1
+        return [_FakeMinuteBar()] if state["n"] == 1 else []
+
+    monkeypatch.setattr(prov, "_exec_once", fake)
+    body = prov.minute_range("00700.HK", days=2)
+    assert len(body["days"]) == 1
+    today = date.today()
+    newest = next(today - timedelta(days=b) for b in range(8)
+                  if (today - timedelta(days=b)).weekday() < 5)
+    assert body["days"][0]["date"] == f"{newest:%Y-%m-%d}"

@@ -25,10 +25,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import date as _date_cls
 from datetime import datetime
 
 from app._vendor.easy_tdx.codec.bitmap import PresetField
 from app._vendor.easy_tdx.ex.commands.get_instrument_quote import GetExInstrumentQuoteCmd
+from app._vendor.easy_tdx.ex.commands.get_minute_time import GetExHistoryMinuteTimeDataCmd
+from app._vendor.easy_tdx.ex.commands.get_transaction import (
+    GetExHistoryTransactionDataCmd,
+    GetExTransactionDataCmd,
+)
 from app._vendor.easy_tdx.ex.commands.login import MacExLoginCmd
 from app._vendor.easy_tdx.ex.mac_client import MacExClient
 from app._vendor.easy_tdx.ex.transport.sync import ExTdxConnection
@@ -37,6 +43,7 @@ from app._vendor.easy_tdx.mac.commands import (
     BoardMembersQuotesCmd,
     SymbolBelongBoardCmd,
     SymbolInfoCmd,
+    SymbolTransactionCmd,
     TickChartsCmd,
 )
 from app._vendor.easy_tdx.mac.enums import Adjust, ExBoardType, ExMarket, Period
@@ -47,7 +54,31 @@ logger = logging.getLogger(__name__)
 SOURCE = "tdx-ex"
 
 #: 上游单次请求上限(实测 800/3200 均只回 700)。超过就截断并标注, 不多打一次请求。
+#: ⚠️ 这个上限只约束 ``goods_kline``(蜡烛 K 线)。**分时/分钟价格线走 0x240C 不受它限制**
+#: (单日一包, 按日循环可拿任意长度, 详见 ``minute_range``)。
 MAX_BARS_PER_REQUEST = 700
+
+#: 逐笔: 上游单页上限(实测页大小 1800)。我们一次只取一页 —— 够了, 再深要翻页且
+#: 上游没有 total 字段, 翻页终止条件不严谨(实测见模块头注释), 不冒险。
+MAX_TRANSACTIONS_PER_REQUEST = 1800
+
+#: 港股逐笔的价格是**整数**: 1 港元 = 1000(实测 00700 返回 425000 → 425.0 HKD,
+#: 与港股分时图 float 价格 431.4 同一口径)。美股/标准市场走 0x122F, 已经是浮点数。
+_HK_TRANSACTION_PRICE_DIVISOR = 1000.0
+
+#: 分钟价格线按日循环: 多少个自然日作为候选(跳过周末, 取不到=非交易日)。
+#: days 个"有数据的交易日" ≈ 需要扫 1.5~2 倍自然日; 上限防止前端传大数把节点打死。
+MAX_MINUTE_RANGE_DAYS = 20
+_MINUTE_RANGE_SCAN_MULTIPLIER = 2
+_MINUTE_RANGE_SCAN_PADDING = 4
+
+#: m1 → N 分钟聚合时 open/high/low 的实测偏差(2026-10-09, HK 00700 / US AAPL 各 66~78 根
+#: 与上游 MIN_5 逐根对比): close 完全一致(0.000%), 开高低平均 <0.05% / 最大 <0.45%。
+#: 写进 payload 让前端和用户知道"聚合蜡烛不是交易所原生蜡烛"。
+_AGGREGATE_DEVIATION_NOTE = (
+    "聚合自上游 1 分钟价格: 收盘价与上游完全一致(实测偏差 0.000%); "
+    "开/高/低由组内分钟价格的极值推导, 实测平均偏差 <0.05%、最大 <0.45%"
+)
 
 #: 行情快照/盘口这类"看一眼就过时"的数据用固定的短 TTL: 比分钟K (settings) 短得多,
 #: 否则前端轮询到的是一分钟前的价格, 而 K 线那头的口径已经不一样了。
@@ -61,6 +92,9 @@ _PERIODS: dict[str, Period] = {
     "m30": Period.MIN_30,
     "m60": Period.MIN_60,
 }
+
+#: 周期串 → 分钟数(0x240C 的 m1 序列聚合到更长周期时用)。
+_PERIOD_MINUTES: dict[str, int] = {"m1": 1, "m5": 5, "m15": 15, "m30": 30, "m60": 60}
 
 #: 港股主板 vs 创业板在上游是不同市场码(HK_MAIN_BOARD=31 / HK_GEM=48), 但我们
 #: 拿不到"某代码属于哪个板"的可靠映射 —— 统一走主板码, 实测 00700/00939/09988
@@ -261,6 +295,266 @@ def minute_bars(symbol: str, period: str = "m30", limit: int = 320) -> dict:
         return _payload(market, symbol, key, count, [], truncated, cached=False)
     _cache_put(cache_key, rows, float(_settings().tdx_ex_cache_ttl_s))
     return _payload(market, symbol, key, count, rows, truncated, cached=False)
+
+
+# ───────────────────────────────────────────── 逐笔成交
+
+def _ymd(value) -> int:
+    """``"2026-10-09"`` / ``"20261009"`` / ``20261009`` / ``date`` → ``20261009``。
+
+    只接受这几种形状, 其余一律 ValueError —— 上游协议要的是 int 日期, 任何"猜格式"
+    的宽容解析都可能把 9 月读成 10 月。
+    """
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return int(value.year) * 10000 + int(value.month) * 100 + int(value.day)
+    s = str(value or "").strip().replace("-", "").replace("/", "")
+    if not (len(s) == 8 and s.isdigit()):
+        raise ValueError(f"bad_date: {value!r} (YYYY-MM-DD / YYYYMMDD)")
+    y, m, d = int(s[:4]), int(s[4:6]), int(s[6:8])
+    if not (1990 <= y <= 2099 and 1 <= m <= 12 and 1 <= d <= 31):
+        raise ValueError(f"bad_date: {value!r}")
+    return y * 10000 + m * 100 + d
+
+
+def transactions(symbol: str, date=None, limit: int = 200) -> dict:
+    """逐笔成交 —— 港股与美股**不是同一条协议**, 别合并。
+
+    为什么分叉(2026-10-12 实测, 推翻此前"EX 不支持逐笔"的结论):
+      - 港股的逐笔在 MAC 协议 ``SymbolTransactionCmd``(0x122F) 下恒返回 **39 字节空响应**
+        (count=0) —— 0x122F 的数据源只覆盖沪深京 A 股 + 部分扩展市场, 港股没接入。
+      - 港股正确走 ex 扩展行情层: 当日 **0x23FC**, 历史 **0x2406**。
+      - 美股 0x122F 本来就能用(实测 AAPL 21:12 / 337.79 / vol 35)。
+
+    价格单位: 港股是整数, ``price_int / 1000 = 港元``; 美股 0x122F 已是浮点。
+
+    ``date`` 为空 = 当日。``limit`` 1..1800(单页上限, 不翻页)。
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(f"bad_limit: {limit!r}")
+    if limit < 1 or limit > MAX_TRANSACTIONS_PER_REQUEST:
+        raise ValueError(f"bad_limit: {limit} (1..{MAX_TRANSACTIONS_PER_REQUEST})")
+
+    market, code = _split(symbol)
+    ymd = _ymd(date) if date is not None and str(date).strip() != "" else None
+
+    if market == "HK":
+        mkt = _market_code(market)
+        if ymd is None:
+            raw = _exec(lambda: GetExTransactionDataCmd(mkt, code, 0, limit))
+        else:
+            raw = _exec(lambda: GetExHistoryTransactionDataCmd(mkt, code, ymd, 0, limit))
+        rows = _rows_from_ex_transactions(raw)
+        price_unit = "HKD(上游整数/1000)"
+        # nature 的买卖语义我们没有实测样本支撑(实测全是 0), 原样下发不映射 ——
+        # 宁可前端不标颜色, 也不猜一个"0=买" 的口径。
+        side_note = "nature 为上游原始字段(买卖映射未实测, 前端勿当方向展示)"
+    else:
+        qd = None
+        if ymd is not None:
+            qd = _date_cls(ymd // 10000, (ymd // 100) % 100, ymd % 100)
+        raw = _exec(lambda: SymbolTransactionCmd(_market_code(market), code,
+                                                 query_date=qd, start=0, count=limit))
+        rows = _rows_from_mac_transactions(raw)
+        price_unit = "USD(上游浮点)"
+        side_note = "bs_flag: 0=买入 / 1=卖出 / 2=中性 / 5=盘后(上游协议注释口径)"
+
+    if not rows:
+        raise TdxExUnavailableError(f"transactions: {symbol} 上游返回空(非交易日/代码不匹配)")
+
+    rows.sort(key=lambda r: r["time"])
+    return {
+        "source": SOURCE,
+        "market": market,
+        "symbol": str(symbol).upper(),
+        "date": str(ymd) if ymd else "today",
+        "protocol": "0x23FC/0x2406" if market == "HK" else "0x122F",
+        "count": len(rows),
+        "rows": rows,
+        "price_unit": price_unit,
+        "volume_unit": "share",
+        "timezone": "Asia/Shanghai",
+        "note": (f"逐笔成交(MAC-EX {('0x23FC' + ('/0x2406' if ymd else '')) if market == 'HK' else '0x122F'}); "
+                 f"上游按时间倒序返回, 已按时间升序排好; 单次一页不翻页; {side_note}"),
+        "cached": False,
+    }
+
+
+def _rows_from_ex_transactions(raw) -> list[dict]:
+    """ex 逐笔 → 下发 rows(价格整数 → 港元)。"""
+    rows: list[dict] = []
+    for rec in list(raw or []):
+        price = _round(getattr(rec, "price", None), 4)
+        if price is not None:
+            price = round(price / _HK_TRANSACTION_PRICE_DIVISOR, 4)
+        hour = int(getattr(rec, "hour", 0) or 0) % 24
+        minute = int(getattr(rec, "minute", 0) or 0)
+        second = int(getattr(rec, "second", 0) or 0)
+        rows.append({
+            "time": f"{hour:02d}:{minute:02d}:{second:02d}",
+            "price": price,
+            "volume": int(getattr(rec, "volume", 0) or 0),
+            "trade_count": None,   # ex 协议没有这个字段, 不给 0 冒充
+            "nature": int(getattr(rec, "nature", 0) or 0),
+        })
+    return rows
+
+
+def _rows_from_mac_transactions(raw) -> list[dict]:
+    """MAC 逐笔(0x122F) → 下发 rows。价格已是浮点, 字段带 trade_count。"""
+    rows: list[dict] = []
+    for rec in list(raw or []):
+        t = getattr(rec, "time", None)
+        ts = t.strftime("%H:%M:%S") if hasattr(t, "strftime") else str(t or "")[:8]
+        rows.append({
+            "time": ts,
+            "price": _round(getattr(rec, "price", None), 4),
+            "volume": int(getattr(rec, "vol", 0) or 0),
+            "trade_count": int(getattr(rec, "trade_count", 0) or 0),
+            "bs_flag": int(getattr(rec, "bs_flag", 0) or 0),
+        })
+    return rows
+
+
+# ───────────────────────────────────────────── 分钟价格线(按日循环, 突破 700 根)
+
+def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
+    """多日分钟序列 —— 走 ``GetExHistoryMinuteTimeDataCmd``(0x240C)**按日循环**。
+
+    ⚠️ 为什么它能突破 700 根: 0x240C 是"**单日一包**"(无 count 参数), 实测港股
+    330 根/日(09:30~15:59)、美股 390 根/日(21:30~27:59)。按 date 一天一天取再拼接,
+    长度只受"想取多少天"限制 —— 实测 6 个交易日 HK 1980 根 / US 1951 根。
+
+    ⚠️ 它不是蜡烛: 0x240C 每根只给 ``price``(该分钟价格) + ``avg_price``(当日累计均价)
+    + ``volume``(该分钟成交量), **没有开/高/低**。所以:
+      - ``period="m1"``: 原样下发(四价同值 = 该分钟价格, 并在 payload 标注), 不造 OHLC;
+      - 其它周期: 由 m1 **确定性聚合**出 OHLC, ``derived`` 标注 + 实测偏差写进 note。
+        实测与上游 MIN_5 逐根对比: close 完全一致, 开高低平均 <0.05% / 最大 <0.45%。
+        聚合 bar 的时间戳取区间内最后一根分钟的时刻(比上游原生 N 分钟 K 的区间
+        结束时刻早 1 分钟) —— 不做 +step, 否则美股收盘那组会造出 04:00 之后的时刻。
+
+    时间戳口径与 ``minute_bars`` 保持一致: **会话日期 + 北京时间钟点**(美股凌晨段
+    沿用同一日期标签, hour 取 mod 24)。
+    """
+    key = str(period or "").strip().lower()
+    if key not in _PERIODS:
+        raise ValueError(f"bad_period: {period!r} (m1/m5/m15/m30/m60)")
+    if not isinstance(days, int) or isinstance(days, bool) or days < 1 or days > MAX_MINUTE_RANGE_DAYS:
+        raise ValueError(f"bad_days: {days} (1..{MAX_MINUTE_RANGE_DAYS})")
+
+    market, code = _split(symbol)
+    step = _PERIOD_MINUTES[key]
+
+    cache_key = f"tdxminrange:{market}:{code}:{key}:{days}"
+    cached = _cache_get(cache_key)
+    if isinstance(cached, dict):
+        return {**cached, "cached": True}
+
+    # 由新到旧扫: 要的是**最近** N 个交易日。反过来自旧向新扫会拿到"最近一段里
+    # 最老的几天"(实测 days=3 拿到 10-02 而漏掉 10-12), 图看着像数据没更新。
+    collected: list[dict] = []
+    for ymd in _recent_trading_candidates(days):
+        if len(collected) >= days:
+            break
+        bars = _exec(lambda y=ymd: GetExHistoryMinuteTimeDataCmd(_market_code(market), code, y))
+        if not bars:
+            continue    # 非交易日: 上游给空包, 不是故障
+        collected.append({
+            "date": f"{ymd // 10000:04d}-{(ymd // 100) % 100:02d}-{ymd % 100:02d}",
+            "bars": _rows_from_minute_bars(bars, ymd, step),
+        })
+    out_days = list(reversed(collected))    # 下发仍按时间升序
+
+    if not out_days:
+        raise TdxExUnavailableError(f"minute_range: {symbol} 最近 {days} 个交易日均无分钟数据")
+
+    payload = {
+        "source": SOURCE,
+        "market": market,
+        "symbol": str(symbol).upper(),
+        "period": key,
+        "protocol": "0x240C",
+        "requested_days": days,
+        "days": out_days,
+        "bar_count": sum(len(d["bars"]) for d in out_days),
+        # 上游只给"该分钟价格", 没有真实开高低 —— 这一条必须让前端知道
+        "ohlc": "single_price" if step == 1 else "aggregated_from_m1",
+        "derived": [] if step == 1 else ["open", "high", "low"],
+        "has_avg": True,
+        "volume_unit": "share",
+        "timezone": "Asia/Shanghai",
+        "note": ("上游 0x240C 单日一包(港股 330 根/日、美股 390 根/日), 按日循环拼接, "
+                 + ("m1 档四价同值 = 该分钟价格(上游无真实开高低), 配有上游当日累计均价"
+                    if step == 1 else _AGGREGATE_DEVIATION_NOTE)),
+        "cached": False,
+    }
+    _cache_put(cache_key, payload, float(_settings().tdx_ex_cache_ttl_s))
+    return payload
+
+
+def _rows_from_minute_bars(bars, ymd: int, step: int) -> list[dict]:
+    """0x240C 一日的分钟包 → rows。
+
+    时间 = ``会话日期 + (hour mod 24):minute`` —— 美股 hour 可到 27(21:30 开盘 +
+    6.5h 会话), mod 24 后落在凌晨段, 与 ``minute_bars`` 那一份口径完全一致。
+    """
+    rows: list[dict] = []
+    for bar in list(bars or []):
+        hour = int(getattr(bar, "hour", 0) or 0) % 24
+        minute = int(getattr(bar, "minute", 0) or 0)
+        rows.append({
+            "datetime": f"{ymd // 10000:04d}-{(ymd // 100) % 100:02d}-{ymd % 100:02d} "
+                        f"{hour:02d}:{minute:02d}:00",
+            "price": _round(getattr(bar, "price", None), 4),
+            "avg": _round(getattr(bar, "avg_price", None), 4),
+            "volume": int(getattr(bar, "volume", 0) or 0),
+        })
+    if step <= 1:
+        # m1: 四价同值 = 该分钟价格(上游没给 OHLC, 不编)
+        for r in rows:
+            r["open"] = r["high"] = r["low"] = r["close"] = r["price"]
+        return rows
+
+    out: list[dict] = []
+    for i in range(0, len(rows) - step + 1, step):
+        grp = rows[i:i + step]
+        px = [g["price"] for g in grp if g["price"] is not None]
+        if not px:
+            continue
+        out.append({
+            # 时间戳取组内**最后一根**的分钟: 上游原生 N 分钟 K 标的是区间结束时刻
+            # (比这晚 1 分钟), 但我们不去做 +step —— 美股收盘那组 +5 分钟会越过
+            # 04:00 造出一个不存在的时刻。宁可 tooltip 上差 1 分钟, 不编时间点。
+            "datetime": grp[-1]["datetime"],
+            "open": px[0],
+            "high": max(px),
+            "low": min(px),
+            "close": px[-1],
+            "price": px[-1],
+            "avg": grp[-1]["avg"],           # 当日累计均价: 取组内最后一根
+            "volume": sum(int(g["volume"] or 0) for g in grp),
+        })
+    return out
+
+
+def _recent_trading_candidates(days: int) -> list[int]:
+    """最近的日候选, **由新到旧**, 跳过周末。
+
+    哪些天真的有数据由上游决定: 取到空包就是非交易日, 循环里跳过。这里只负责
+    给出足够多的候选, 不负责"猜"交易日 —— 港美股假期各不相同, 猜必错。
+    顺序很重要: 调用方要的是**最近** N 个交易日, 所以必须从今天倒着扫。
+    """
+    from datetime import date as _d
+    from datetime import timedelta
+
+    scan = min(days * _MINUTE_RANGE_SCAN_MULTIPLIER + _MINUTE_RANGE_SCAN_PADDING,
+               MAX_MINUTE_RANGE_DAYS * _MINUTE_RANGE_SCAN_MULTIPLIER + _MINUTE_RANGE_SCAN_PADDING)
+    today = _d.today()
+    out: list[int] = []
+    for back in range(scan + 1):
+        day = today - timedelta(days=back)
+        if day.weekday() < 5:       # 0=周一 .. 4=周五
+            out.append(day.year * 10000 + day.month * 100 + day.day)
+    return out
 
 
 # ───────────────────────────────────────────── 实时快照 / 五档盘口
@@ -610,7 +904,6 @@ def multi_day_ticks(symbol: str, days: int = 5) -> dict:
         # 自洽守卫: **较晚那天的昨收 == 相邻较早那天的收盘**。
         # 港股实测逐日吻合(10-12 昨收 424.800 = 10-09 收盘 424.80); 美股这条链
         # 就是断的。上游一旦换口径 / 我们误读了块, 这里第一时间炸而不是画错图。
-        prev_close_chain = day_pre
         out_days.append({
             "date": getattr(item, "date", None).isoformat() if hasattr(getattr(item, "date", None), "isoformat") else None,
             "prev_close": day_pre,
@@ -667,5 +960,6 @@ def _payload(market: str, symbol: str, period: str, count: int, rows: list[dict]
 
 def capabilities_note() -> str:
     """给 /capabilities 用的一句话说明。"""
-    return (f"分钟K 走通达信扩展市场(MAC-EX 7727), 单次上限 {MAX_BARS_PER_REQUEST} 根, "
-            f"时间为北京时间; 深度有限(美股 m1 约 1 个交易日)")
+    return (f"分钟K 走通达信扩展市场(MAC-EX 7727): 蜡烛(0x122E)单次上限 {MAX_BARS_PER_REQUEST} 根, "
+            f"时间为北京时间; 分钟价格线(0x240C)按日循环可拿任意长度(港股 330 根/日、"
+            f"美股 390 根/日, 带上游均价)")

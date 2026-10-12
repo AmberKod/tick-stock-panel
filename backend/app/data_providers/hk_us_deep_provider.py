@@ -635,6 +635,16 @@ def capabilities(market: str) -> dict:
         "note": ("五档盘口(MAC-EX): 美股为真五档; 上游对港股买卖档恒返回 0, "
                  "届时 payload 里 depth_available=false 并带 note, 不画空档"),
     }
+    items["transactions"] = {
+        "available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+        "note": ("逐笔成交(MAC-EX): 港股走 ex 协议 0x23FC/0x2406(0x122F 对港股恒空), "
+                 "价格整数/1000=港元; 美股走 0x122F, 价格已是浮点"),
+    }
+    items["minute_range"] = {
+        "available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+        "note": ("多日分钟价格线(0x240C 按日循环): 港股 330 根/日、美股 390 根/日, 带上游均价; "
+                 "m1 档四价同值(上游无真实开高低), 更长周期由 m1 确定性聚合"),
+    }
     return {"market": m, "items": items}
 
 
@@ -671,6 +681,19 @@ def board_list(kind: str = "US_HY", limit: int = 50) -> dict:
 def multiday(symbol: str, days: int = 5) -> dict:
     """多日分时 —— 转发 MAC-EX ``TickCharts``(仅港股可接, 原因见 tdx_ex_provider)。"""
     return tdx_ex_provider.multi_day_ticks(symbol, days=days)
+
+
+def transactions(symbol: str, date=None, limit: int = 200) -> dict:
+    """逐笔成交 —— 转发 MAC-EX(港股 0x23FC/0x2406, 美股 0x122F)。
+
+    取不到就是取不到, 不降级不兜底 —— 逐笔没有"近似"这回事。
+    """
+    return tdx_ex_provider.transactions(symbol, date=date, limit=limit)
+
+
+def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
+    """多日分钟序列 —— 转发 MAC-EX ``0x240C`` 按日循环(可突破 700 根上限)。"""
+    return tdx_ex_provider.minute_range(symbol, days=days, period=period)
 
 
 #: 多日分时最多几日(上游 dialog 上限)。

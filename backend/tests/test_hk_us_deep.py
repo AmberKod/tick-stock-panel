@@ -780,3 +780,89 @@ def test_api_boards_source_gate(client, monkeypatch):
     monkeypatch.setattr(tdx_ex_provider, "belong_boards", belong_boards)
     body = client.get("/api/hk/deep/boards/00700.HK").json()
     assert body["available"] is False and "source_gate_rejected" in body["reason"]
+
+
+# ───────────────────────────────────────────── 逐笔成交 / 多日分钟序列 端点
+
+
+class _TxRec:
+    def __init__(self, hour=15, minute=59, second=0, price=425000, volume=1500):
+        self.hour, self.minute, self.second = hour, minute, second
+        self.price, self.volume = price, volume
+        self.zengcang, self.nature = 0, 0
+
+
+class _MinuteRec:
+    def __init__(self, hour=9, minute=30, price=416.8, avg=415.6, volume=859434):
+        self.hour, self.minute = hour, minute
+        self.price, self.avg_price = price, avg
+        self.volume, self.open_interest = volume, 0
+
+
+def _patch_exec_result(monkeypatch, rows=None):
+    from app.data_providers import tdx_ex_provider as tx
+
+    monkeypatch.setattr(tx, "_exec_once",
+                        lambda host, factory: (factory(), rows if rows is not None else [_TxRec()])[1])
+
+
+def test_api_transactions_hk_ok(client, monkeypatch):
+    """港股逐笔: 0x23FC, 价格整数/1000 = 港元。"""
+    _patch_exec_result(monkeypatch, [_TxRec(9, 30, price=416800), _TxRec(15, 59, price=425000)])
+    body = client.get("/api/hk/deep/transactions/00700.HK?limit=2").json()
+    assert body["available"] is True
+    assert [r["price"] for r in body["rows"]] == [416.8, 425.0]
+    assert body["protocol"] == "0x23FC/0x2406"
+
+
+def test_api_transactions_bad_limit_is_fail_closed(client):
+    body = client.get("/api/hk/deep/transactions/00700.HK?limit=5000").json()
+    assert body["available"] is False and "bad_limit" in body["reason"]
+
+
+def test_api_transactions_bad_date_is_fail_closed(client, monkeypatch):
+    _patch_exec_result(monkeypatch)
+    body = client.get("/api/hk/deep/transactions/00700.HK?date=2026-13-01").json()
+    assert body["available"] is False and "bad_date" in body["reason"]
+
+
+def test_api_transactions_node_down_is_http200(client, monkeypatch):
+    from app.data_providers import tdx_ex_provider as tx
+
+    def boom(host, factory):
+        raise tx.TdxExUnavailableError("all nodes down")
+
+    monkeypatch.setattr(tx, "_exec_once", boom)
+    body = client.get("/api/hk/deep/transactions/00700.HK").json()
+    assert body["available"] is False and "provider_error" in body["reason"]
+
+
+def test_api_minuterange_ok(client, monkeypatch):
+    """多日分钟序列: 按日循环, m5 档由 m1 聚合且必须声明。"""
+    _patch_exec_result(monkeypatch, [_MinuteRec(9, 30 + i, price=100.0 + i) for i in range(10)])
+    body = client.get("/api/hk/deep/minuterange/00700.HK?days=2&period=m5").json()
+    assert body["available"] is True
+    assert len(body["days"]) == 2
+    assert body["ohlc"] == "aggregated_from_m1"
+    assert body["derived"] == ["open", "high", "low"]
+
+
+def test_api_minuterange_m1_flags_single_price(client, monkeypatch):
+    _patch_exec_result(monkeypatch, [_MinuteRec()])
+    body = client.get("/api/hk/deep/minuterange/00700.HK?days=1").json()
+    assert body["ohlc"] == "single_price"
+    bar = body["days"][0]["bars"][0]
+    assert bar["avg"] == pytest.approx(415.6)
+
+
+def test_api_minuterange_bad_days_is_fail_closed(client):
+    body = client.get("/api/hk/deep/minuterange/00700.HK?days=99").json()
+    assert body["available"] is False and "bad_days" in body["reason"]
+
+
+def test_capabilities_lists_transactions_and_minute_range():
+    caps = prov.capabilities("HK")["items"]
+    assert caps["transactions"]["available"] is True
+    assert caps["minute_range"]["available"] is True
+    assert "0x23FC" in caps["transactions"]["note"]
+    assert "0x240C" in caps["minute_range"]["note"]

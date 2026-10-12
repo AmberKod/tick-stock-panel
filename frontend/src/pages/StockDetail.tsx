@@ -29,6 +29,7 @@ import { HKUSIntradayChart } from '@/components/HKUSIntradayChart'
 import { HKUSQuoteBox } from '@/components/HKUSQuoteBox'
 import { HKUSBoardsPanel } from '@/components/HKUSBoardsPanel'
 import { HKMultiDayChart } from '@/components/HKMultiDayChart'
+import { HKUSTransactionsPanel } from '@/components/HKUSTransactionsPanel'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
   AnnouncementsPanel,
@@ -1142,6 +1143,8 @@ export function StockDetail() {
           <HKUSBoardsPanel symbol={symbol} className="mt-2" />
           {/* 多日分时: 上游按交易日给且日期自洽的那一支(当前仅港股自证通过) */}
           <HKMultiDayChart symbol={symbol} className="mt-2" />
+          {/* 逐笔成交: 港股 0x23FC/0x2406、美股 0x122F(两条协议, 后端已分叉) */}
+          <HKUSTransactionsPanel symbol={symbol} className="mt-2" />
           <div className="mt-2 rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">
             深度数据（资金流 / 龙虎榜 / 研报 / 公告 / 财务摘要）当前仅覆盖 A股 ——
             非 A股代码不显示这五块，也不会用占位内容冒充。

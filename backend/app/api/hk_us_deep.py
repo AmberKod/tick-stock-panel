@@ -183,6 +183,34 @@ def _attach(router: APIRouter, market: str) -> None:
         return _respond(lambda: prov.adjust_ratios(symbol, mode=mode, limit=limit),
                         required_key="ratios", source_hint=source_hint)
 
+    @router.get("/transactions/{symbol}")
+    def _transactions(symbol: str, date: str | None = None, limit: int = 200) -> dict:
+        """逐笔成交(MAC-EX) —— 港股走 0x23FC/0x2406, 美股走 0x122F。
+
+        ``date`` 为空 = 当日(``YYYY-MM-DD`` 或 ``YYYYMMDD``); ``limit`` 1..1800(单页不翻页)。
+        港股价格是上游整数 /1000 = 港元; 港股的 ``nature`` 买卖映射未实测, 原样下发,
+        前端不要拿它标买卖方向。
+        """
+        if limit < 1 or limit > 1800:
+            return {"available": False, "reason": f"bad_limit: {limit} (1..1800)",
+                    "source": prov.SOURCE_TDX_EX}
+        return _respond(lambda: prov.transactions(symbol, date=date, limit=limit),
+                        required_key="rows", source_hint=prov.SOURCE_TDX_EX)
+
+    @router.get("/minuterange/{symbol}")
+    def _minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
+        """多日分钟序列(MAC-EX 0x240C 按日循环) —— 突破蜡烛的 700 根上限。
+
+        ⚠️ 形态与 ``/minute`` 不同: 上游这一路**没有真实开高低**, 每根只给该分钟价格
+        + 当日累计均价 + 该分钟成交量。``period=m1`` 时四价同值并在 payload 标注;
+        更长周期由 m1 确定性聚合(实测 close 与上游一致, 开高低偏差 <0.45%), 同样标注。
+        """
+        if days < 1 or days > 20:
+            return {"available": False, "reason": f"bad_days: {days} (1..20)",
+                    "source": prov.SOURCE_TDX_EX}
+        return _respond(lambda: prov.minute_range(symbol, days=days, period=period),
+                        required_key="days", source_hint=prov.SOURCE_TDX_EX)
+
 
 _attach(router_hk, "HK")
 _attach(router_us, "US")
