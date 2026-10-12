@@ -13,7 +13,7 @@ import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import { StockDailyKChart, type MklinePeriod } from '@/components/StockDailyKChart'
 import { KlineToolsBar, useKlineTools } from '@/components/KlineChartTools'
 import { buildSignalMarkers } from '@/lib/klineSignals'
-import { DeepCapabilityNote, KPeriodTabs, MinutePeriodTabs } from '@/components/KPeriodTabs'
+import { DeepCapabilityNote, KPeriodTabs, MinuteDepthTabs, MinutePeriodTabs } from '@/components/KPeriodTabs'
 import {
   USEstimatesPanel,
   USInstitutionalPanel,
@@ -153,6 +153,8 @@ export function USStockAnalysisPage() {
   const [visibleBars, setVisibleBars] = useState(PERIOD_DEFAULT_BARS.day)
   /** 分钟档(通达信扩展市场 MAC-EX 7727)。null = 看日/周/月/年。上限 700 根。 */
   const [mkPeriod, setMkPeriod] = useState<MklinePeriod | null>(null)
+  /** 分钟K 天数: 1 = 原生蜡烛(上限 700 根); >1 = 0x240C 按日循环(聚合蜡烛)。 */
+  const [mkDays, setMkDays] = useState(1)
 
   const caps = <DeepCapabilityNote market="US" />
   const signalMarkers = useMemo(
@@ -400,12 +402,14 @@ export function USStockAnalysisPage() {
           onChange={(p, bars) => { setKPeriod(p); setMkPeriod(null); if (bars > 0) setVisibleBars(bars) }}
         />
         <MinutePeriodTabs value={mkPeriod} onChange={setMkPeriod} />
+        {mkPeriod && <MinuteDepthTabs value={mkDays} onChange={setMkDays} />}
       </div>
       <StockDailyKChart
         symbol={symbol}
         height={560}
         period={kPeriod}
         deepMinutePeriod={mkPeriod ?? undefined}
+        deepMinuteDays={mkDays}
         visibleBars={visibleBars}
         showLimitMarkers={false}
         adjust="none"

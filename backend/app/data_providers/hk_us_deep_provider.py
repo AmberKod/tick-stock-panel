@@ -619,14 +619,12 @@ def capabilities(market: str) -> dict:
     items["index"] = {"available": True, "source": SOURCE_TENCENT, "derivation": "native"}
     items["boards"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
                        "note": "所属板块/同业成分/板块榜(MAC-EX): 港美股此前没有的归类维度"}
-    items["multiday"] = (
-        {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
-         "note": ("多日分时(MAC-EX)仅港股: 上游每日一块且日期自洽(逐个交易日校验), "
-                  f"最多 {_MAX_MULTIDAY_DAYS} 日")}
-        if m == "HK" else
-        {"available": False, "source": None,
-         "reason": multiday_unavailable_reason()}
-    )
+    items["multiday"] = {
+        "available": True, "source": SOURCE_TDX_EX, "derivation": "native",
+        "note": ("多日分时(MAC-EX, 港美股同一条路): 0x240C 按日循环 + 日K 真源昨收, "
+                 "三重守卫(日期在日K 日历内 / 当日末价=日K 收盘 / 相邻日不漏), "
+                 f"最多 {_MAX_MULTIDAY_DAYS} 日"),
+    }
     items["snapshot"] = {"available": True, "source": SOURCE_TDX_EX, "derivation": "native",
                          "note": ("实时快照(MAC-EX): 上游直给昨收/均价/换手率/内外盘, "
                                   "换手率按千分比口径换算(derived)")}
@@ -679,7 +677,7 @@ def board_list(kind: str = "US_HY", limit: int = 50) -> dict:
 
 
 def multiday(symbol: str, days: int = 5) -> dict:
-    """多日分时 —— 转发 MAC-EX ``TickCharts``(仅港股可接, 原因见 tdx_ex_provider)。"""
+    """多日分时 —— 转发 MAC-EX(0x240C 按日循环 + 日K 真源昨收, 港美股同一条路)。"""
     return tdx_ex_provider.multi_day_ticks(symbol, days=days)
 
 
@@ -696,17 +694,8 @@ def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
     return tdx_ex_provider.minute_range(symbol, days=days, period=period)
 
 
-#: 多日分时最多几日(上游 dialog 上限)。
-_MAX_MULTIDAY_DAYS = 5
-
-
-def multiday_unavailable_reason() -> str:
-    """美股多日分时为什么没有 —— 文案要讲清"不是不接, 是接了就得编日期"。"""
-    try:
-        multiday("AAPL.US")
-    except Exception as exc:  # 只取它的说明文案
-        return str(exc)
-    return ""  # pragma: no cover
+#: 多日分时最多几日(超过 10 条线在图上分不清)。
+_MAX_MULTIDAY_DAYS = tdx_ex_provider.MAX_MULTIDAY_DAYS
 
 
 def adjust_unavailable_reason() -> str:

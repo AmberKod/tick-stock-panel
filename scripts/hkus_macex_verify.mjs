@@ -71,13 +71,15 @@ const us = await page.evaluate(() => {
     snapshot: txt.includes('实时行情 / 五档'),
     bidAsk: /卖1[\s\S]{0,60}/.exec(txt)?.[0]?.replace(/\s+/g, ' ') ?? '',
     boards: txt.includes('所属板块 / 同业联动'),
-    multidayHidden: !txt.includes('多日分时'),
+    // 2026-10-12 换走 0x240C 按日循环后, 美股多日分时已打通 —— 断言改成"要看见"
+    multiday: txt.includes('多日分时'),
+    multidayCanvas: document.querySelectorAll('canvas').length,
   }
 })
 check('AAPL 快照面板出现', us.snapshot)
 check('AAPL 真五档渲染(卖1/买1)', /卖1/.test(us.bidAsk), us.bidAsk.slice(0, 50))
 check('AAPL 所属板块面板出现', us.boards)
-check('AAPL 不显示多日分时(上游不自洽)', us.multidayHidden)
+check('AAPL 多日分时出现(0x240C 按日循环)', us.multiday && us.multidayCanvas >= 1)
 await page.screenshot({ path: `${OUT}/macex-us-AAPL.png`, timeout: 60000 }).catch(() => {})
 
 // ── 3) 板块榜页面 ────────────────────────────────────────────────────────────

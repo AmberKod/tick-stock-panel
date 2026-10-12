@@ -866,3 +866,98 @@ def test_capabilities_lists_transactions_and_minute_range():
     assert caps["minute_range"]["available"] is True
     assert "0x23FC" in caps["transactions"]["note"]
     assert "0x240C" in caps["minute_range"]["note"]
+
+
+# ───────────────────────────────────────────── 多日分时端点(0x240C + 日K 昨收)
+
+
+class _MdBar:
+    """上游 0x240C 一根: 只有 price / avg_price / volume。"""
+
+    def __init__(self, hour=9, minute=30, price=100.0, avg=99.5, volume=1000):
+        self.hour, self.minute = hour, minute
+        self.price, self.avg_price = price, avg
+        self.volume, self.open_interest = volume, 0
+
+
+class _MdFrame:
+    """日K DataFrame 替身 —— `_rows_from_frame` 只用到 to_dict('records')。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_dict(self, orient):
+        return list(self._rows)
+
+
+def _patch_multiday(monkeypatch, n_days=3):
+    """桩掉 0x240C 分钟包 + 日K 日历, 返回期望下发的日期列表(升序)。"""
+    from app.data_providers import tdx_ex_provider as tx
+
+    # 候选日是**由新到旧**, 必须先切再排: 先 reversed 再切片会拿到最老的一批,
+    # 而 minute_range 扫的是最近几天 —— 于是全 miss, 报"均无分钟数据"。
+    cands = tx._recent_trading_candidates(n_days + 10)
+    dates = sorted(cands[:n_days + 10])          # 最近 n+10 个工作日, 升序 int ymd
+    close = {d: 100.0 + i for i, d in enumerate(dates)}
+    targets = {str(d) for d in dates[-n_days:]}
+
+    def fake_exec(host, factory):
+        cmd = factory()
+        ymd = str(getattr(cmd, "date", ""))
+        if ymd not in targets:
+            return []
+        c = close[int(ymd)]
+        return [_MdBar(9, 30, c - 1.0), _MdBar(15, 59, c)]
+
+    def fake_fetch(host, market, code, period, count):
+        return _MdFrame([
+            {"datetime": f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d} 00:00:00",
+             "open": close[d], "high": close[d], "low": close[d],
+             "close": close[d], "vol": 100, "amount": 1000.0}
+            for d in dates])
+
+    monkeypatch.setattr(tx, "_exec_once", fake_exec)
+    monkeypatch.setattr(tx, "_fetch_once", fake_fetch)
+    return [f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d}" for d in dates[-n_days:]]
+
+
+def test_api_multiday_hk_ok(client, monkeypatch):
+    want = _patch_multiday(monkeypatch, n_days=3)
+    body = client.get("/api/hk/deep/multiday/00700.HK?days=3").json()
+    assert body["available"] is True
+    assert [d["date"] for d in body["days"]] == want
+    assert body["prev_close_source"] == "daily_kline"
+    # 昨收链: 较晚那天的昨收 == 相邻较早那天的收盘
+    assert body["days"][1]["prev_close"] == body["days"][0]["close"]
+
+
+def test_api_multiday_us_is_available_now(client, monkeypatch):
+    """美股曾因上游块与日期不对应而 fail-closed; 换 0x240C 按日循环后打通。"""
+    want = _patch_multiday(monkeypatch, n_days=3)
+    body = client.get("/api/us/deep/multiday/AAPL.US?days=3").json()
+    assert body["available"] is True
+    assert [d["date"] for d in body["days"]] == want
+    assert body["protocol"] == "0x240C + daily_kline"
+
+
+def test_api_multiday_bad_days_is_fail_closed(client):
+    body = client.get("/api/us/deep/multiday/AAPL.US?days=99").json()
+    assert body["available"] is False and "bad_days" in body["reason"]
+
+
+def test_api_multiday_upstream_down_is_http200(client, monkeypatch):
+    from app.data_providers import tdx_ex_provider as tx
+
+    tx.clear_cache()   # 同 symbol+days 上一个用例的结果还在, 不清就命中缓存了
+
+    def boom(host, factory):
+        raise tx.TdxExUnavailableError("all nodes down")
+
+    monkeypatch.setattr(tx, "_exec_once", boom)
+    body = client.get("/api/us/deep/multiday/AAPL.US?days=3").json()
+    assert body["available"] is False and "provider_error" in body["reason"]
+
+
+def test_capabilities_multiday_available_for_both_markets():
+    assert prov.capabilities("HK")["items"]["multiday"]["available"] is True
+    assert prov.capabilities("US")["items"]["multiday"]["available"] is True

@@ -84,6 +84,45 @@ export function MinutePeriodTabs({ value, onChange, className }: {
   )
 }
 
+/**
+ * 分钟K 的**深度**切换 —— 港美股专用。
+ *
+ * 两个档位走的是两个不同的上游端点, 画出来的东西也不一样:
+ *   - `1 日`: /minute(0x122E) 交易所原生蜡烛, 但上游单次上限 700 根;
+ *   - `3/5/10 日`: /minuterange(0x240C 按日循环) 突破 700 根, 代价是开/高/低
+ *     由 1 分钟价格聚合而来(收盘价与上游一致, 开高低平均偏差 <0.05%)。
+ *
+ * 所以这里不是"多取几天"这么简单 —— 选 3 日以上时图上会写明是聚合蜡烛。
+ */
+export const MINUTE_DEPTHS: { label: string; value: number }[] = [
+  { label: '1 日', value: 1 },
+  { label: '3 日', value: 3 },
+  { label: '5 日', value: 5 },
+  { label: '10 日', value: 10 },
+]
+
+export function MinuteDepthTabs({ value, onChange, className }: {
+  value: number
+  onChange: (days: number) => void
+  className?: string
+}) {
+  return (
+    <div className={cn('inline-flex items-center rounded border border-border bg-elevated p-0.5', className)}>
+      {MINUTE_DEPTHS.map(p => (
+        <button
+          key={p.value}
+          type="button"
+          onClick={() => onChange(p.value)}
+          className={cn('rounded px-2 py-0.5 text-xs transition-colors',
+            value === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+        >
+          {p.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 interface Caps {
   market: string
   items: Record<string, {

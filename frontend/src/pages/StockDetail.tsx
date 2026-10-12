@@ -28,7 +28,7 @@ import { StockMinuteChart } from '@/components/StockMinuteChart'
 import { HKUSIntradayChart } from '@/components/HKUSIntradayChart'
 import { HKUSQuoteBox } from '@/components/HKUSQuoteBox'
 import { HKUSBoardsPanel } from '@/components/HKUSBoardsPanel'
-import { HKMultiDayChart } from '@/components/HKMultiDayChart'
+import { HKUSMultiDayChart } from '@/components/HKUSMultiDayChart'
 import { HKUSTransactionsPanel } from '@/components/HKUSTransactionsPanel'
 import { MarketWatchlistButton } from '@/components/MarketWatchlistButton'
 import {
@@ -1141,8 +1141,8 @@ export function StockDetail() {
         <>
           {/* 港美股: 所属板块 + 同业联动(MAC-EX 真数据) */}
           <HKUSBoardsPanel symbol={symbol} className="mt-2" />
-          {/* 多日分时: 上游按交易日给且日期自洽的那一支(当前仅港股自证通过) */}
-          <HKMultiDayChart symbol={symbol} className="mt-2" />
+          {/* 多日分时: 0x240C 按日循环 + 日K 真源昨收(港美股同一条路, 三重守卫) */}
+          <HKUSMultiDayChart symbol={symbol} className="mt-2" />
           {/* 逐笔成交: 港股 0x23FC/0x2406、美股 0x122F(两条协议, 后端已分叉) */}
           <HKUSTransactionsPanel symbol={symbol} className="mt-2" />
           <div className="mt-2 rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">

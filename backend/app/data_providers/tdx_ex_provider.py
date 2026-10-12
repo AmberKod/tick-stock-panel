@@ -44,7 +44,6 @@ from app._vendor.easy_tdx.mac.commands import (
     SymbolBelongBoardCmd,
     SymbolInfoCmd,
     SymbolTransactionCmd,
-    TickChartsCmd,
 )
 from app._vendor.easy_tdx.mac.enums import Adjust, ExBoardType, ExMarket, Period
 
@@ -71,6 +70,13 @@ _HK_TRANSACTION_PRICE_DIVISOR = 1000.0
 MAX_MINUTE_RANGE_DAYS = 20
 _MINUTE_RANGE_SCAN_MULTIPLIER = 2
 _MINUTE_RANGE_SCAN_PADDING = 4
+
+#: 多日分时: 图上超过 10 条线就分不清了, 且每天一次上游请求, 上限也是保护节点。
+MAX_MULTIDAY_DAYS = 10
+#: 日K 日历多取一些, 保证最早那天还有"前一交易日"可以拿昨收。
+_MULTIDAY_CALENDAR_PADDING = 10
+#: 0x240C 当日末价 vs 日K close 的相对容差(float32 毛刺 / 上游口径微差)。
+_MULTIDAY_CLOSE_TOLERANCE = 0.005
 
 #: m1 → N 分钟聚合时 open/high/low 的实测偏差(2026-10-09, HK 00700 / US AAPL 各 66~78 根
 #: 与上游 MIN_5 逐根对比): close 完全一致(0.000%), 开高低平均 <0.05% / 最大 <0.45%。
@@ -859,80 +865,123 @@ def board_list(kind: str = "US_HY", limit: int = 50) -> dict:
     return payload
 
 
-def multi_day_ticks(symbol: str, days: int = 5) -> dict:
-    """多日分时 —— 上游 ``TickCharts``(**仅港股: 日期与内容严格对应**)。
+def _daily_closes(market: str, code: str, count: int) -> list[tuple[str, float]]:
+    """日K 收盘序列(升序, ``yyyymmdd``) —— 多日分时的**昨收真源 + 日期基准**。
 
-    ⚠️ 为什么美股不接(不是懒, 是接不了):
-    同一条命令在美股拿到的东西语义不同 ——
-      - 分块是「390 根一页」而不是「一天一块」(count=5/page_size=390 但 total 少一截);
-      - 每块的 minutes 继续累加到 1679+ , mod 24 后钟点不可读;
-      - **dates[] 与内容不对应**: 港股 day_i 的收盘正是 pre_closes[i-1](逐日校验过),
-        美股这条链对不上(day0 pre=336.640 而 day1 收 340.63)。
-    要画美股多日分时就得由我们给每块**指定日期** —— 那是编数据, 不做。
-    所以这里按天严格校验一致性: 链一对不上就 fail-closed。
+    0x240C 只给分钟价格, **不带昨收**。而"昨收"的定义就是"上一交易日的收盘价",
+    所以从日K 拿才是真源(不是由我们自己推导出来凑一个数)。它同时充当日期
+    自洽的基准: 0x240C 取到的每一天都必须落在这份交易日历里。
     """
-    if not isinstance(days, int) or isinstance(days, bool) or days < 1 or days > 5:
-        raise ValueError(f"bad_days: {days} (1..5)")
+    frame = _fetch(market, code, Period.DAILY, count)
+    out: list[tuple[str, float]] = []
+    for row in _rows_from_frame(frame):
+        close = row.get("close")
+        if close is None:
+            continue
+        ymd = str(row.get("datetime", ""))[:10].replace("-", "")
+        if len(ymd) == 8 and ymd.isdigit():
+            out.append((ymd, float(close)))
+    out.sort()
+    return out
+
+
+def multi_day_ticks(symbol: str, days: int = 5) -> dict:
+    """多日分时 —— 0x240C 按日循环 + **日K 真源昨收**(港股美股同一条路)。
+
+    ⚠️ 为什么不再用上游 ``TickCharts``: 它给美股的**不是"一天一块"**(390 根一页、
+    ``dates[]`` 与内容不对应, 详见 git 历史里的实测记录)。要用它画美股多日分时,
+    就得由我们给每一块**指定日期** —— 那是编数据, 不做, 所以美股此前是
+    fail-closed。
+
+    现在的路子(两个市场统一):
+      - 分钟序列走 0x240C **按日循环**: 日期是我们自己传的, 天然自洽;
+      - 昨收走日K: ``prev_close = 该日在交易日历里前一个交易日的收盘``, 真源;
+      - 三重守卫, 任一不满足就 fail-closed(宁可不画, 不画错):
+        ① 0x240C 的每一天必须存在于日K 交易日历;
+        ② 当日**最后一根 price == 日K 当日 close**(容差 0.5%);
+        ③ 相邻两天在日历里必须是**相邻交易日**(中间不漏)。
+        实测 AAPL / 00700 各 5 天: ① ② 全部 0.000% 吻合。
+    """
+    if not isinstance(days, int) or isinstance(days, bool) or days < 1 or days > MAX_MULTIDAY_DAYS:
+        raise ValueError(f"bad_days: {days} (1..{MAX_MULTIDAY_DAYS})")
 
     market, code = _split(symbol)
-    if market == "US":
-        raise TdxExUnavailableError(
-            "multiday: 上游多日分时的数据块与日期不一一对应(详见 provider 注释), "
-            "不给数据块编日期, 因此不提供美股多日分时")
-
     cache_key = f"tdxmultiday:{market}:{code}:{days}"
     cached = _cache_get(cache_key)
     if isinstance(cached, dict):
         return {**cached, "cached": True}
 
-    raw = _exec(lambda: TickChartsCmd(_market_code(market), code, None, days))
-    if raw is None:
-        raise TdxExUnavailableError(f"multiday: {symbol} 上游返回空")
+    minute = minute_range(symbol, days=days, period="m1")
+    calendar = _daily_closes(market, code, days * 3 + _MULTIDAY_CALENDAR_PADDING)
+    if not calendar:
+        raise TdxExUnavailableError(f"multiday: {symbol} 日K 取不到, 没有昨收真源可用")
+
+    cal_dates = [d for d, _ in calendar]
+    closes = dict(calendar)
 
     out_days: list[dict] = []
-    for item in list(getattr(raw, "charts", []) or []):
-        day_pre = _round(getattr(item, "pre_close", None), 4)
-        ticks = list(getattr(item, "ticks", []) or [])
-        if not ticks:
+    seen_idx: list[int] = []
+    for day in minute["days"]:
+        ymd = day["date"].replace("-", "")
+        # 守卫①: 上游分钟包的日期必须落在日K 交易日历里
+        if ymd not in closes:
+            raise TdxExUnavailableError(
+                f"multiday: {day['date']} 不在日K 交易日历里 —— 分钟与日线口径不一致, 拒绝下发")
+        idx = cal_dates.index(ymd)
+        bars = day["bars"]
+        if not bars:
             continue
-        points = [{
-            "t": tk.time.strftime("%H:%M") if hasattr(tk.time, "strftime") else str(tk.time)[:5],
-            "price": _round(getattr(tk, "price", None), 4),
-            "avg": _round(getattr(tk, "avg", None), 4),
-            "volume": _round(getattr(tk, "vol", None), 2),
-        } for tk in ticks]
-        # 自洽守卫: **较晚那天的昨收 == 相邻较早那天的收盘**。
-        # 港股实测逐日吻合(10-12 昨收 424.800 = 10-09 收盘 424.80); 美股这条链
-        # 就是断的。上游一旦换口径 / 我们误读了块, 这里第一时间炸而不是画错图。
+
+        # 守卫②: 当日最后一根价格 = 当日收盘, 必须与日K 对得上
+        last_px = bars[-1].get("price")
+        ref_close = closes[ymd]
+        if last_px is not None and ref_close:
+            if abs(last_px - ref_close) / abs(ref_close) > _MULTIDAY_CLOSE_TOLERANCE:
+                raise TdxExUnavailableError(
+                    f"multiday: {day['date']} 分钟末价 {last_px} 与日K 收盘 {ref_close} "
+                    f"对不上, 拒绝下发")
+
+        # 守卫③: 与上一个已取日必须是相邻交易日(中间不漏天)
+        if seen_idx and idx - seen_idx[-1] != 1:
+            raise TdxExUnavailableError(
+                f"multiday: {day['date']} 与前一个交易日在日历里不相邻"
+                f"(中间漏了 {idx - seen_idx[-1] - 1} 个交易日), 拒绝下发")
+        seen_idx.append(idx)
+
         out_days.append({
-            "date": getattr(item, "date", None).isoformat() if hasattr(getattr(item, "date", None), "isoformat") else None,
-            "prev_close": day_pre,
-            "points": points,
+            "date": day["date"],
+            "prev_close": _round(closes[cal_dates[idx - 1]], 4) if idx > 0 else None,
+            "close": _round(ref_close, 4),
+            "points": [{
+                "t": b["datetime"][11:16],
+                "price": b["price"],
+                "avg": b["avg"],
+                "volume": b["volume"],
+            } for b in bars],
         })
 
     if not out_days:
         raise TdxExUnavailableError(f"multiday: {symbol} 没有可取的分时日")
 
-    for i in range(len(out_days) - 1):
-        later, earlier = out_days[i], out_days[i + 1]
-        prev_close, earlier_close = later["prev_close"], earlier["points"][-1]["price"]
-        if prev_close is None or earlier_close is None:
-            continue
-        tolerance = max(0.01, abs(prev_close) * 0.005)   # float32 毛刺容差
-        if abs(earlier_close - prev_close) > tolerance:
-            raise TdxExUnavailableError(
-                f"multiday: 日期与分时内容不自洽 —— {later['date']} 的昨收 {prev_close} "
-                f"与 {earlier['date']} 的收盘 {earlier_close} 对不上, 拒绝下发"
-                f"(宁可不给, 不给错的)")
+    # 最早那天的昨收拿不到 = 相对模式画不出来。宁可整体不给, 不画半截。
+    if out_days[0]["prev_close"] is None:
+        raise TdxExUnavailableError(
+            f"multiday: {out_days[0]['date']} 的前一交易日不在日K 范围内, "
+            f"昨收无真源, 拒绝下发")
 
     payload = {
         "source": SOURCE,
         "market": market,
         "symbol": str(symbol).upper(),
-        "name": getattr(raw, "name", None) or None,
+        "protocol": "0x240C + daily_kline",
         "timezone": "Asia/Shanghai",
         "days": out_days,
-        "note": "多日分时由上游直接给出(每日昨收自带), 时间的钟点为北京时间",
+        "prev_close_source": "daily_kline",
+        "has_avg": True,
+        "note": ("分钟走 0x240C 按日循环(日期由我们指定, 天然自洽); 昨收取日K 前一交易日"
+                 "收盘(真源, 不是推导)。三重守卫: 日期必须在日K 日历内 / 当日末价必须等于"
+                 "日K 收盘(容差 0.5%) / 相邻两日必须相邻不漏 —— 任一不满足即不下发。"
+                 "钟点为北京时间(美股会话跨零点: 21:30~04:00)。"),
         "cached": False,
     }
     _cache_put(cache_key, payload, float(_settings().tdx_ex_cache_ttl_s))

@@ -8,16 +8,18 @@ import { request } from '@/lib/api'
 import { chartTheme, useTheme } from '@/lib/theme'
 
 /**
- * 港股**多日分时** —— /api/hk/deep/multiday(通达信 MAC-EX, 上游直接给每日一块)。
+ * 港美股**多日分时** —— /api/{hk,us}/deep/multiday(通达信 MAC-EX)。
  *
- * 与"当日分时"的关系: 那一份是 m1 合成的单个会话; 这一份是上游按交易日切好的
- * 5 天, 每天自带昨收(pre_close), 并且后端逐日校验过「较晚那天的昨收 == 相邻
- * 较早那天的收盘」—— 链对不上就 fail-closed, 不会画出错日期的曲线。
+ * 与"当日分时"的关系: 那一份是 m1 合成的单个会话; 这一份是最近 N 个交易日,
+ * 每天自带昨收, 后端三重守卫校验过才下发(详见 provider):
+ *   ① 0x240C 的每一天必须落在日K 交易日历里;
+ *   ② 当日最后一根价格 == 日K 当日收盘(容差 0.5%);
+ *   ③ 相邻两天在日历里必须是相邻交易日(中间不漏)。
+ * 任一不满足就 available:false, 组件照显示原因, 不用当日曲线拼凑冒充多日。
  *
- * 美股这里拿不到: 上游那几块不是"一天一块"(详见 provider 注释), 端点会返回
- * available:false + reason, 组件照显示原因, 不用当日曲线拼凑冒充多日。
+ * ⚠️ 美股会话跨北京时间零点: 21:30 开盘 → 次日 03:59/04:00 收盘, 所以时间轴
+ * 会走到 00:00 以后; 这不是日期错乱, 是"同一会话的北京钟点"。
  */
-
 interface Point {
   t: string
   price: number | null
@@ -28,6 +30,7 @@ interface Point {
 interface Day {
   date: string | null
   prev_close: number | null
+  close?: number | null
   points: Point[]
 }
 
@@ -35,11 +38,13 @@ interface Resp {
   available: boolean
   source?: string
   reason?: string
-  name?: string | null
+  protocol?: string
+  prev_close_source?: string
   days?: Day[]
 }
 
-const LINE_COLORS = ['#2563EB', '#16A34A', '#F59E0B', '#DB2777', '#7C3AED']
+const LINE_COLORS = ['#2563EB', '#16A34A', '#F59E0B', '#DB2777', '#7C3AED',
+  '#0891B2', '#DC2626', '#4D7C0F', '#9333EA', '#EA580C']
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
@@ -51,8 +56,16 @@ function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean;
   )
 }
 
-export function HKMultiDayChart({ symbol, className = '' }: {
+function marketOf(symbol: string): 'hk' | 'us' | null {
+  const s = symbol.trim().toUpperCase()
+  if (s.endsWith('.HK')) return 'hk'
+  if (s.endsWith('.US')) return 'us'
+  return null
+}
+
+export function HKUSMultiDayChart({ symbol, days = 5, className = '' }: {
   symbol: string
+  days?: number
   className?: string
 }) {
   const theme = useTheme()  // 订阅主题变化 → 下面 setOption 重跑, 图跟着换色
@@ -60,23 +73,30 @@ export function HKMultiDayChart({ symbol, className = '' }: {
   const chartRef = useRef<ECharts | null>(null)
   const [relative, setRelative] = useState(true)
 
-  const isHK = symbol.trim().toUpperCase().endsWith('.HK')
+  const market = marketOf(symbol)
+  const isUS = market === 'us'
   const query = useQuery({
-    queryKey: ['hkus', 'multiday', symbol],
+    queryKey: ['hkus', 'multiday', symbol, days],
     queryFn: () => request<Resp>(
-      `/api/hk/deep/multiday/${encodeURIComponent(symbol)}?days=5`),
-    enabled: isHK,
+      `/api/${market}/deep/multiday/${encodeURIComponent(symbol)}?days=${days}`),
+    enabled: market != null,
     staleTime: 60_000,
   })
 
-  const days = query.data?.available ? query.data.days ?? [] : []
+  const resp = query.data?.available ? query.data : null
+  const dayList = resp?.days ?? []
 
-  // 以最新一天的时间轴为基准: 港股每天 330 点(09:30~15:59), 跨日天然对齐。
+  // 以最长那天的分钟轴为基准: 港股每天 330 点、美股 390 点, 同为完整交易日时
+  // 天然按 index 对齐; 当天未收盘(美股夜里进行中)会短一截, 尾部是 null。
   const axis = useMemo(() => {
-    if (!days.length) return [] as string[]
-    const lens = days.map(d => d.points.length)
-    return days[lens.indexOf(Math.max(...lens))]?.points.map(p => p.t) ?? []
-  }, [days])
+    if (!dayList.length) return [] as string[]
+    const lens = dayList.map(d => d.points.length)
+    return dayList[lens.indexOf(Math.max(...lens))]?.points.map(p => p.t) ?? []
+  }, [dayList])
+
+  const crossingMidnight = useMemo(
+    () => axis.some(t => t <= '12:00') && axis.some(t => t >= '20:00'),
+    [axis])
 
   useEffect(() => {
     if (!hostRef.current) return
@@ -90,15 +110,18 @@ export function HKMultiDayChart({ symbol, className = '' }: {
 
   useEffect(() => {
     const chart = chartRef.current
-    if (!chart || !days.length) return
+    if (!chart || !dayList.length) return
     const t = chartTheme(theme)
-    const series = days.map((d, i) => ({
+    const series = dayList.map((d, i) => ({
       name: d.date ?? `D${i}`,
       type: 'line' as const,
       smooth: false,
       symbol: 'none' as const,
       sampling: 'lttb' as const,
-      lineStyle: { width: i === 0 ? 2 : 1.2, color: LINE_COLORS[i % LINE_COLORS.length] },
+      lineStyle: {
+        width: i === dayList.length - 1 ? 2 : 1.2,
+        color: LINE_COLORS[i % LINE_COLORS.length],
+      },
       data: d.points.map(p => {
         const px = p.price
         if (px == null) return null
@@ -123,7 +146,7 @@ export function HKMultiDayChart({ symbol, className = '' }: {
         backgroundColor: t.tooltipBg,
         borderColor: t.tooltipBorder,
         textStyle: { color: t.textStrong, fontSize: 11 },
-        valueFormatter: v => (v == null ? '—' : `${Number(v).toFixed(relative ? 2 : 2)}${relative ? '%' : ''}`),
+        valueFormatter: v => (v == null ? '—' : `${Number(v).toFixed(2)}${relative ? '%' : ''}`),
       },
       xAxis: {
         type: 'category',
@@ -161,7 +184,7 @@ export function HKMultiDayChart({ symbol, className = '' }: {
     }
     chart.setOption(option, true)
     chart.resize()
-  }, [days, axis, relative, theme])
+  }, [dayList, axis, relative, theme])
 
   useEffect(() => {
     const el = hostRef.current
@@ -171,14 +194,14 @@ export function HKMultiDayChart({ symbol, className = '' }: {
     return () => ro.disconnect()
   }, [])
 
-  if (!isHK) return null
+  if (market == null) return null
 
   return (
     <section className={`rounded-lg border border-border bg-surface p-3 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <LineChart className="h-3.5 w-3.5 text-fg-muted" />
         <h3 className="text-sm font-semibold text-fg">多日分时</h3>
-        <span className="text-xs text-fg-muted">MAC-EX · 最近 5 个交易日</span>
+        <span className="text-xs text-fg-muted">MAC-EX · 最近 {days} 个交易日</span>
         <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
           {([['相对昨收%', true], ['绝对价格', false]] as const).map(([label, val]) => (
             <button
@@ -194,15 +217,22 @@ export function HKMultiDayChart({ symbol, className = '' }: {
       </div>
 
       {query.isLoading && <StateLine loading text="加载多日分时…" />}
-      {!query.isLoading && !query.data?.available && (
+      {!query.isLoading && !resp && (
         <StateLine warn text={`不可用: ${query.data?.reason ?? query.error?.message ?? '无返回'}`} />
       )}
-      {days.length > 0 && (
+      {dayList.length > 0 && (
         <>
           <div ref={hostRef} className="h-[240px] w-full" />
           <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted">
-            时间为北京时间；每日昨收由上游自带，后端逐日校验「较晚那天的昨收 = 相邻较早那天的收盘」，
-            对不上就不下发。「相对昨收%」模式下 0% 虚线即昨收基线。
+            时间为北京时间；昨收取日K 前一交易日收盘（真源）。后端三重守卫：日期必须在日K
+            交易日历内、当日末价必须等于日K 收盘、相邻两日不漏 —— 任一不满足即不下发。
+            「相对昨收%」模式下 0% 虚线即昨收基线。
+            {crossingMidnight && (
+              <span className="text-amber-600 dark:text-amber-500">
+                {' '}注意：{isUS ? '美股' : '该'}会话跨北京时间零点（21:30 开盘 → 次日 04:00
+                收盘），时间轴走到 00:00 之后属于同一会话，不是日期错乱。
+              </span>
+            )}
           </p>
         </>
       )}

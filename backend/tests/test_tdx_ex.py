@@ -514,102 +514,7 @@ def test_board_list_sorted_by_pct_desc(monkeypatch):
     assert [b["board_code"] for b in prov.board_list("US_HY")["boards"]] == ["B", "A"]
 
 
-# ───────────────────────────────────────────── 多日分时(仅港股可接)
-
-
-class _FakeTick:
-    def __init__(self, minute, price, avg=None, vol=100):
-        import datetime as _dt
-
-        # 复刻上游: minutes 可跨零点累加(美股到 1679), 钟点按 mod 24 记
-        self.time = _dt.time((minute // 60) % 24, minute % 60)
-        self.minutes = minute
-        self.price = price
-        self.avg = avg if avg is not None else price
-        self.vol = vol
-
-
-class _FakeDay:
-    def __init__(self, day: str, pre_close: float, closes: list[float], start=570):
-        import datetime as _dt
-
-        y, m, d = (int(x) for x in day.split("-"))
-        self.date = _dt.date(y, m, d)
-        self.pre_close = pre_close
-        self.ticks = [_FakeTick(start + i, c) for i, c in enumerate(closes)]
-
-
-class _FakeMulti:
-    """港股那种形状: 每天 330 根, **当日收盘 == 次一日的昨收**(自洽链)。"""
-
-    def __init__(self, days):
-        self.market, self.code, self.name = 31, "00700", "腾讯控股"
-        self.charts = days
-
-
-def _hk_five_days():
-    return [
-        _FakeDay("2026-10-12", 424.8, [429.8, 425.8]),      # 收 425.8? 见下方 424.80 对齐
-        _FakeDay("2026-10-09", 411.4, [416.8, 424.8]),
-        _FakeDay("2026-10-08", 420.6, [422.8, 411.4]),
-        _FakeDay("2026-10-07", 428.2, [426.0, 420.6]),
-        _FakeDay("2026-10-06", 423.0, [427.8, 428.2]),
-    ]
-
-
-def test_multiday_hk_ok_and_chain_checked(monkeypatch):
-    """港股每天一块 + 昨收链自洽 → 完整下发, 日期与点数都对得上。"""
-    _patch_exec(monkeypatch, _FakeMulti(_hk_five_days()))
-    body = prov.multi_day_ticks("00700.HK")
-    assert [d["date"] for d in body["days"]] == [
-        "2026-10-12", "2026-10-09", "2026-10-08", "2026-10-07", "2026-10-06"]
-    assert body["days"][0]["prev_close"] == 424.8
-    assert body["days"][0]["points"][0]["t"] == "09:30"
-    assert body["source"] == "tdx-ex" and body["timezone"] == "Asia/Shanghai"
-
-
-def test_multiday_us_refused_not_faked(monkeypatch):
-    """美股不是"没实现", 是**接了就得编日期** —— 必须 fail-closed 且说明清楚。"""
-    _patch_exec(monkeypatch, _FakeMulti([]))
-    with pytest.raises(TdxExUnavailableError, match="不一一对应"):
-        prov.multi_day_ticks("AAPL.US")
-
-
-def test_multiday_chain_mismatch_is_refused(monkeypatch):
-    """自洽守卫: 昨收链对不上(改成美股那种错位)就拒绝, 不许画错曲线的多日图。"""
-    broken = _hk_five_days()
-    # 篡改中间某天的收盘 ⇒ 它前面那天的昨收立刻对不上
-    broken[1].ticks = [_FakeTick(570, 416.8), _FakeTick(959, 500.0)]
-    _patch_exec(monkeypatch, _FakeMulti(broken))
-    with pytest.raises(TdxExUnavailableError, match="不自洽"):
-        prov.multi_day_ticks("00700.HK")
-
-
-def test_multiday_skips_empty_days(monkeypatch):
-    days = _hk_five_days()
-    days.append(_FakeDay("2026-10-05", 400.0, []))
-    _patch_exec(monkeypatch, _FakeMulti(days))
-    body = prov.multi_day_ticks("00700.HK")
-    assert all(d["points"] for d in body["days"])
-
-
-def test_multiday_all_empty_refuses(monkeypatch):
-    _patch_exec(monkeypatch, _FakeMulti([]))
-    with pytest.raises(TdxExUnavailableError, match="没有可取的分时日"):
-        prov.multi_day_ticks("00700.HK")
-
-
-@pytest.mark.parametrize("days", [0, 6, -1, 2.5])
-def test_multiday_bad_days(days, monkeypatch):
-    _patch_exec(monkeypatch, _FakeMulti([]))
-    with pytest.raises(ValueError, match="bad_days"):
-        prov.multi_day_ticks("00700.HK", days=days)
-
-
-def test_multiday_cache_hit(monkeypatch):
-    calls = _patch_exec(monkeypatch, _FakeMulti(_hk_five_days()))
-    prov.multi_day_ticks("00700.HK")
-    assert prov.multi_day_ticks("00700.HK")["cached"] is True and len(calls) == 1
+# ───────────────────────────────────────────── vendor 解码守卫
 
 
 def test_vendor_tick_survives_cross_midnight_minutes():
@@ -836,3 +741,163 @@ def test_minute_range_returns_most_recent_trading_days(monkeypatch):
     newest = next(today - timedelta(days=b) for b in range(8)
                   if (today - timedelta(days=b)).weekday() < 5)
     assert body["days"][0]["date"] == f"{newest:%Y-%m-%d}"
+
+
+# ───────────────────────────────────────────── 多日分时(0x240C 按日循环 + 日K 真源昨收)
+
+
+class _FakeDailyFrame:
+    """日K DataFrame 的最小替身 —— `_rows_from_frame` 只用到 to_dict('records')。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_dict(self, orient):
+        return list(self._rows)
+
+
+def _md_calendar(n=40):
+    """最近 n 个工作日(升序)构成的日K 交易日历。close 逐日 +1, 便于对账。"""
+    cands = list(reversed(prov._recent_trading_candidates(n)[:n]))
+    return [
+        {"datetime": f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d} 00:00:00",
+         "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i,
+         "close": 100.0 + i, "vol": 1000, "amount": 100000.0}
+        for i, d in enumerate(cands)
+    ]
+
+
+def _md_dates(n=40):
+    return [r["datetime"][:10].replace("-", "") for r in _md_calendar(n)]
+
+
+def _md_patch(monkeypatch, n_days=3, *, empty_days=(), close_override=None,
+              calendar_drop_newest=0):
+    """同时桩掉 0x240C 分钟包与日K 日历。返回 ``(调用列表, 日历日期列表)``。
+
+    分钟与日K 的收盘价**分开记** —— 守卫②就是要抓"两者对不上", 若共用一份
+    close 就永远一致, 这条守卫等于没测。``close_override`` 只改日K 那一侧。
+    ``calendar_drop_newest`` 让日K 日历缺掉最近几天(分钟侧照常给), 用来测守卫①。
+    """
+    full = _md_calendar()
+    full_dates = [r["datetime"][:10].replace("-", "") for r in full]
+    true_close = {d: r["close"] for d, r in zip(full_dates, full, strict=True)}
+    daily_close = dict(true_close)
+    if close_override:
+        daily_close.update(close_override)
+
+    calendar = full[:len(full) - calendar_drop_newest] if calendar_drop_newest else full
+    cal_dates = [r["datetime"][:10].replace("-", "") for r in calendar]
+
+    # 注意 ``lst[-0:]`` 等于整串(Python 语义), 所以 0 必须显式短路
+    targets = [] if n_days <= 0 else full_dates[-n_days:]
+    bars_by_date = {
+        d: [
+            _FakeMinuteBar(9, 30, price=true_close[d] - 1.0, avg=true_close[d] - 0.5),
+            _FakeMinuteBar(9, 31, price=true_close[d] - 0.4, avg=true_close[d] - 0.3),
+            _FakeMinuteBar(15, 59, price=true_close[d], avg=true_close[d] - 0.1),
+        ]
+        for d in targets if d not in empty_days
+    }
+
+    calls: list[object] = []
+
+    def fake_exec(host, cmd_factory):
+        cmd = cmd_factory()
+        calls.append(cmd)
+        # cmd.date 是 int(20261012), 桩里的键是字符串 —— 必须同型才匹配得上
+        return bars_by_date.get(str(getattr(cmd, "date", "")), [])
+
+    def fake_fetch(host, market, code, period, count):
+        return _FakeDailyFrame([
+            {**r, "close": daily_close[r["datetime"][:10].replace("-", "")]}
+            for r in calendar])
+
+    monkeypatch.setattr(prov, "_exec_once", fake_exec)
+    monkeypatch.setattr(prov, "_fetch_once", fake_fetch)
+    return calls, cal_dates
+
+
+def test_multiday_uses_0x240c_plus_daily_prev_close(monkeypatch):
+    """新路径: 分钟走 0x240C 按日循环, 昨收走日K(真源), 两市场同一条路。"""
+    _, cal = _md_patch(monkeypatch, n_days=3)
+    body = prov.multi_day_ticks("00700.HK", days=3)
+    assert body["protocol"] == "0x240C + daily_kline"
+    assert body["prev_close_source"] == "daily_kline"
+    assert [d["date"] for d in body["days"]] == [
+        f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in cal[-3:]]
+    # 昨收链: 较晚那天的昨收 == 相邻较早那天的收盘(这条链对不上就说明日期错了)
+    assert body["days"][1]["prev_close"] == body["days"][0]["close"]
+    assert body["days"][2]["prev_close"] == body["days"][1]["close"]
+    # 每天最后一根分钟价 = 当日收盘
+    assert body["days"][0]["points"][-1]["price"] == body["days"][0]["close"]
+    assert body["days"][0]["points"][0]["t"] == "09:30"
+    assert body["source"] == "tdx-ex" and body["timezone"] == "Asia/Shanghai"
+
+
+def test_multiday_us_is_available_now(monkeypatch):
+    """美股曾因 TickCharts 的块与日期不对应而 fail-closed; 换 0x240C 后同一条路。"""
+    _, cal = _md_patch(monkeypatch, n_days=3)
+    body = prov.multi_day_ticks("AAPL.US", days=3)
+    assert [d["date"] for d in body["days"]] == [
+        f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in cal[-3:]]
+    assert body["days"][1]["prev_close"] == body["days"][0]["close"]
+
+
+def test_multiday_guard_date_missing_from_calendar(monkeypatch):
+    """守卫①: 0x240C 有分钟数据、日K 日历里却没有这一天 → 拒绝(口径不一致, 不能画)。"""
+    _md_patch(monkeypatch, n_days=3, calendar_drop_newest=1)
+    with pytest.raises(TdxExUnavailableError, match="不在日K 交易日历"):
+        prov.multi_day_ticks("00700.HK", days=3)
+
+
+def test_multiday_guard_close_mismatch(monkeypatch):
+    """守卫②: 当日最后一根分钟价 != 日K 收盘 → 拒绝。"""
+    _md_patch(monkeypatch, n_days=3, close_override={_md_dates()[-2]: 999.0})
+    with pytest.raises(TdxExUnavailableError, match="与日K 收盘"):
+        prov.multi_day_ticks("00700.HK", days=3)
+
+
+def test_multiday_guard_gap_between_trading_days(monkeypatch):
+    """守卫③: 中间漏了交易日(那天有日K 但没分钟) → 拒绝, 不许悄悄跳过去。"""
+    _md_patch(monkeypatch, n_days=3, empty_days=(_md_dates()[-2],))
+    with pytest.raises(TdxExUnavailableError, match="不相邻"):
+        prov.multi_day_ticks("00700.HK", days=3)
+
+
+def test_multiday_skips_non_trading_day(monkeypatch):
+    """取到空包 = 非交易日 → 跳过而不是当成故障。"""
+    _md_patch(monkeypatch, n_days=4, empty_days=())
+    body = prov.multi_day_ticks("00700.HK", days=3)
+    assert all(d["points"] for d in body["days"])
+
+
+def test_multiday_all_minutes_empty_refuses(monkeypatch):
+    """一分钟都取不到 → 拒绝, 不给空壳。"""
+    _md_patch(monkeypatch, n_days=0)
+    with pytest.raises(TdxExUnavailableError, match="分钟数据"):
+        prov.multi_day_ticks("00700.HK", days=3)
+
+
+def test_multiday_no_daily_calendar_refuses(monkeypatch):
+    """分钟有、日K 取不到 → 没有昨收真源, 整体不给(而不是把 prev_close 置 0)。"""
+    _md_patch(monkeypatch, n_days=3)
+    monkeypatch.setattr(prov, "_fetch_once",
+                        lambda host, m, c, p, n: _FakeDailyFrame([]))
+    with pytest.raises(TdxExUnavailableError, match="日K 取不到"):
+        prov.multi_day_ticks("00700.HK", days=3)
+
+
+@pytest.mark.parametrize("days", [0, 11, -1, 2.5])
+def test_multiday_bad_days(days, monkeypatch):
+    _md_patch(monkeypatch, n_days=3)
+    with pytest.raises(ValueError, match="bad_days"):
+        prov.multi_day_ticks("00700.HK", days=days)
+
+
+def test_multiday_cache_hit(monkeypatch):
+    calls, _ = _md_patch(monkeypatch, n_days=3)
+    prov.multi_day_ticks("00700.HK", days=3)
+    n_after_first = len(calls)
+    assert prov.multi_day_ticks("00700.HK", days=3)["cached"] is True
+    assert len(calls) == n_after_first    # 第二次不再打上游

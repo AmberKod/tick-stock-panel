@@ -18,7 +18,7 @@
 - GET  /boards/{symbol}             所属板块 —— MAC-EX: 行业/概念归类 + 板块涨跌
 - GET  /board/{code}/members        板块成分股 —— 涨跌/量比/市值/PE/股息率
 - GET  /boardlist?kind=US_HY        板块概念榜 —— 板块指数 + 领涨股
-- GET  /multiday/{symbol}?days=5     多日分时 —— 仅港股(美股日期不自洽, 不给)
+- GET  /multiday/{symbol}?days=5     多日分时 —— 0x240C 按日循环 + 日K 昨收(港美股同一条路)
 - GET  /adjratio/{symbol}           复权系数 —— 恒不可用, 带原因
 
 契约: 成功 HTTP 200 + available:true; 拿不到**也是 HTTP 200** + available:false
@@ -165,14 +165,16 @@ def _attach(router: APIRouter, market: str) -> None:
 
     @router.get("/multiday/{symbol}")
     def _multiday(symbol: str, days: int = 5) -> dict:
-        """多日分时(MAC-EX) —— 仅港股。
+        """多日分时(MAC-EX) —— 港美股同一条路。
 
-        美股这里是**故意不给**的: 上游那几块数据不是"一天一块", 且日期标签与内容
-        不对应(实测: 港股 day_i 收盘 == 次日昨收, 美股这条链对不上)。要给就只能由
-        我们指定日期 = 编数据, 所以 fail-closed 并说明原因。
+        早先美股是**故意不给**的: 上游 ``TickCharts`` 给美股的不是"一天一块",
+        日期标签与内容不对应, 要接就得由我们指定日期 = 编数据。现在改走
+        0x240C **按日循环**(日期由我们传给上游, 天然自洽) + 日K 真源昨收,
+        两市场统一; 三重守卫任一不满足仍 fail-closed。
         """
-        if days < 1 or days > 5:
-            return {"available": False, "reason": f"bad_days: {days} (1..5)",
+        if days < 1 or days > prov._MAX_MULTIDAY_DAYS:
+            return {"available": False,
+                    "reason": f"bad_days: {days} (1..{prov._MAX_MULTIDAY_DAYS})",
                     "source": prov.SOURCE_TDX_EX}
         return _respond(lambda: prov.multiday(symbol, days=days),
                         required_key="days", source_hint=prov.SOURCE_TDX_EX)
