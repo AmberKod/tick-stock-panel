@@ -45,7 +45,7 @@ check('00700 快照面板出现', hk.snapshot, hk.prevClose.slice(0, 40))
 check('00700 港股无五档时写明原因', hk.noDepthNote)
 check('00700 所属板块面板出现', hk.boards)
 check('00700 多日分时面板出现', hk.multiday)
-check('00700 图表已渲染', hk.canvases >= 2, `canvas=${hk.canvases}`)
+check('00700 分时图已渲染(canvas)', hk.canvases >= 1, `canvas=${hk.canvases}(主图为 SVG 渲染器)`)
 await page.screenshot({ path: `${OUT}/macex-hk-00700.png`, timeout: 60000 }).catch(() => {})
 
 // 点一个板块 chip, 看成分股表格是否出来
