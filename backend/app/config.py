@@ -185,6 +185,15 @@ class Settings(BaseSettings):
     # 分钟K 结果缓存(秒)。盘中刷新页面不该每次都建一次 TCP 连接。
     tdx_ex_cache_ttl_s: float = 60.0
 
+    # 通达信标准市(TCP 7709) —— A股**除权除息真源** GetXdxrInfoCmd, 以及拿同一联接的
+    # 不复权日K(算复权系数需要"除权日前一交易日收盘价", 同源最干净)。
+    # 标准市无需像 EX 那样先登录, 连上就能查。
+    tdx_std_hosts: str = "180.153.18.170,119.147.212.81,115.238.56.198"
+    tdx_std_port: int = 7709
+    tdx_std_timeout_s: float = 8.0
+    # 除权事件是"季度级静态数据", 一天变一次都算多; 给长 TTL 别每次刷页面都建 TCP。
+    tdx_xdxr_cache_ttl_s: float = 1800.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()

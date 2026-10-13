@@ -37,6 +37,7 @@ import {
   FinancialsPanel,
   FundFlowPanel,
   ResearchPanel,
+  XdxrPanel,
 } from '@/components/astock/AstockDeepPanels'
 
 /**
@@ -167,7 +168,7 @@ interface AstockSectorsResp {
   }
 }
 
-type DeepTab = 'fundflow' | 'dragon' | 'research' | 'announcements' | 'financials'
+type DeepTab = 'fundflow' | 'dragon' | 'research' | 'announcements' | 'financials' | 'xdxr'
 
 const DEEP_TABS: { key: DeepTab; label: string }[] = [
   { key: 'fundflow', label: '资金流向' },
@@ -175,6 +176,7 @@ const DEEP_TABS: { key: DeepTab; label: string }[] = [
   { key: 'research', label: '研报' },
   { key: 'announcements', label: '公告' },
   { key: 'financials', label: '财务摘要' },
+  { key: 'xdxr', label: '分红送配' },
 ]
 
 function rangeFromMonths(months: number): { start: string; end: string } {
@@ -1180,6 +1182,7 @@ export function StockDetail() {
             {deepTab === 'research' && <ResearchPanel symbol={symbol} limit={20} />}
             {deepTab === 'announcements' && <AnnouncementsPanel symbol={symbol} limit={20} />}
             {deepTab === 'financials' && <FinancialsPanel symbol={symbol} periods={8} />}
+            {deepTab === 'xdxr' && <XdxrPanel symbol={symbol} limit={20} />}
           </div>
         </div>
       )}

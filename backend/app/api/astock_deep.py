@@ -52,6 +52,15 @@ from app.data_providers.jiuzhang_astock_provider import (
     stock_sectors,
     tick_trades,
 )
+from app.data_providers.tdx_xdxr_provider import (
+    SOURCE as SOURCE_XDXR,
+)
+from app.data_providers.tdx_xdxr_provider import (
+    adj_ratios as xdxr_adj_ratios,
+)
+from app.data_providers.tdx_xdxr_provider import (
+    xdxr_events,
+)
 from app.services.source_gate import is_real
 
 logger = logging.getLogger(__name__)
@@ -225,6 +234,16 @@ def get_adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
 
     ⚠️ 背景: 本地 ``adj_factor`` 表是空的(TickFlow ex_factors 对本账号返回 0 行),
        所以 enriched 里存的实际是**不复权价** —— 想看前复权必须从这里拿系数。
+
+    🔴 **口径警告(2026-10-13 实测)**: 腾讯这套是**等额(减法)**前复权, 不是交易所标准的
+       乘性缩放 —— 实测 sh600519: ``qfqday`` 与 ``day`` 之差在同一个复权段内恒为
+       ``103.463`` 元(恰好等于该段之后几次每股分红之和), 而股价从 1380 → 1559 元时
+       ``ratio = qfq/raw`` 在**段内漂移 2.49%**。同一复权段内 ratio 本应是常数,
+       漂就意味着它不是一个纯粹的缩放因子, 乘出来的"前复权价"会随原价格波动失真。
+
+       要标准的**乘性口径**(与前复权的收益率语义一致, 且与新浪 hfq.js 因子的相邻比
+       逐条吻合到 0.000000%), 请改用 ``/api/astock/adjfactor/{code}``。
+       本端点保留不改: 万一有外部依赖在用旧口径, 静默改人群会踩空。
     """
     norm = _norm_code(code)
     if not norm:
@@ -239,6 +258,52 @@ def get_adjust_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: adjust_ratios(norm, mode=mode, limit=limit),
                     required_key="ratios", source=SOURCE_TENCENT)
+
+
+@router.get("/xdxr/{code}")
+def get_xdxr_events(code: str) -> dict:
+    """A股**分红送配全事件**(通达信标准市 7709 ``GetXdxrInfoCmd``) —— 上面 adjratio 的输入源头。
+
+    与腾讯 adjratio 的分工:
+      - ``/adjratio`` 给的是腾讯自己复完的系数(黑盒), 回答不了"这天为什么跌这么多";
+      - ``/xdxr`` 给的是**原始权益事件**(除权日、每股分红、送转比例、配股价/比例、
+        前后总股本), 每一档系数都能追到具体是哪一次分红导致的, 也能自己复核。
+
+    ⚠️ ``category`` 不是全都能拿去算复权 —— 只有 **1(除权除息)** 参与; 其余是股本变动
+       (增发/回购注销/非流通股上市等)的记录, 展示用, 别当股价调整据。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_XDXR}
+    return _respond(norm, lambda: xdxr_events(norm),
+                    required_key="events", source=SOURCE_XDXR)
+
+
+@router.get("/adjfactor/{code}")
+def get_xdxr_adj_ratios(code: str, mode: str = "qfq", limit: int = 640) -> dict:
+    """从**权益事件推导**的复权系数(qfq/hfq) —— 可 self-check 版。
+
+    与 ``/adjratio`` 数值上几乎一致, 差别在于本端点的每一档都带 ``events_used``
+    (哪天、多少分红、多少送转、当时的前收盘、算出来的 r), 并且把已知偏差写进
+    ``deviation_note``: 存在大量回购注销的股票(格力/美的)会有约 0.1%~0.5% 的额外偏差,
+    因为交易所实际除权扣的不是通达信给的名义每股分红。
+
+    ``mode=none`` 不在此提供 —— 不复权就是乘 1, 不需要打上游。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_XDXR}
+    mode = (mode or "").strip().lower()
+    if mode not in ("qfq", "hfq"):
+        return {"available": False, "reason": f"bad_mode: {mode!r} (qfq/hfq)",
+                "source": SOURCE_XDXR}
+    if limit < 60 or limit > 800:
+        return {"available": False, "reason": f"bad_limit: {limit} (60..800)",
+                "source": SOURCE_XDXR}
+    return _respond(norm, lambda: xdxr_adj_ratios(norm, mode=mode, limit=limit),
+                    required_key="ratios", source=SOURCE_XDXR)
 
 
 @router.get("/sectors/{code}")

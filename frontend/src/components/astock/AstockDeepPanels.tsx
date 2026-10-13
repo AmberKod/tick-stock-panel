@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, BarChart3, Bell, FileText, Flame, Loader2,
+  AlertTriangle, BarChart3, Bell, FileText, Flame, Gift, Loader2,
   TrendingDown, TrendingUp, Waves,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
@@ -422,6 +422,173 @@ function fmtBig(v: number | null): string {
   if (abs >= 1e4) return `${(v / 1e4).toFixed(2)}万`
   return v.toFixed(2)
 }
+
+// ───────────────────────────────────────────── 分红送配
+
+interface XdxrEvent {
+  date: string
+  category: number
+  name: string
+  cash_per_share?: number
+  bonus_share_ratio?: number
+  rights_issue_ratio?: number
+  rights_issue_price?: number
+  pre_total_shares_wan?: number
+  post_total_shares_wan?: number
+}
+
+interface XdxrResp {
+  available: boolean
+  source: string
+  reason?: string
+  data?: {
+    code: string
+    protocol: string
+    events: XdxrEvent[]
+    count: number
+    category_counts: Record<number, number>
+    cash_events: number
+    coverage: { from: string; to: string }
+    unit_note: string
+    adjust_note: string
+    updated_at: string
+  }
+}
+
+/** 按年汇总每股现金分红 —— 一眼看清"这家公司一年给多少钱", 而不用数表格行数。 */
+function yearlyCash(events: XdxrEvent[]): { year: string; cash: number; times: number }[] {
+  const map = new Map<string, { cash: number; times: number }>()
+  for (const e of events) {
+    if (e.category !== 1) continue
+    const y = e.date.slice(0, 4)
+    const cur = map.get(y) ?? { cash: 0, times: 0 }
+    cur.cash += e.cash_per_share ?? 0
+    cur.times += 1
+    map.set(y, cur)
+  }
+  return [...map.entries()]
+    .map(([year, v]) => ({ year, cash: v.cash, times: v.times }))
+    .sort((a, b) => b.year.localeCompare(a.year))
+}
+
+export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: number }) {
+  const query = useQuery({
+    queryKey: ['astock', 'xdxr', symbol],
+    queryFn: () => request<XdxrResp>(`/api/astock/xdxr/${encodeURIComponent(symbol)}`),
+    staleTime: 3_600_000,   // 除权事件是季度级静态数据, 别跟逐笔一样频繁刷新
+  })
+
+  const body = () => {
+    if (query.isLoading) return <StateLine loading text="加载中…" />
+    if (query.error) return <StateLine warn text={`请求失败: ${(query.error as Error).message}`} />
+    const resp = query.data
+    if (!resp?.available) return <StateLine warn text={`不可用: ${resp?.reason ?? '服务不可用'}`} />
+    const data = resp.data
+    if (!data) return <StateLine warn text="不可用: 返回结构异常" />
+
+    if (data.count === 0 || data.cash_events === 0) {
+      // 新股从未分红是真答案 —— 不能显示"取不到"(把"没分过"谎报成"接口坏")
+      return (
+        <div className="py-3 text-xs text-fg-muted">
+          该股自 {data.coverage.from} 以来没有任何分红 / 送转 / 配股记录。
+        </div>
+      )
+    }
+
+    const cash = data.events.filter(e => e.category === 1)
+    const latest = cash[cash.length - 1]
+    const years = yearlyCash(cash)
+    const maxCash = Math.max(...years.map(y => y.cash), 0.0001)
+    const rows = cash.slice(-limit).reverse()
+
+    return (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
+          <span className="text-fg-muted">
+            上市以来现金分红 <b className="text-fg">{data.cash_events}</b> 次
+          </span>
+          <span className="text-fg-muted">
+            最近一次 {latest.date}
+            {latest.cash_per_share ? ` · 每股 ${latest.cash_per_share.toFixed(4)} 元` : ''}
+            {latest.bonus_share_ratio ? ` · 每 10 股送转 ${(latest.bonus_share_ratio * 10).toFixed(2)} 股` : ''}
+          </span>
+          <span className="text-fg-muted">记录覆盖 {data.coverage.from} ~ {data.coverage.to}</span>
+        </div>
+
+        {/* 年度派息柱状条 —— 纯 CSS 宽度, 不引第三方图表库 */}
+        <div className="space-y-1">
+          {years.slice(0, 6).map(y => (
+            <div key={y.year} className="flex items-center gap-2 text-xs">
+              <span className="w-10 shrink-0 tabular-nums text-fg-muted">{y.year}</span>
+              <div className="h-2 flex-1 rounded bg-border/40">
+                <div
+                  className="h-2 rounded bg-danger/60"
+                  style={{ width: `${Math.max(2, (y.cash / maxCash) * 100)}%` }}
+                />
+              </div>
+              <span className="w-24 shrink-0 text-right tabular-nums text-fg-secondary">
+                {y.cash.toFixed(4)} 元/股
+              </span>
+              <span className="w-10 shrink-0 text-right text-fg-muted">{y.times}次</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="-mx-1 overflow-x-auto">
+          <table className="w-full min-w-[560px] border-collapse text-xs">
+            <thead>
+              <tr className="text-fg-muted">
+                <th className="px-1 py-1 text-left font-normal">除权日</th>
+                <th className="px-1 py-1 text-right font-normal">每股派息</th>
+                <th className="px-1 py-1 text-right font-normal">每10股送转</th>
+                <th className="px-1 py-1 text-right font-normal">每10股配股</th>
+                <th className="px-1 py-1 text-right font-normal">配股价</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((e, i) => (
+                <tr key={`${e.date}-${i}`} className="border-t border-border/60">
+                  <td className="px-1 py-1 tabular-nums text-fg-secondary">{e.date}</td>
+                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                    {e.cash_per_share ? e.cash_per_share.toFixed(4) : '—'}
+                  </td>
+                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                    {e.bonus_share_ratio ? (e.bonus_share_ratio * 10).toFixed(2) : '—'}
+                  </td>
+                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                    {e.rights_issue_ratio ? (e.rights_issue_ratio * 10).toFixed(2) : '—'}
+                  </td>
+                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                    {e.rights_issue_price ? e.rights_issue_price.toFixed(2) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="text-[11px] leading-relaxed text-fg-muted">{data.unit_note}</p>
+        {/* 这句话很重要: 有人会拿这些事件自己去推复权价, 得先告诉他偏差边界在哪 */}
+        <p className="text-[11px] leading-relaxed text-fg-muted">{data.adjust_note}</p>
+        <div className="pt-1 text-[11px] text-fg-muted">
+          来源 通达信标准市 GetXdxrInfoCmd · {data.updated_at}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <PanelShell
+      icon={<Gift className="h-4 w-4 text-fg-muted" />}
+      title="分红送配"
+      subtitle="除权除息全事件 · 年度派息与配股明细"
+    >
+      {body()}
+    </PanelShell>
+  )
+}
+
+// ───────────────────────────────────────────── 财务摘要
 
 export function FinancialsPanel({ symbol, periods = 8 }: { symbol: string; periods?: number }) {
   const query = useQuery({

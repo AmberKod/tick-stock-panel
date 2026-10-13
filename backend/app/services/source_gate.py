@@ -67,6 +67,10 @@ REAL_SOURCES: frozenset[str] = frozenset({
     # tdx_ex_provider.py:SOURCE (通达信扩展市场 MAC-EX 7727 分钟K, 2026-10-12 实测:
     # 容器内裸 TCP 直连可达; 美股/港股 MIN_1..MIN_60 均有真实分钟线)
     "tdx-ex",
+    # tdx_xdxr_provider.py:SOURCE (通达信标准市 7709 GetXdxrInfoCmd: A股除权除息全事件
+    # + 由事件推导的复权系数; 2026-10-13 实测 600519 45 条 / 000651 93 条全真实记录,
+    # 日期与新浪 hfq.js 因子生效日逐条对齐)
+    "tdx-xdxr",
     # jiuzhang_openbb_provider.py:51 (SOURCE)
     "openbb",
     # ── provider 数据链路真实标记 (services/hk_data_adapter.py) ──
