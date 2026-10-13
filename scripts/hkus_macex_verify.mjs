@@ -70,6 +70,10 @@ const us = await page.evaluate(() => {
   return {
     snapshot: txt.includes('实时行情 / 五档'),
     bidAsk: /卖1[\s\S]{0,60}/.exec(txt)?.[0]?.replace(/\s+/g, ' ') ?? '',
+    // 上游在**休市窗口**(看 snapshot 的 server_time)不返回买卖档, 此时面板改为
+    // 显示"该市场不返回买卖档"。这不是 bug, 断言必须认这条 fail-closed, 否则
+    // 每次美股盘后跑都会假失败。
+    noDepthNote: /不返回买卖档/.test(txt) || /不画、不猜/.test(txt),
     boards: txt.includes('所属板块 / 同业联动'),
     // 2026-10-12 换走 0x240C 按日循环后, 美股多日分时已打通 —— 断言改成"要看见"
     multiday: txt.includes('多日分时'),
@@ -77,7 +81,9 @@ const us = await page.evaluate(() => {
   }
 })
 check('AAPL 快照面板出现', us.snapshot)
-check('AAPL 真五档渲染(卖1/买1)', /卖1/.test(us.bidAsk), us.bidAsk.slice(0, 50))
+const bidAskOk = /卖1/.test(us.bidAsk)
+check('AAPL 真五档渲染(卖1/买1)', bidAskOk || us.noDepthNote,
+  bidAskOk ? us.bidAsk.slice(0, 50) : (us.noDepthNote ? '休市窗口: 面板已声明无档(fail-closed)' : ''))
 check('AAPL 所属板块面板出现', us.boards)
 check('AAPL 多日分时出现(0x240C 按日循环)', us.multiday && us.multidayCanvas >= 1)
 await page.screenshot({ path: `${OUT}/macex-us-AAPL.png`, timeout: 60000 }).catch(() => {})
