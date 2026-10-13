@@ -22,7 +22,21 @@
         镜像名(本项目为 tsp-fresh-app), 再用 docker tag 打版本标签。
 
 .PARAMETER Force
-    跳过"检测到正在写数据时默认中止"的保护, 强制继续部署。
+    跳过"检测到正在写数据时默认中止"的保护, 强制继续部署(可能中断后台长任务)。
+
+.PARAMETER Wait
+    检测到后台任务正在跑时**不中止**, 而是轮询等待它结束后自动继续部署。
+
+    为什么需要它: market_daily_sync 这类任务是定时触发的(实测一天十几次, 单次
+    30~40 分钟), 占空比不低。默认行为是"中止 + 提示加 -Force", 用户往往连撞
+    好几次都是同一个 active_id —— 那不是卡住, 是还没跑完(进度一直在涨)。
+    -Wait 让脚本自己排队, 打印进度, 跑完就往下走, 不用人肉盯着重试。
+
+.PARAMETER WaitTimeoutMin
+    配合 -Wait 使用: 最多等多少分钟, 超时则按"仍在写数据"中止。默认 40。
+
+.PARAMETER WaitPollSec
+    配合 -Wait 使用: 轮询间隔秒数, 默认 20。
 
 .PARAMETER SkipBuild
     跳过构建, 只用现有镜像重启服务。注意容器仍会被 --force-recreate 重建,
@@ -98,6 +112,9 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
+    [switch]$Wait,
+    [int]$WaitTimeoutMin = 40,
+    [int]$WaitPollSec = 20,
     [switch]$SkipBuild,
     [switch]$SkipRecreate,
     [switch]$NoRollback,
@@ -203,13 +220,31 @@ try {
         if (-not $Force) {
             if ($DryRun) {
                 Write-Host ''
-                Write-DryMsg '真实执行时会在这一步中止(未加 -Force)。演练继续, 以便展示完整命令序列。'
+                Write-DryMsg '真实执行时会在这一步中止(未加 -Force / -Wait)。演练继续, 以便展示完整命令序列。'
+            }
+            elseif ($Wait) {
+                # 这类同步任务单次 30~40 分钟且定时触发, 中止让用户手动重试体验很差;
+                # 但它确实在写 data/, 所以也不能像 -Force 那样直接开打 —— 排队等它结束。
+                Write-Host ''
+                Write-InfoMsg ('已指定 -Wait: 等待后台任务结束(上限 ' + $WaitTimeoutMin + ' 分钟, 每 ' + $WaitPollSec + ' 秒查一次)。')
+                Write-InfoMsg '注意它不是卡住了 —— market_daily_sync 单次通常要 30~40 分钟, 进度会一直涨。'
+                if (-not (Wait-PipelineIdle -Port $healthPort -TimeoutMin $WaitTimeoutMin -PollSec $WaitPollSec)) {
+                    Write-Host ''
+                    Write-FailMsg '等待超时, 已中止部署。'
+                    Write-InfoMsg '可用 -Wait -WaitTimeoutMin 90 加大上限; 确认中断无所谓的场合直接用 -Force。'
+                    exit 1
+                }
+                Write-Host ''
+                Write-OkMsg '后台任务已结束, 继续部署。'
             }
             else {
                 Write-Host ''
-                Write-FailMsg '已中止部署。确认安全后请加 -Force 参数重新执行。'
-                Write-InfoMsg '提示: 可先用 docker compose logs --tail 50 或查看 data/backend.log 确认后台任务是否已结束。'
-                Write-InfoMsg ('      也可直接查: curl --noproxy "*" http://127.0.0.1:' + $healthPort + '/api/pipeline/jobs')
+                Write-FailMsg '已中止部署(后台任务仍在写数据, 现在重启可能打断它)。'
+                Write-InfoMsg '最省事的办法 —— 让脚本自己排队, 任务跑完自动继续:'
+                Write-InfoMsg ('              powershell -File .\scripts\deploy.ps1 -Wait')
+                Write-InfoMsg '确认中断无所谓的场合 —— 立即部署(会打断正在进行的写入):'
+                Write-InfoMsg ('              powershell -File .\scripts\deploy.ps1 -Force')
+                Write-InfoMsg ('想自己确认: curl --noproxy "*" http://127.0.0.1:' + $healthPort + '/api/pipeline/jobs')
                 exit 1
             }
         }

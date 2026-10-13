@@ -1683,3 +1683,71 @@ function Write-HostDependencyReport {
 
     return $dependencies
 }
+
+function Wait-PipelineIdle {
+    <#
+    .SYNOPSIS 轮询等待后端 pipeline 任务跑完 —— 给部署闸门配一个"自动排队"。
+
+    .DESCRIPTION
+        为什么要这个函数:
+          market_daily_sync 这类后台任务是定时触发的(实测一天十几次), 单次 30~40 分钟,
+          占空比不低。闸门原本只会说"正在写数据, 加 -Force 重来", 用户往往连撞好几次
+          都是同一个 active_id —— 它不是卡住了, 是还没跑完(进度会一直涨)。
+
+        所以正确用法不是让用户去查进度再手动重试, 而是脚本自己盯着:
+        每 PollSec 秒查一次 /api/pipeline/jobs, 打印进度, 直到 active_id 清空后返回
+        $true; 超过 TimeoutMin 分钟仍未结束返回 $false, 由调用方决定是否中止。
+
+        返回 $true = 已空闲(可以安全构建/重启); $false = 超时或查询不可用。
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutMin = 40,
+        [int]$PollSec = 20
+    )
+
+    $deadline = (Get-Date).AddMinutes($TimeoutMin)
+    $waited = 0
+    $lastLabel = ''
+
+    while ((Get-Date) -lt $deadline) {
+        $probe = Get-ActivePipelineJob -Port $Port -TimeoutSec 5
+
+        # 查询不可用(端口关了/超时)时, 保守起见交给调用方处理, 不再盲等。
+        if (-not $probe.Known) {
+            Write-WarnMsg '无法确定后台任务状态(查询失败), 停止等待。'
+            return $false
+        }
+
+        if ([string]::IsNullOrWhiteSpace($probe.ActiveId) -and $probe.ActiveJobs.Count -eq 0) {
+            if ($lastLabel -ne '') {
+                Write-Host ('(共等待 ' + $waited + ' 秒)') -ForegroundColor Gray
+            }
+            return $true
+        }
+
+        $labelParts = New-Object System.Collections.ArrayList
+        foreach ($job in @($probe.ActiveJobs)) {
+            $piece = $job.Id + ' ' + $job.Status
+            if (-not [string]::IsNullOrWhiteSpace($job.Stage)) { $piece = $piece + ' ' + $job.Stage }
+            if (-not [string]::IsNullOrWhiteSpace($job.Pct)) { $piece = $piece + ' ' + $job.Pct + '%' }
+            $null = $labelParts.Add($piece)
+        }
+        if ($labelParts.Count -eq 0) { $null = $labelParts.Add(('active_id=' + $probe.ActiveId)) }
+        $label = [string]::Join(', ', $labelParts.ToArray())
+
+        # 进度连续 N 轮一模一样时不必刷屏, 只在变化时打印。
+        if ($label -ne $lastLabel) {
+            Write-Host ('  等待后台任务结束: ' + $label + '  (已等 ' + $waited + 's / 上限 ' + $TimeoutMin + 'min)') -ForegroundColor Yellow
+            $lastLabel = $label
+        }
+
+        Start-Sleep -Seconds $PollSec
+        $waited = $waited + $PollSec
+    }
+
+    Write-WarnMsg ('已等待 ' + $TimeoutMin + ' 分钟, 后台任务仍未结束。')
+    Write-InfoMsg ('你可以改大上限重试: .\scripts\deploy.ps1 -Wait -WaitTimeoutMin 90')
+    return $false
+}

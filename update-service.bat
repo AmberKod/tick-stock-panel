@@ -22,7 +22,8 @@ rem
 rem  Advanced usage, run these in PowerShell / Terminal instead:
 rem    powershell -File .\scripts\deploy.ps1 -DryRun      (rehearse, no changes)
 rem    powershell -File .\scripts\deploy.ps1 -SkipBuild   (config-only change)
-rem    powershell -File .\scripts\deploy.ps1 -Force       (ignore busy warning)
+rem    powershell -File .\scripts\deploy.ps1 -Wait       (queue until background job ends)
+rem    powershell -File .\scripts\deploy.ps1 -Force      (ignore busy warning, deploy now)
 rem    powershell -File .\scripts\deploy.ps1 -RunTests    (run tests before build)
 rem ============================================================
 
