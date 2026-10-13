@@ -80,7 +80,11 @@ interface DeepMinuteResp {
   /** /minuterange 的形状: 按日分组, 需要 flat 成一根序列。 */
   days?: { date: string; bars: { datetime: string; open: number; high: number; low: number;
            close: number; price: number | null; avg: number | null; volume: number | null }[] }[]
-  /** 'single_price' = 上游只给该分钟价格(四价同值); 'aggregated_from_m1' = 由 m1 聚合。 */
+  /**
+   * 蜡烛的来源口径(0x240D 之后两种都已经是"可信 OHLC", 差别只在谁聚合的):
+   *   - 'native'             = 上游每根直给真实开/高/低/收(m1 档);
+   *   - 'aggregated_from_m1' = 由上游真实 m1 的 OHLC 聚合(N 分钟档)。
+   */
   ohlc?: string | null
   derived?: string[]
   bar_count?: number
@@ -143,11 +147,12 @@ interface Props {
    */
   deepMinutePeriod?: MklinePeriod
   /**
-   * 港美股分钟K 的**天数** —— 1 走 /minute(原生蜡烛, 上游单次上限 700 根);
-   * \>1 走 /minuterange(0x240C 按日循环, 可突破 700 根, 但开/高/低是聚合出来的)。
+   * 港美股分钟K 的**天数** —— 1 走 /minute(0x122E, 上限 700 根);
+   * \>1 走 /minuterange(0x240D 区间K线, 单次 1500 根 + 按日K 日历倒序分片)。
    *
-   * 两个端点画出来的东西不一样, 前端必须把"这一屏是不是聚合蜡烛"写在图上 ——
-   * 实测聚合档的收盘价与上游一致(0.000%), 开/高/低平均偏差 <0.05%、最大 <0.45%。
+   * 两边时间戳同为"会话日期 + 北京钟点"(09:31~16:00 / 21:31~04:00), 可以无缝切换。
+   * N 分钟档的蜡烛是**由真实 m1 的 OHLC 聚合**的, 实测与交易所原生 N 分钟 K 逐根
+   * 一致(偏差 0.000%), 但聚合这一事实仍必须写在图上。
    */
   deepMinuteDays?: number
   linkedPrice?: number | null
@@ -304,8 +309,9 @@ export function StockDailyKChart({
   // mkline 是两条完全不同的路, 腾讯那条对港美股 100% 失败(param error)。
   const deepMinuteMarket = symbol.toUpperCase().endsWith('.HK') ? 'hk'
     : symbol.toUpperCase().endsWith('.US') ? 'us' : ''
-  // >1 日走 /minuterange(0x240C 按日循环): 突破 700 根, 代价是开/高/低为聚合值;
-  // 1 日走 /minute(0x122E): 交易所原生蜡烛, 但只有近日日内深度。
+  // >1 日走 /minuterange(0x240D 区间K线: 单次上限 1500 根, 先由日K 取真实交易日历
+  // 再倒序分片 —— 上游是从起点日正向累计的, 直接丢大区间会拿到最老的几天);
+  // 1 日走 /minute(0x122E): 同样的真 OHLC 口径, 但只有近日日内深度(700 根)。
   const deepUseRange = (deepMinuteDays ?? 1) > 1
   const deepMinute = useQuery({
     queryKey: ['deep-minute', deepMinuteMarket, symbol, deepMinutePeriod ?? '', deepMinuteDays],
@@ -520,14 +526,15 @@ export function StockDailyKChart({
           —— 分钟K 仅有近日日内深度，不覆盖完整历史。
         </div>
       )}
-      {/* 多日档: 蜡烛是聚合出来的, 必须写在图上 —— 不标就等于让用户把聚合值
-          当成交易所原生 OHLC 用。 */}
+      {/* 多日档: m1 是上游真 OHLC; N 分钟档是我们从真实 m1 聚合的 —— 这句话必须
+          写在图上, 不标就等于让用户默认它是交易所原生 N 分钟 K。 */}
       {deepMinutePeriod && deepMinute.data?.available && deepUseRange && (
         <div className="px-1 py-1 text-xs text-muted">
           共 {deepMinute.data.bar_count ?? 0} 根 / {deepMinuteDays} 个交易日（时间为北京时间）
           {deepMinute.data.ohlc === 'aggregated_from_m1'
-            ? ' —— 开/高/低由上游 1 分钟价格聚合：收盘价与上游一致（实测 0.000%），开高低平均偏差 <0.05%、最大 <0.45%。'
-            : ' —— 上游只给该分钟价格（开高低为同一值），不是交易所原生蜡烛。'}
+            ? ` —— ${(deepMinutePeriod ?? '').toUpperCase()} 蜡烛由上游真实 1 分钟开高低收聚合：与交易所原生周期 K 逐根一致（实测偏差 0.000%）。`
+            : ' —— 每根均为上游真实开/高/低/收。'}
+          {' '}此档不含均价线（均价请见当日分时）。
         </div>
       )}
       {!mklinePeriod && !kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (

@@ -1,11 +1,11 @@
 /**
- * 浏览器验收 —— 港美股分钟K 的「深度」页签(1 日 原生蜡烛 / 3·5·10 日 聚合蜡烛)。
+ * 浏览器验收 —— 港美股分钟K 的「深度」页签(1 日 原生蜡烛 / 3·5·10 日 0x240D)。
  *
  * 要锁的三件事:
  *  1. 分钟档打开后才会出现「1 日 / 3 日 / 5 日 / 10 日」这组深度页签;
- *  2. 切到 >1 日时, 图上必须写明"开/高/低由 1 分钟价格聚合"(不标 = 把聚合值
- *     当交易所原生 OHLC 卖);
- *  3. 切回 1 日时, 那句标注要消失(原生蜡烛不需要它)。
+ *  2. 切到 >1 日且周期 >m1 时, 图上必须写明"由上游真实 1 分钟开高低收聚合"
+ *     (不标 = 让人误以为是交易所原生 N 分钟 K);
+ *  3. 切回 1 日时, 那句标注要消失 —— 1 日走 /minute, 本来就是原生蜡烛。
  */
 import { chromium } from 'file:///C:/Users/Administrator/.workbuddy/binaries/node/workspace/node_modules/playwright-core/index.mjs'
 
@@ -56,7 +56,7 @@ const depthTabs = await page.evaluate(() => {
     has1: txt.includes('1 日'),
     has3: txt.includes('3 日'),
     has10: txt.includes('10 日'),
-    depthNote: txt.includes('开/高/低由上游 1 分钟价格聚合') || txt.includes('聚合'),
+    depthNote: txt.includes('聚合'),
   }
 })
 check('出现深度页签(1/3/10 日)', depthTabs.has1 && depthTabs.has3 && depthTabs.has10,
@@ -68,12 +68,13 @@ await page.waitForTimeout(5000)
 const at3 = await page.evaluate(() => {
   const txt = document.body.innerText
   return {
-    aggregateNote: /开\/高\/低由上游 1 分钟价格聚合/.test(txt)
-      || /由上游 1 分钟价格聚合/.test(txt),
+    aggregateNote: /由上游真实 1 分钟开高低收聚合/.test(txt),
+    noAvgNote: /此档不含均价线/.test(txt),
     countNote: /共 \d+ 根 \/ 3 个交易日/.exec(txt)?.[0] ?? '',
   }
 })
 check('3 日档标注"聚合蜡烛"', at3.aggregateNote, at3.countNote)
+check('3 日档说明无均价线', at3.noAvgNote)
 
 // 切回 1 日 → 聚合标注应消失
 await clickText('1 日')
@@ -81,11 +82,12 @@ await page.waitForTimeout(5000)
 const at1 = await page.evaluate(() => {
   const txt = document.body.innerText
   return {
-    aggregateNote: /由上游 1 分钟价格聚合/.test(txt),
+    aggregateNote: /由上游真实 1 分钟开高低收聚合/.test(txt),
     capNote: /已取满上游单次上限/.test(txt),
   }
 })
-check('1 日档不再宣称聚合(原生蜡烛)', !at1.aggregateNote)
+check('1 日档不再宣称聚合(原生蜡烛)', !at1.aggregateNote,
+  `上限说明=${at1.capNote}`)
 await page.screenshot({ path: `${OUT}/minute-depth-hk-1day.png`, timeout: 60000 }).catch(() => {})
 
 await browser.close()

@@ -640,8 +640,9 @@ def capabilities(market: str) -> dict:
     }
     items["minute_range"] = {
         "available": True, "source": SOURCE_TDX_EX, "derivation": "native",
-        "note": ("多日分钟价格线(0x240C 按日循环): 港股 330 根/日、美股 390 根/日, 带上游均价; "
-                 "m1 档四价同值(上游无真实开高低), 更长周期由 m1 确定性聚合"),
+        "note": ("多日分钟蜡烛(0x240D 区间K线, 单次 1500 根 + 按日K 日历倒序分片): "
+                 "每根都是上游真实开/高/低/收; 更长周期由真实 m1 聚合, 与交易所原生 "
+                 "N 分钟 K 逐根一致(实测偏差 0.000%)。不给均价 —— 均价线走多日分时"),
     }
     return {"market": m, "items": items}
 
@@ -690,7 +691,7 @@ def transactions(symbol: str, date=None, limit: int = 200) -> dict:
 
 
 def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
-    """多日分钟序列 —— 转发 MAC-EX ``0x240C`` 按日循环(可突破 700 根上限)。"""
+    """多日分钟蜡烛 —— 转发 MAC-EX ``0x240D``(真实 OHLC, 可突破 700 根上限)。"""
     return tdx_ex_provider.minute_range(symbol, days=days, period=period)
 
 

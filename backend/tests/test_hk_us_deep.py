@@ -837,22 +837,74 @@ def test_api_transactions_node_down_is_http200(client, monkeypatch):
     assert body["available"] is False and "provider_error" in body["reason"]
 
 
+class _RngRec:
+    """上游 0x240D 一根: **真实** open/high/low/close + trade(该分钟成交量)。"""
+
+    def __init__(self, ymd, hour=9, minute=31, open_=100.0, high=101.0,
+                 low=99.0, close=100.5, trade=1000):
+        self.year, self.month, self.day = ymd // 10000, (ymd // 100) % 100, ymd % 100
+        self.hour, self.minute = hour, minute
+        self.open, self.high, self.low, self.close = open_, high, low, close
+        self.trade, self.position, self.amount = trade, 0, 0.0
+
+
+class _RngFrame:
+    """日K 日历替身 —— `_rows_from_frame` 只用到 to_dict('records')。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_dict(self, orient):
+        return list(self._rows)
+
+
+def _patch_minuterange(monkeypatch, n_days=2, bars_per_day=10):
+    """同时桩掉日K 交易日历与 0x240D, 返回期望下发的日期列表(升序)。"""
+    from app.data_providers import tdx_ex_provider as tx
+
+    cands = list(reversed(tx._recent_trading_candidates(40)))
+    cal = [{"datetime": f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d} 00:00:00",
+            "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i,
+            "close": 100.0 + i, "vol": 1000, "amount": 100000.0}
+           for i, d in enumerate(cands)]
+    dates = [r["datetime"][:10].replace("-", "") for r in cal][-n_days:]
+    monkeypatch.setattr(tx, "_fetch_once", lambda *a, **k: _RngFrame(cal))
+
+    def fake_exec(host, factory):
+        cmd = factory()
+        out: list[object] = []
+        for d in dates:
+            if int(cmd.start_date) <= int(d) <= int(cmd.end_date):
+                out.extend(
+                    _RngRec(int(d), 9, 31 + i, open_=100.0 + i, high=101.0 + i,
+                            low=99.0 + i, close=100.5 + i)
+                    for i in range(bars_per_day))
+        return out
+
+    monkeypatch.setattr(tx, "_exec_once", fake_exec)
+    return dates
+
+
 def test_api_minuterange_ok(client, monkeypatch):
-    """多日分钟序列: 按日循环, m5 档由 m1 聚合且必须声明。"""
-    _patch_exec_result(monkeypatch, [_MinuteRec(9, 30 + i, price=100.0 + i) for i in range(10)])
+    """多日分钟蜡烛: 0x240D 每根都给真 OHLC; N 分钟档由真实 m1 聚合且必须声明。"""
+    _patch_minuterange(monkeypatch, 2)
     body = client.get("/api/hk/deep/minuterange/00700.HK?days=2&period=m5").json()
     assert body["available"] is True
+    assert body["protocol"] == "0x240D"
     assert len(body["days"]) == 2
+    assert all(len(d["bars"]) == 2 for d in body["days"])     # 10 根 m1 → 2 根 m5
     assert body["ohlc"] == "aggregated_from_m1"
-    assert body["derived"] == ["open", "high", "low"]
+    assert body["derived"] == ["open", "high", "low", "close"]
 
 
-def test_api_minuterange_m1_flags_single_price(client, monkeypatch):
-    _patch_exec_result(monkeypatch, [_MinuteRec()])
+def test_api_minuterange_m1_is_native_ohlc(client, monkeypatch):
+    """m1 档不再有"四价同值"这回事 —— 开高低收各自不同, 但**没有均价**。"""
+    _patch_minuterange(monkeypatch, 1)
     body = client.get("/api/hk/deep/minuterange/00700.HK?days=1").json()
-    assert body["ohlc"] == "single_price"
+    assert body["ohlc"] == "native" and body["derived"] == []
     bar = body["days"][0]["bars"][0]
-    assert bar["avg"] == pytest.approx(415.6)
+    assert (bar["open"], bar["high"], bar["low"], bar["close"]) == (100.0, 101.0, 99.0, 100.5)
+    assert body["has_avg"] is False and bar["avg"] is None
 
 
 def test_api_minuterange_bad_days_is_fail_closed(client):
@@ -865,7 +917,7 @@ def test_capabilities_lists_transactions_and_minute_range():
     assert caps["transactions"]["available"] is True
     assert caps["minute_range"]["available"] is True
     assert "0x23FC" in caps["transactions"]["note"]
-    assert "0x240C" in caps["minute_range"]["note"]
+    assert "0x240D" in caps["minute_range"]["note"]
 
 
 # ───────────────────────────────────────────── 多日分时端点(0x240C + 日K 昨收)

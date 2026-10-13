@@ -29,6 +29,9 @@ from datetime import date as _date_cls
 from datetime import datetime
 
 from app._vendor.easy_tdx.codec.bitmap import PresetField
+from app._vendor.easy_tdx.ex.commands.get_history_bars_range import (
+    GetExHistoryInstrumentBarsRangeCmd,
+)
 from app._vendor.easy_tdx.ex.commands.get_instrument_quote import GetExInstrumentQuoteCmd
 from app._vendor.easy_tdx.ex.commands.get_minute_time import GetExHistoryMinuteTimeDataCmd
 from app._vendor.easy_tdx.ex.commands.get_transaction import (
@@ -78,13 +81,25 @@ _MULTIDAY_CALENDAR_PADDING = 10
 #: 0x240C 当日末价 vs 日K close 的相对容差(float32 毛刺 / 上游口径微差)。
 _MULTIDAY_CLOSE_TOLERANCE = 0.005
 
-#: m1 → N 分钟聚合时 open/high/low 的实测偏差(2026-10-09, HK 00700 / US AAPL 各 66~78 根
-#: 与上游 MIN_5 逐根对比): close 完全一致(0.000%), 开高低平均 <0.05% / 最大 <0.45%。
-#: 写进 payload 让前端和用户知道"聚合蜡烛不是交易所原生蜡烛"。
+#: m1 → N 分钟聚合时 open/high/low 的实测偏差(2026-10-13, HK 00700 / US AAPL 各 66~78 根,
+#: **走 0x240D 的真实 m1 OHLC** 与上游原生 MIN_5 逐根对比): 开/高/低/收**全部 0.000%**。
+#: 数学上必然如此 —— 上游原生 N 分钟 K 就是交易所用同一套规则从 m1 聚合的。
 _AGGREGATE_DEVIATION_NOTE = (
-    "聚合自上游 1 分钟价格: 收盘价与上游完全一致(实测偏差 0.000%); "
-    "开/高/低由组内分钟价格的极值推导, 实测平均偏差 <0.05%、最大 <0.45%"
+    "由上游 1 分钟真实开高低收聚合(非单点价格的极值推导): 与交易所原生 N 分钟 K "
+    "逐根对比, 开/高/低/收偏差全部 0.000%(实测 2026-10-13 HK 00700 66 根 / US AAPL 78 根)"
 )
+
+#: 0x240D(GetExHistoryInstrumentBarsRangeCmd) 的**单次根数上限**: 实测请求跨 21 个月的
+#: 区间也只回 1500 根 —— 它是**从 ``start_date`` 起正向累计**到 1500 就掐断。所以想要
+#: "最近 N 天"必须自己倒推起点分片, 不能直接丢一个大区间过去(会拿到那段里最老的几天)。
+MAX_RANGE_BARS_PER_REQUEST = 1500
+
+#: 0x240D 每日分钟根数的**保守上界**(实测 HK 330 / US 390)。用来算"一次请求最多覆盖
+#: 几个交易日" —— 取保守值是为了留余量: 真下满了 1500 会被正向上限掐断, 丢掉最近那天。
+_MINUTE_BARS_PER_DAY = {"hk": 340, "us": 400}
+#: 0x240D 的 hour 字段已由上游 mod 24(美股凌晨段直接是 0~4, 不像 0x240C 那样给 24~27)。
+#: 判"换了一天"要用会话内单调钟: 早于开盘小时的那些凌晨时刻 +24。
+_SESSION_START_HOUR = {"hk": 9, "us": 21}
 
 #: 行情快照/盘口这类"看一眼就过时"的数据用固定的短 TTL: 比分钟K (settings) 短得多,
 #: 否则前端轮询到的是一分钟前的价格, 而 K 线那头的口径已经不一样了。
@@ -421,25 +436,32 @@ def _rows_from_mac_transactions(raw) -> list[dict]:
     return rows
 
 
-# ───────────────────────────────────────────── 分钟价格线(按日循环, 突破 700 根)
+# ───────────────────────────────────────────── 多日分钟 K / 分钟价格线
+
 
 def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
-    """多日分钟序列 —— 走 ``GetExHistoryMinuteTimeDataCmd``(0x240C)**按日循环**。
+    """多日分钟蜡烛 —— 走 ``GetExHistoryInstrumentBarsRangeCmd``(0x240D), **真实 OHLC**。
 
-    ⚠️ 为什么它能突破 700 根: 0x240C 是"**单日一包**"(无 count 参数), 实测港股
-    330 根/日(09:30~15:59)、美股 390 根/日(21:30~27:59)。按 date 一天一天取再拼接,
-    长度只受"想取多少天"限制 —— 实测 6 个交易日 HK 1980 根 / US 1951 根。
+    ⚠️ 为什么从 0x240C 换成 0x240D(2026-10-13 实测, 探针归档在
+    ``deliverables/tdx-ex-scan/probe_240d_range.py`` / ``probe_240d_detail.py``):
+      - 0x240C 每根只给 ``price``(该分钟的一个价格), **没有开/高/低**: m1 只能标
+        "四价同值", 更长周期只能拿单点价格的极值去"推"OHLC —— 实测相对交易所原生
+        MIN_5 有平均 <0.05% / 最大 <0.45% 的偏差。
+      - **0x240D 每根都带真实开/高/低/收**(实测 HK 00700 330/330 根、US AAPL 390/390
+        根全部有真实幅度), 且单次 1500 根 = HK 约 4 个交易日 / US 约 3 个, 比按日
+        循环少发好几倍请求。
+      - 🎁 时间戳口径顺带统一了: 0x240D 是 ``09:31~16:00``(HK) / ``21:31~04:00``(US),
+        与 ``goods_kline`` MIN_1(``/minute`` 端点)**逐根一致**; 而 0x240C 早一格
+        (``09:30~15:59``)。也就是说这一改, 1 日 / 多日两套分钟图的 x 轴对齐了。
+      - 🎁 从真实 m1 OHLC 聚合出的 N 分钟蜡烛, 与交易所原生 MIN_5 **逐根 0.000%
+        一致**(实测 HK 66 根 / US 78 根) —— 聚合不再是折衷, 标注详见 ``derived``。
 
-    ⚠️ 它不是蜡烛: 0x240C 每根只给 ``price``(该分钟价格) + ``avg_price``(当日累计均价)
-    + ``volume``(该分钟成交量), **没有开/高/低**。所以:
-      - ``period="m1"``: 原样下发(四价同值 = 该分钟价格, 并在 payload 标注), 不造 OHLC;
-      - 其它周期: 由 m1 **确定性聚合**出 OHLC, ``derived`` 标注 + 实测偏差写进 note。
-        实测与上游 MIN_5 逐根对比: close 完全一致, 开高低平均 <0.05% / 最大 <0.45%。
-        聚合 bar 的时间戳取区间内最后一根分钟的时刻(比上游原生 N 分钟 K 的区间
-        结束时刻早 1 分钟) —— 不做 +step, 否则美股收盘那组会造出 04:00 之后的时刻。
+    ⚠️ 它**没有均价**: 0x240C 每根自带 ``avg_price``(当日累计均价), 0x240D 不给。
+    所以多日分时 / 当日分时那条要均价线的路**继续走 0x240C**(``_minute_days_240c``),
+    本函数专供蜡烛图, ``has_avg`` 如实标 False。
 
-    时间戳口径与 ``minute_bars`` 保持一致: **会话日期 + 北京时间钟点**(美股凌晨段
-    沿用同一日期标签, hour 取 mod 24)。
+    ⚠️ 1500 根上限是**从 ``start_date`` 起正向累计**的: 直接丢一个大区间过去会拿到
+    "那段里最老的几天"。所以先用日K 拿到真交易日历, 再按片倒着请求。
     """
     key = str(period or "").strip().lower()
     if key not in _PERIODS:
@@ -455,6 +477,173 @@ def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
     if isinstance(cached, dict):
         return {**cached, "cached": True}
 
+    raw_days = _minute_days_240d(market, code, days)
+    out_days = [{"date": d["date"], "bars": _aggregate_m1(d["rows"], step)}
+                for d in raw_days]
+
+    payload = {
+        "source": SOURCE,
+        "market": market,
+        "symbol": str(symbol).upper(),
+        "period": key,
+        "protocol": "0x240D",
+        "requested_days": days,
+        "days": out_days,
+        "bar_count": sum(len(d["bars"]) for d in out_days),
+        # 0x240D 每根都给真开高低收, 不再需要"单点价格"的折衷
+        "ohlc": "native" if step == 1 else "aggregated_from_m1",
+        "derived": [] if step == 1 else ["open", "high", "low", "close"],
+        "has_avg": False,
+        "volume_unit": "share",
+        "timezone": "Asia/Shanghai",
+        "note": ("上游 0x240D 区间K线: 单次上限 1500 根、从起点日正向累计, "
+                 "故先由日K 取真实交易日历再倒序分片请求。时间戳为北京时间"
+                 "(美股会话跨零点: 21:31~04:00), 与 1 日分钟图口径一致。"
+                 + ("" if step == 1
+                    else " N 分钟蜡烛: " + _AGGREGATE_DEVIATION_NOTE)),
+        "cached": False,
+    }
+    _cache_put(cache_key, payload, float(_settings().tdx_ex_cache_ttl_s))
+    return payload
+
+
+def _minute_days_240d(market: str, code: str, days: int) -> list[dict]:
+    """最近 ``days`` 个交易日的**真实分钟蜡烛** —— 0x240D 分片取 + 按会话切天。
+
+    日期列表**不用猜**: 直接取日K 的交易日历(港美股假期各不相同, 跳过周末猜必错),
+    取最后 ``days`` 个; 再按 ``MAX_RANGE_BARS_PER_REQUEST // 每日根数上界`` 分片,
+    一片一次请求。
+    """
+    calendar = _daily_closes(market, code, days + _MULTIDAY_CALENDAR_PADDING)
+    if not calendar:
+        raise TdxExUnavailableError(f"minute_range: {market}:{code} 日K 取不到, 无法定位交易日")
+    targets = [ymd for ymd, _ in calendar][-days:]
+
+    # 🔴 market 是 ``HK``/``US``(大写), 而下面两张表用小写 key —— 不 lower 就会静默
+    # 走 fallback: 港股按美股的每日根数上界分片(多发一次请求), 会话起始小时更是
+    # 会错成 21(港股会话 09:31~16:00 全被当成"凌晨段", 虽然巧合下单调性仍成立)。
+    mkey = market.lower()
+    per_day = _MINUTE_BARS_PER_DAY.get(mkey, 400)
+    chunk = max(1, MAX_RANGE_BARS_PER_REQUEST // per_day)
+    start_hour = _SESSION_START_HOUR.get(mkey, 21)
+
+    merged: dict[str, list[dict]] = {}
+    for i in range(0, len(targets), chunk):
+        group = targets[i:i + chunk]
+        bars = _exec(lambda s=int(group[0]), e=int(group[-1]):
+                     GetExHistoryInstrumentBarsRangeCmd(_market_code(market), code, s, e))
+        for day in _split_range_days(bars, start_hour):
+            # 非交易日/未来日期: 0x240D 回空包(不像 0x240C 那样回全 0 的填充包),
+            # 但这里仍然按价格过滤一层 —— 上游格式变了也不至于把 0 元线画出来。
+            if not any((r.get("close") or 0) > 0 for r in day["rows"]):
+                continue
+            key = day["date"].replace("-", "")
+            if key not in targets:
+                continue        # 防御: 上游越出请求区间的日期一律不要
+            merged[key] = day["rows"]
+
+    # 按日K 日历顺序下发(上游可能整块缺失某天 —— 缺就缺, 不做填空)
+    out = [{"date": _iso_day(k), "rows": merged[k]} for k in targets if k in merged]
+    if not out:
+        raise TdxExUnavailableError(
+            f"minute_range: {market}:{code} 最近 {days} 个交易日均无分钟数据")
+    return out
+
+
+def _iso_day(ymd: str) -> str:
+    """``yyyymmdd`` → ``yyyy-mm-dd``。"""
+    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
+
+
+def _split_range_days(bars, start_hour: int) -> list[dict]:
+    """0x240D 返回的连续 bar 流 → 按交易日切开。
+
+    🔴 为什么**不能按 datetime 字符串排序**: 0x240D 的 ``hour`` 已经被上游 mod 24
+    (美股凌晨段直接是 ``00:00~04:00``, 不像 0x240C 那样给 24~27)。一排序, 凌晨段就
+    被甩到开盘段**前面**, 整个会话的顺序错乱(21:31 那根会排在 00:00 之后)。
+    这里改用**会话内单调钟**切天: 早于开盘小时的凌晨时刻 +24, 于是 HK 是
+    9→16、US 是 21→28 一路递增, 出现回落即换日。
+
+    日期标签直接取每根自带的 ``year/month/day`` —— 真源, 与日K 的美股会话标签一致。
+    """
+    groups: list[list] = []
+    cur: list = []
+    clock = -1.0
+    for bar in list(bars or []):
+        hour = int(getattr(bar, "hour", 0) or 0)
+        minute = int(getattr(bar, "minute", 0) or 0)
+        mono = (hour + 24 if hour < start_hour else hour) + minute / 60.0
+        if cur and mono <= clock:
+            groups.append(cur)
+            cur = []
+        cur.append(bar)
+        clock = mono
+    if cur:
+        groups.append(cur)
+
+    out: list[dict] = []
+    for group in groups:
+        head = group[0]
+        date_s = f"{int(head.year):04d}-{int(head.month):02d}-{int(head.day):02d}"
+        rows = [{
+            "datetime": f"{date_s} {int(getattr(b, 'hour', 0) or 0):02d}:"
+                        f"{int(getattr(b, 'minute', 0) or 0):02d}:00",
+            "open": _round(getattr(b, "open", None), 4),
+            "high": _round(getattr(b, "high", None), 4),
+            "low": _round(getattr(b, "low", None), 4),
+            "close": _round(getattr(b, "close", None), 4),
+            "price": _round(getattr(b, "close", None), 4),
+            "volume": int(getattr(b, "trade", 0) or 0),
+            # 0x240D 不给均价。留 None, 不拿成交量去加权"算"一个 —— 那是推导值,
+            # 不该和上游直给的 avg_price 混成一个名字。
+            "avg": None,
+        } for b in group]
+        out.append({"date": date_s, "rows": rows})
+    return out
+
+
+def _aggregate_m1(rows: list[dict], step: int) -> list[dict]:
+    """真实 m1 OHLC → N 分钟蜡烛(规则与交易所一致: 开取首根的open、高低取极值、收取末根)。
+
+    时间戳取组内**最后一根**的时刻 —— 实测与上游原生 MIN_5 完全对齐(HK 末根 16:00、
+    US 末根 04:00)。不做 +step: 美股收盘那组 +5 分钟会越过 04:00 造出不存在的时间点。
+    """
+    if step <= 1:
+        return rows
+    out: list[dict] = []
+    for i in range(0, len(rows) - step + 1, step):
+        grp = rows[i:i + step]
+        opens = [g["open"] for g in grp if g["open"] is not None]
+        highs = [g["high"] for g in grp if g["high"] is not None]
+        lows = [g["low"] for g in grp if g["low"] is not None]
+        closes = [g["close"] for g in grp if g["close"] is not None]
+        if not (opens and highs and lows and closes):
+            continue
+        out.append({
+            "datetime": grp[-1]["datetime"],
+            "open": opens[0],
+            "high": max(highs),
+            "low": min(lows),
+            "close": closes[-1],
+            "price": closes[-1],
+            "avg": None,
+            "volume": sum(int(g["volume"] or 0) for g in grp),
+        })
+    return out
+
+
+def _minute_days_240c(symbol: str, days: int) -> list[dict]:
+    """0x240C 按日循环的分钟**价格线**(带均价) —— 多日分时 / 当日分时专用。
+
+    与 ``_minute_days_240d`` 的分工: 这条几分钟序列**每根自带当日累计均价**
+    (``avg_price``), 但没有 OHLC; 蜡烛图走 0x240D 那份。多日分时的均线、当日分时
+    的黄线都必须是这条。
+
+    ⚠️ 0x240C 对"还没发生的日期"回**一整包 price=0 的填充数据**(实测北京 10-13
+    00:19 请求 10-13 拿到 HK 330 根 0.0) —— 只判"非空"会把次日当成交易日, 所以
+    必须再要求包里至少一根 ``price > 0``。
+    """
+    market, code = _split(symbol)
     # 由新到旧扫: 要的是**最近** N 个交易日。反过来自旧向新扫会拿到"最近一段里
     # 最老的几天"(实测 days=3 拿到 10-02 而漏掉 10-12), 图看着像数据没更新。
     collected: list[dict] = []
@@ -465,42 +654,12 @@ def minute_range(symbol: str, days: int = 5, period: str = "m1") -> dict:
         if not bars:
             continue    # 非交易日: 上游给空包, 不是故障
         if not any((_round(getattr(b, "price", None), 4) or 0) > 0 for b in bars):
-            # 🔴 上游对"还没发生的日期"不回空包, 而是回**一整包价格为 0 的填充数据**
-            # (实测北京 10-13 00:19 请求 10-13: HK 330 根 0.0 / US 390 根 0.0)。
-            # 只判"非空"会把它当成交易日, 于是图上出现一条 0 元线、多日分时还会
-            # 因为"日历里没这天"被守卫①拦掉。必须按价格有效性过滤。
             continue
         collected.append({
             "date": f"{ymd // 10000:04d}-{(ymd // 100) % 100:02d}-{ymd % 100:02d}",
-            "bars": _rows_from_minute_bars(bars, ymd, step),
+            "bars": _rows_from_minute_bars(bars, ymd, 1),
         })
-    out_days = list(reversed(collected))    # 下发仍按时间升序
-
-    if not out_days:
-        raise TdxExUnavailableError(f"minute_range: {symbol} 最近 {days} 个交易日均无分钟数据")
-
-    payload = {
-        "source": SOURCE,
-        "market": market,
-        "symbol": str(symbol).upper(),
-        "period": key,
-        "protocol": "0x240C",
-        "requested_days": days,
-        "days": out_days,
-        "bar_count": sum(len(d["bars"]) for d in out_days),
-        # 上游只给"该分钟价格", 没有真实开高低 —— 这一条必须让前端知道
-        "ohlc": "single_price" if step == 1 else "aggregated_from_m1",
-        "derived": [] if step == 1 else ["open", "high", "low"],
-        "has_avg": True,
-        "volume_unit": "share",
-        "timezone": "Asia/Shanghai",
-        "note": ("上游 0x240C 单日一包(港股 330 根/日、美股 390 根/日), 按日循环拼接, "
-                 + ("m1 档四价同值 = 该分钟价格(上游无真实开高低), 配有上游当日累计均价"
-                    if step == 1 else _AGGREGATE_DEVIATION_NOTE)),
-        "cached": False,
-    }
-    _cache_put(cache_key, payload, float(_settings().tdx_ex_cache_ttl_s))
-    return payload
+    return list(reversed(collected))    # 下发仍按时间升序
 
 
 def _rows_from_minute_bars(bars, ymd: int, step: int) -> list[dict]:
@@ -917,7 +1076,9 @@ def multi_day_ticks(symbol: str, days: int = 5) -> dict:
     if isinstance(cached, dict):
         return {**cached, "cached": True}
 
-    minute = minute_range(symbol, days=days, period="m1")
+    # 🔴 多日分时必须有均价线 → 走带 avg_price 的 0x240C 序列(注意不是 minute_range,
+    # 那份已经改走 0x240D 拿真实蜡烛了, 而 0x240D **不给均价**)。
+    day_bars = _minute_days_240c(symbol, days)
     calendar = _daily_closes(market, code, days * 3 + _MULTIDAY_CALENDAR_PADDING)
     if not calendar:
         raise TdxExUnavailableError(f"multiday: {symbol} 日K 取不到, 没有昨收真源可用")
@@ -927,7 +1088,7 @@ def multi_day_ticks(symbol: str, days: int = 5) -> dict:
 
     out_days: list[dict] = []
     seen_idx: list[int] = []
-    for day in minute["days"]:
+    for day in day_bars:
         ymd = day["date"].replace("-", "")
         # 守卫①: 上游分钟包的日期必须落在日K 交易日历里
         if ymd not in closes:
