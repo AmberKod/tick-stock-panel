@@ -193,6 +193,9 @@ class Settings(BaseSettings):
     tdx_std_timeout_s: float = 8.0
     # 除权事件是"季度级静态数据", 一天变一次都算多; 给长 TTL 别每次刷页面都建 TCP。
     tdx_xdxr_cache_ttl_s: float = 1800.0
+    # 逐笔成交同走标准市 7709 (GetHistoryTransactionDataCmd 0x0fb5)。
+    # 它是**分钟前进 By 笔**的高频数据 -> TTL 短; 且 tail 模式单次只发一个包, 不翻页。
+    tdx_tick_cache_ttl_s: float = 60.0
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)

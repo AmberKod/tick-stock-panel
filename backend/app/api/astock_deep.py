@@ -52,6 +52,18 @@ from app.data_providers.jiuzhang_astock_provider import (
     stock_sectors,
     tick_trades,
 )
+from app.data_providers.tdx_tick_provider import (
+    SOURCE as SOURCE_TICK,
+)
+from app.data_providers.tdx_tick_provider import (
+    day_summary as tick_day_summary,
+)
+from app.data_providers.tdx_tick_provider import (
+    recent_trades as tick_recent_trades,
+)
+from app.data_providers.tdx_tick_provider import (
+    trading_dates as tick_trading_dates,
+)
 from app.data_providers.tdx_xdxr_provider import (
     SOURCE as SOURCE_XDXR,
 )
@@ -386,6 +398,64 @@ def get_tick_trades(code: str, tail: int = 200) -> dict:
                 "source": SOURCE_TENCENT}
     return _respond(norm, lambda: tick_trades(norm, tail=tail),
                     required_key="rows", source=SOURCE_TENCENT)
+
+
+@router.get("/ticktrades/{code}")
+def get_tdx_tick_trades(code: str, date: str | None = None, tail: int = 200) -> dict:
+    """A股**真逐笔成交**(通达信标准市 ``GetHistoryTransactionDataCmd`` 0x0fb5)。
+
+    与上面的 ``/ticks``(腾讯 3 秒快照)的根本区别:
+        - ``/ticks`` 每 3 秒一行、一行是该窗口所有成交的**合计**;
+        - 这里一行的就是一笔成交, 粒度到单笔。
+
+    ``date`` 省略时取最近交易日(由腾讯日K日历决定, 不会挑到非交易日上)。
+    ``tail`` 最近多少笔(默认 200, 上限 800 —— 协议单次上限, 超过要翻页走 ``/tickdaysummary``)。
+
+    协议两个坑已经在 provider 里处理并把结论写在模块 docstring:
+    上游会夹带 ``vol=0`` 的行情标记行(已剔除并计数)、15:00 之后还有几笔
+    恒等于收盘价的盘后成交(单标 ``after_hours``, 不计入盘中量)。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TICK}
+    if tail < 1 or tail > 800:
+        return {"available": False, "reason": f"bad_tail: {tail} (1..800)",
+                "source": SOURCE_TICK}
+    return _respond(norm, lambda: tick_recent_trades(norm, date, tail),
+                    required_key="trades", source=SOURCE_TICK)
+
+
+@router.get("/tickdaysummary/{code}")
+def get_tdx_tick_day_summary(code: str, date: str | None = None) -> dict:
+    """整天逐笔 + **成交量**交叉校验 —— 比 ``/ticktrades`` 慢(要翻多页)。
+
+    这里的 ``cross_check`` 是最硬的一条: 盘中(≤15:00)逐笔量合计必须等于腾讯
+    日K成交量、末笔价必须等于收盘价 —— 实测 600519 / 300750 双双 0.000000%。
+    UI 首屏别用它, 给"数据可信度"这类自查入口用。
+    """
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TICK}
+    return _respond(norm, lambda: tick_day_summary(norm, date),
+                    required_key="trades", source=SOURCE_TICK)
+
+
+@router.get("/tickdates/{code}")
+def get_tdx_tick_dates(code: str, limit: int = 10) -> dict:
+    """最近若干个交易日(升序) —— 逐笔面板的日期下拉。"""
+    norm = _norm_code(code)
+    if not norm:
+        return {"available": False, "reason": f"bad_code: {code!r} 不是 A股代码",
+                "source": SOURCE_TICK}
+    dates = tick_trading_dates(norm, max(1, min(limit, 30)))
+    if not dates:
+        return {"available": False, "reason": "cross_source_unavailable: 腾讯日K取不到",
+                "source": SOURCE_TICK}
+    return {"available": True, "source": SOURCE_TICK, "code": norm,
+            "data": {"code": norm, "dates": dates, "count": len(dates),
+                     "latest": dates[-1] if dates else None}}
 
 
 @router.get("/peers/{code}")

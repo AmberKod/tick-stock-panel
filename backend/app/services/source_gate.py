@@ -71,6 +71,10 @@ REAL_SOURCES: frozenset[str] = frozenset({
     # + 由事件推导的复权系数; 2026-10-13 实测 600519 45 条 / 000651 93 条全真实记录,
     # 日期与新浪 hfq.js 因子生效日逐条对齐)
     "tdx-xdxr",
+    # tdx_tick_provider.py:SOURCE (通达信标准市 7709 GetHistoryTransactionDataCmd 0x0fb5:
+    # A股**真逐笔成交**, 2026-10-14 实测 —— 600519 当日 4086 行 / 300750 4857 行;
+    # 盘中量合计与腾讯日K成交量、末笔价与收盘价双双咬合 0.0000%)
+    "tdx-tick",
     # jiuzhang_openbb_provider.py:51 (SOURCE)
     "openbb",
     # ── provider 数据链路真实标记 (services/hk_data_adapter.py) ──
