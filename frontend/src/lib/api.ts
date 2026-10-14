@@ -406,6 +406,56 @@ export interface TickRow {
   auction: 'open' | 'close' | 'after' | null
 }
 
+/**
+ * **真逐笔成交**的一行 —— 一行 = 一笔成交(通达信标准市 `GetHistoryTransactionDataCmd` 0x0fb5)。
+ *
+ * 与下面的 `TickRow`(腾讯 3 秒快照)的根本区别: TickRow 一行是某个 3 秒窗口内
+ * 所有成交的**合计**; 这里一行的就是一笔成交。
+ *
+ * ⚠️ 两个口径必须原样摆给用户:
+ *   - `side` 是行情商按成交价与当时盘口的比较判定的, **不是交易所披露字段**;
+ *   - `vol` 单位是**手**(1 手 = 100 股), 与日K同口径 —— 不需要像快照那样用额÷价反推。
+ */
+export interface AstockTickTrade {
+  seq: number
+  /** HH:MM, 上游精度只到分钟 */
+  time: string
+  /** 距 0 点的分钟数, 前端排序/分组用 */
+  minutes: number
+  price: number
+  /** 成交量(手) */
+  vol: number
+  side: 'buy' | 'sell' | 'auction' | 'unknown'
+  /** continuous 连续竞价 / open_auction 开盘竞价 / close_auction 收盘竞价 / after_hours 盘后 */
+  session: 'continuous' | 'open_auction' | 'close_auction' | 'after_hours'
+}
+
+/** 一天逐笔的摘要(已剔除上游夹带的 vol=0 行情标记行)。 */
+export interface AstockTickSummary {
+  /** 上游原始行数(含标记行) */
+  upstream_rows: number
+  /** 被剔除的 vol=0 标记行数量 —— 不剔除会出现"有价无量"的假成交 */
+  marker_rows_dropped: number
+  regular_count: number
+  after_hours_count: number
+  volume: number
+  /** 盘中(≤15:00)成交量合计 —— 这个数才与日K成交量同口径 */
+  volume_regular: number
+  volume_after_hours?: number
+}
+
+/** 逐笔自身的交叉校验结论(与腾讯日K咬合)。 */
+export interface AstockTickCheck {
+  available: boolean
+  reason?: string
+  daily_close?: number
+  last_trade_price?: number
+  last_trade_time?: string
+  close_diff_pct?: number | null
+  verified?: boolean
+  note?: string
+}
+
 /** 同行对比可展示的指标列(与后端 _PEER_METRICS 对齐)。 */
 export type PeerMetricKey =
   | 'pe_ttm' | 'pe' | 'pb' | 'ps_ttm' | 'pcf_ttm' | 'peg'
@@ -2538,6 +2588,47 @@ export const api = {
         updated_at?: string
       }
     }>(`/api/astock/ticks/${encodeURIComponent(code)}?tail=${tail}`),
+  /**
+   * A股**真逐笔成交**(通达信标准市 `GetHistoryTransactionDataCmd` 0x0fb5)。
+   *
+   * 与上面的 `astockTicks`(腾讯 3 秒快照)的区别: 这里一行 = 一笔成交, 不需要
+   * Level-2。日期省略时后端取最近交易日(按腾讯日K日历, 不会挑到非交易日上)。
+   *
+   * `cross_check` 每次都给结论 —— 最后一笔盘中成交必须与日K收盘价一致,
+   * 实测 600519 / 300750 偏差 0.000000%; 校验不通过会置 verified=false, 不静默。
+   */
+  astockTickTrades: (code: string, date?: string | null, tail = 200) =>
+    request<{
+      available: boolean
+      reason?: string
+      source?: string
+      data?: {
+        code: string
+        date: string
+        protocol: string
+        trades: AstockTickTrade[]
+        count: number
+        tail: number
+        /** 上游还有更早的成交没有取回来 */
+        truncated: boolean
+        summary: AstockTickSummary
+        cross_check: AstockTickCheck
+        unit_note: string
+        direction_note: string
+        after_hours_note: string
+        updated_at?: string
+      }
+    }>(`/api/astock/ticktrades/${encodeURIComponent(code)}?tail=${tail}${
+      date ? `&date=${encodeURIComponent(date)}` : ''
+    }`),
+  /** 最近若干交易日(升序) —— 真逐笔面板的日期下拉。 */
+  astockTickDates: (code: string, limit = 10) =>
+    request<{
+      available: boolean
+      reason?: string
+      source?: string
+      data?: { code: string; dates: string[]; count: number; latest: string | null }
+    }>(`/api/astock/tickdates/${encodeURIComponent(code)}?limit=${limit}`),
   /**
    * 同行公司对比(东财 F10「行业对比」)。
    *

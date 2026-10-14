@@ -451,8 +451,8 @@ export function StockDetail() {
     try { localStorage.setItem('stockDetail:chips', on ? '1' : '0') } catch { /* 忽略 */ }
   }, [])
   /**
-   * 成交明细(腾讯 3 秒快照)。默认关 —— 打开才会去打那个要翻页的上游接口。
-   * tail 也持久化, 因为"想看多长时间的流水"是个稳定偏好。
+   * 成交明细(**真逐笔**, 通达信 0x0fb5)。默认关 —— 打开才去打上游。
+   * date 为空串表示"后端取最近交易日"; tail 也持久化(想看多少笔是稳定偏好)。
    */
   const [showTicks, setShowTicks] = useState<boolean>(() =>
     localStorage.getItem('stockDetail:ticks') === '1')
@@ -460,19 +460,28 @@ export function StockDetail() {
     setShowTicks(on)
     try { localStorage.setItem('stockDetail:ticks', on ? '1' : '0') } catch { /* 忽略 */ }
   }, [])
+  const [tickDate, setTickDate] = useState<string>('')
   const [tickTail, setTickTail] = useState<number>(() => {
     const n = Number(localStorage.getItem('stockDetail:ticksTail'))
-    return [100, 200, 500, 1000, 3000].includes(n) ? n : 200
+    return [50, 100, 200, 400, 800].includes(n) ? n : 200
   })
   const changeTickTail = useCallback((n: number) => {
     setTickTail(n)
     try { localStorage.setItem('stockDetail:ticksTail', String(n)) } catch { /* 忽略 */ }
   }, [])
   const ticksQuery = useQuery({
-    queryKey: QK.astockTicks(symbol, tickTail),
-    queryFn: () => api.astockTicks(symbol, tickTail),
+    queryKey: QK.astockTickTrades(symbol, tickDate, tickTail),
+    queryFn: () => api.astockTickTrades(symbol, tickDate || null, tickTail),
     enabled: showTicks,
-    staleTime: 15_000,
+    staleTime: 30_000,
+    retry: false,
+  })
+  /** 可选交易日 —— 只在面板打开时要, 别为个下拉多打一次上游。 */
+  const tickDatesQuery = useQuery({
+    queryKey: QK.astockTickDates(symbol, 10),
+    queryFn: () => api.astockTickDates(symbol, 10),
+    enabled: showTicks,
+    staleTime: 300_000,
     retry: false,
   })
   const ticks = ticksQuery.data
@@ -871,19 +880,19 @@ export function StockDetail() {
               </button>
 
               {/* ── 成交明细 ──
-                  真数据, 但粒度有上限: 每 3 秒一行的成交快照, 不是逐笔(逐笔要 Level-2)。
-                  刻意不把它叫"逐笔" —— 面板里也写死了这个口径。 */}
+                  通达信标准市真逐笔(0x0fb5): 一行 = 一笔成交, 不再需要 Level-2。
+                  旧版是腾讯 3 秒快照(一行 = 窗口合计), 已被替换。 */}
               <button
                 type="button"
                 onClick={() => changeTicks(!showTicks)}
-                title="成交明细(腾讯): 每 3 秒一行的成交快照, 一行是该时间窗内所有成交的合计。真正的逐笔需要 Level-2 付费行情, 这里取不到也不假装取到。买卖方向是行情商判定, 不是交易所披露字段"
+                title="成交明细(通达信标准市 0x0fb5): 一行就是一笔成交, 无需 Level-2。量单位是手; 买卖方向由行情商判定, 不是交易所披露字段; 15:00 之后的成交单标'盘后'不计入当日成交量"
                 className={cn('rounded border px-1.5 py-0.5 transition-colors',
                   showTicks
                     ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
                     : 'border-border text-fg-muted hover:text-fg-secondary')}
               >
                 成交明细
-                <EstimateTag className="ml-0.5" title="3 秒一行的成交快照, 不是逐笔成交">3秒快照</EstimateTag>
+                <span className="ml-0.5 text-[9px] text-emerald-600 dark:text-emerald-400">逐笔</span>
               </button>
 
               {/* ── 同行业对比 ──
@@ -1074,31 +1083,37 @@ export function StockDetail() {
         </div>
       )}
 
-      {/* ── 成交明细 ──
-          腾讯 3 秒快照。取不到就明说原因(停牌/当日无成交/接口没覆盖), 不编一行假的。
-          默认关闭 —— 这个接口要翻页, 不该在首屏就打。 */}
+      {/* ── 成交明细(真逐笔) ──
+          通达信标准市 0x0fb5。取不到就明说原因(停牌/当日无成交/北交所不支持),
+          不编一行假的。默认关闭 —— 不该在首屏就打上游。 */}
       {showTicks && ticks?.available && ticks.data && (
         <TickTapePanel
-          rows={ticks.data.rows}
+          trades={ticks.data.trades}
           summary={ticks.data.summary}
+          crossCheck={ticks.data.cross_check}
           date={ticks.data.date}
+          dates={tickDatesQuery.data?.data?.dates}
           name={kline?.name}
           tail={tickTail}
           loading={ticksQuery.isFetching}
           onRefresh={() => ticksQuery.refetch()}
           onTailChange={changeTickTail}
+          onDateChange={setTickDate}
+          unitNote={ticks.data.unit_note}
+          directionNote={ticks.data.direction_note}
+          afterHoursNote={ticks.data.after_hours_note}
           className="mt-2"
         />
       )}
       {showTicks && ticksQuery.isLoading && (
         <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-fg-muted">
-          正在拉取成交明细（后端要先探到最后一页再回溯取最近 {tickTail} 行）…
+          正在拉取逐笔成交（最近 {tickTail} 笔）…
         </div>
       )}
       {ticksBlocked && (
         <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
-          成交明细取不到 —— {ticksQuery.data?.reason ?? '上游无返回'}。
-          {' '}常见情形是当日无成交（停牌 / 尚未开盘）或该标的不在腾讯明细接口的覆盖范围内；
+          逐笔成交取不到 —— {ticksQuery.data?.reason ?? '上游无返回'}。
+          {' '}常见情形是当日无成交（停牌 / 尚未开盘）、该日期是非交易日，或代码不是沪深 A股（北交所暂不支持）；
           这里不补一行占位数据。
         </div>
       )}

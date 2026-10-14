@@ -122,6 +122,11 @@ export const QK = {
   astockAdjRatio:       (code: string, mode: string) => ['astock-adjratio', code, mode] as const,
   /** A股成交明细(腾讯, 3 秒快照) —— 按代码 + 取多少行分 key。 */
   astockTicks:          (code: string, tail: number) => ['astock-ticks', code, tail] as const,
+  /** A股**真逐笔**(通达信 0x0fb5) —— 按代码 + 日期 + 取多少笔分 key。日期为空串表示"最近交易日"。 */
+  astockTickTrades:     (code: string, date: string, tail: number) =>
+                            ['astock-ticktrades', code, date, tail] as const,
+  /** A股真逐笔可选交易日 —— 按代码 + 数量分 key。 */
+  astockTickDates:      (code: string, limit: number) => ['astock-tickdates', code, limit] as const,
   /** 指数日K(腾讯) —— 对比页基准。按代码 + 根数分 key。 */
   astockIndexDaily:     (code: string, limit: number) => ['astock-index-daily', code, limit] as const,
   /** 同行公司对比(东财 F10) —— 按代码 + 最多几家分 key。 */
