@@ -7,7 +7,10 @@ import { api, request } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
-import { KLINE_SIGNALS, buildSignalMarkers, type SignalKey } from '@/lib/klineSignals'
+import {
+  KLINE_SIGNALS, SIGNAL_GROUPS, DEFAULT_SIGNALS,
+  buildSignalMarkers, type SignalKey,
+} from '@/lib/klineSignals'
 import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import { computeChips } from '@/lib/chips'
 import { DRAW_TOOLS, loadDrawings, saveDrawings, type Drawing, type DrawTool } from '@/lib/chartDrawings'
@@ -399,9 +402,10 @@ export function StockDetail() {
   const [wide, setWide] = useState<boolean>(() => localStorage.getItem('stockDetail:wide') !== '0')
   /**
    * K线内标注(全部由 OHLCV 确定性派生, 见 lib/klineSignals)。
-   * 默认只开「放量」—— 全开会把 K 线糊住, 而且标注不是建议, 别喧宾夺主。
+   * 默认开「放量 / 新高 / 新低 / MACD」四个 —— 量、价、位置、摆动各一种, 够用又不糊。
+   * 9 种全开会挤爆 K 线, 所以其余默认关; 标注是事实标记不是建议, 别喧宾夺主。
    */
-  const [signals, setSignals] = useState<Set<SignalKey>>(() => new Set<SignalKey>(['volume']))
+  const [signals, setSignals] = useState<Set<SignalKey>>(() => new Set<SignalKey>(DEFAULT_SIGNALS))
   /**
    * 主图画法(蜡烛/空心/美国线/收盘线)。画的是同一份 OHLC, 纯视觉编码差异。
    * 记本地 —— 这是长期口味偏好, 每次进页面都要重选很烦。
@@ -914,25 +918,32 @@ export function StockDetail() {
           )}
 
           {/* ── K线内标注 ──
-              全部由当前那串 K 线**确定性派生**(放量/新高/新低/MACD交叉), 不是打分、
-              不是买卖建议。口径写在 title 里, 免得被当成某种"信号推荐"。 */}
+              全部由当前那串 K 线**确定性派生**(放量/新高/新低/各种交叉), 不是打分、
+              不是买卖建议。判定只读第 i 根与第 i-1 根, 不用未来数据(见 lib/klineSignals
+              文件头的铁律 —— 九章那套正是栽在这上面)。口径写在 title 里。
+              9 种太多, 按「量能/极值/均线/摆动」分组摆, 组间加分隔线。 */}
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
               <span className="text-fg-muted">标注</span>
-              {KLINE_SIGNALS.map(s => (
-                <button
-                  key={s.key}
-                  type="button"
-                  onClick={() => toggleSignal(s.key)}
-                  title={s.desc}
-                  className={cn('rounded border px-1.5 py-0.5 transition-colors',
-                    signals.has(s.key)
-                      ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                      : 'border-border text-fg-muted hover:text-fg-secondary')}
-                >
-                  {s.label}
-                </button>
+              {SIGNAL_GROUPS.map(g => (
+                <span key={g} className="inline-flex items-center gap-1">
+                  {KLINE_SIGNALS.filter(s => s.group === g).map(s => (
+                    <button
+                      key={s.key}
+                      type="button"
+                      onClick={() => toggleSignal(s.key)}
+                      title={`${s.label} · ${s.desc}`}
+                      className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                        signals.has(s.key)
+                          ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
+                          : 'border-border text-fg-muted hover:text-fg-secondary')}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                  <span className="mr-0.5 h-3 w-px bg-border" />
+                </span>
               ))}
             </>
           )}
