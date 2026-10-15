@@ -59,6 +59,14 @@ COST = 0.003                     # 双边成本 30bp
 TRAIN_UNTIL = "2022-12-31"       # 训练/测试切分点
 SEED = 20261015
 
+# ── 市场状态 ──
+# 判断"现在是什么市"只看**过去**: REGIME_WIN 个已实现交易日的累计涨幅。
+# 阈值用固定的 ±5% 而不是全样本分位数 —— 分位数要拿未来的分布来切今天, 那是前视。
+REGIME_WIN = 60                  # 回看窗口(交易日)
+REGIME_UP = 0.05                 # 累计 ≥ +5% 记牛
+REGIME_DN = -0.05                # 累计 ≤ -5% 记熊, 其余震荡
+REGIME_MIN_N = 500               # 单个状态下事件太少就不报(数字会乱跳)
+
 # key -> (方向语义) buy=看涨标记 / sell=看跌标记 / neutral=无方向
 SIGNAL_DIR = {
     "volume": "neutral",
@@ -240,6 +248,36 @@ def forward_returns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def market_regime_table(df: pd.DataFrame) -> pd.DataFrame:
+    """每个交易日一个「市场状态」标签(牛/熊/震荡), 只吃历史数据。
+
+    ⚠️ 前视陷阱: 入场价是 open[t+1]。若用 t+1 之后的市场表现给 t 日贴标签, 等于
+    按**未来收益**分组 —— 那必然得出"状态有效"的结论, 而且全是假的(熊市日本来就
+    跌得多, 谁在熊市卖出都显得英明)。所以序列必须先 shift(1) 再 rolling:
+    d 日收盘时最新可得的一段是 open[d-1] → open[d]。
+
+    市场日收益用个股 open→open 收益的**横截面等权均值**(与回测基准 base 同一个口径:
+    base 就是同日横截面均值, 状态定义和它对上了才自洽)。
+
+    ⚠️ 别用中位数当"市场": 中位数个股 ≠ 市场 —— A股中位数个股长期阴跌(2016 年
+    -12%、2018 年 -15%), 拿它当基准会把 71% 的交易日标成熊市, 后面所有"市况效应"
+    都是这个偏差的产物。市场宽度(上涨占比)也不行: 长期围绕 48%、分布窄到
+    p5~p95 只有 0.44~0.54, 固定阈值几乎从不触发。见 scripts/regime_audit.py。
+    """
+    d = df.sort_values(["symbol", "date"], kind="mergesort").copy()
+    nxt = d.groupby("symbol", sort=False)["open"].shift(-1)
+    d["_mkt"] = nxt / d["open"] - 1.0
+    daily = d.groupby("date")["_mkt"].mean()
+    realized = daily.shift(1)                      # 位置 d 放的是 (d-1→d) 那一段
+    trend = realized.rolling(REGIME_WIN).sum()
+    out = pd.DataFrame({"date": trend.index, "trend": trend.to_numpy()})
+    out["regime"] = np.select(
+        [out["trend"] >= REGIME_UP, out["trend"] <= REGIME_DN],
+        ["bull", "bear"], default="chop")
+    out.loc[out["trend"].isna(), "regime"] = "unknown"
+    return out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 统计
 # ──────────────────────────────────────────────────────────────────────
@@ -373,6 +411,88 @@ def _strength_bins(sub: pd.DataFrame) -> dict | None:
     return {"q25": round(q25, 4), "q50": round(q50, 4), "q75": round(q75, 4),
             "bins": bins, "rho": rho, "monotone": bool(monotone),
             "retained": ret, "trustworthy": trustworthy, "n": int(len(s))}
+
+
+def regime_breakdown(sub: pd.DataFrame) -> dict[str, dict | None]:
+    """按市场状态分组的超额 —— 纯描述, 显著性由 regime_diff 单独检定。
+
+    描述和检定分开是故意的: 一张表里三组数字并排摆着, 眼睛会自动挑最大那个当结论,
+    而组间差异可能完全在噪声里。所以这里只报数, "牛熊是不是真不一样"另走置换检验。
+    """
+    out: dict[str, dict | None] = {}
+    for rg in ("bear", "chop", "bull"):
+        g = sub[sub["regime"] == rg]
+        if len(g) < REGIME_MIN_N:
+            out[rg] = None
+            continue
+        # 按**交易日**等权(同一天的信号先取日均, 再对日取平均), 不是逐事件平均:
+        # 同一天几百条信号不是独立观测, 恐慌日信号密集会被事件等权放大权重。
+        # 必须与 regime_diff 同口径 —— 否则表格里 牛20 − 熊20 对不上「牛−熊」列。
+        out[rg] = {
+            "n": int(len(g)),
+            "excess": {str(n): round(
+                float(g.groupby("date")[f"aligned{n}"].mean().mean()) * 100, 3)
+                for n in HOLDS},
+        }
+    return out
+
+
+def _seg_diff(sub: pd.DataFrame, n: int) -> float | None:
+    """一段样本里 牛组 − 熊组 的均值差(不检定, 只看符号用于分段一致性)。"""
+    col = f"aligned{n}"
+    a = sub.loc[sub["regime"] == "bear", col].dropna()
+    b = sub.loc[sub["regime"] == "bull", col].dropna()
+    if len(a) < 200 or len(b) < 200:
+        return None
+    return float(b.mean() - a.mean())
+
+
+def regime_diff(sub: pd.DataFrame, n: int, rng, perm: int) -> tuple[float, float] | None:
+    """牛组 − 熊组的均值差 + 置换检验的双尾 p。
+
+    用置换而不是两组各自 bootstrap: 要问的是"这两组是不是同一个分布", 于是把两组的
+    日均值混在一起随机重新分堆 —— 得到的正是"状态标签无效"时差值的分布。
+    按**事件日聚类**打散: 同一天的几百条信号高度相关, 逐条打散会把样本量假性放大。
+    """
+    col = f"aligned{n}"
+    a = sub.loc[sub["regime"] == "bear", ["date", col]].dropna()
+    b = sub.loc[sub["regime"] == "bull", ["date", col]].dropna()
+    if len(a) < REGIME_MIN_N or len(b) < REGIME_MIN_N:
+        return None
+    da = a.groupby("date")[col].mean().to_numpy(dtype=float)
+    db = b.groupby("date")[col].mean().to_numpy(dtype=float)
+    obs = float(db.mean() - da.mean())
+    pool = np.concatenate([da, db])
+    na = len(da)
+    hits = 0
+    for _ in range(perm):
+        rng.shuffle(pool)
+        d = float(pool[na:].mean() - pool[:na].mean())
+        if (d >= 0) == (obs >= 0) and abs(d) >= abs(obs):
+            hits += 1
+    return obs, (hits + 1.0) / (perm + 1.0)
+
+
+def regime_stats(sub: pd.DataFrame, rng, perm: int) -> dict:
+    """一个信号(一条腿)在不同市场状态下的表现 + 状态间差异检定。"""
+    groups = regime_breakdown(sub)
+    diff: dict[str, float] = {}
+    p: dict[str, float] = {}
+    same: list[bool] = []
+    if groups.get("bear") and groups.get("bull"):
+        for n in HOLDS:
+            r = regime_diff(sub, n, rng, perm)
+            if r is None:
+                continue
+            diff[str(n)] = round(r[0] * 100, 3)
+            p[str(n)] = round(r[1], 6)
+            # 训练/测试两段的差是否同号 —— 描述性, 不再叠一次检定(样本越切越薄)
+            dtr = _seg_diff(sub[sub["is_train"]], n)
+            dte = _seg_diff(sub[~sub["is_train"]], n)
+            if dtr is not None and dte is not None:
+                same.append((dtr >= 0) == (dte >= 0))
+    return {"groups": groups, "diff_bull_minus_bear": diff, "p": p,
+            "split_consistent": bool(same) and all(same)}
 
 
 def probe_strength(merged: pd.DataFrame, split: str) -> None:
@@ -519,6 +639,11 @@ def main() -> int:
     )
     merged = merged.merge(base, on="date", how="left")
 
+    # 市场状态标签: 每个交易日一个(牛/熊/震荡), 只吃历史数据(见 market_regime_table)
+    reg = market_regime_table(df)
+    merged = merged.merge(reg, on="date", how="left")
+    logger.info("市场状态: %s", merged["regime"].value_counts().to_dict())
+
     for n in HOLDS:
         excess = merged[f"fwd{n}"] - merged[f"base{n}"]
         # 方向对齐 + 扣费: buy 顺着赚、sell 反向赚(做空), 成交一次 round-trip 30bp
@@ -548,13 +673,18 @@ def main() -> int:
         # 不是看完测试段再挑 —— 符号不参与拆不拆的决策。
         long_sub = sub[sub["dir"] != "sell"]     # buy + neutral 归看涨侧
         short_sub = sub[sub["dir"] == "sell"]
+        lg = _leg_stats(long_sub, rng, args.perm)
+        sh = _leg_stats(short_sub, rng, args.perm)
+        # 市场状态逐腿看: 双向信号的两条腿在不同市况下可能完全相反, 混起来平均会互相
+        # 掩盖 —— 与拆腿是同一个道理。
+        if lg:
+            lg["regimes"] = regime_stats(long_sub, rng, args.perm)
+        if sh:
+            sh["regimes"] = regime_stats(short_sub, rng, args.perm)
         rows.append({
             "key": key, "direction": direction, "n": len(sub),
             "excess": excess_map, "p": p_map,
-            "legs": {
-                "long": _leg_stats(long_sub, rng, args.perm),
-                "short": _leg_stats(short_sub, rng, args.perm),
-            },
+            "legs": {"long": lg, "short": sh},
             # 强度分层: 同一个标注"多极端"和后续走势有剂量-反应关系吗?
             "strength": {
                 "long": _strength_bins(long_sub),
@@ -574,20 +704,41 @@ def main() -> int:
     # 随机挑一批 (symbol, date) 伪事件、随机方向, 走完全相同的对齐/扣费流程。
     # 期望 ≈ -成本(-30bp): 若 placebo 也给出明显更负的超额, 说明是**管道本身**有偏
     # (基准错 / 对齐错 / 收益算错), 而不是信号真的有害 —— 这个检查不过就别下结论。
+    placebo_regimes: dict[str, float] = {}
     if args.placebo:
         pool = (
-            merged[["symbol", "date"] + [f"aligned{n}" for n in HOLDS]]
+            merged[["symbol", "date", "regime"] + [f"aligned{n}" for n in HOLDS]]
             .drop_duplicates(subset=["symbol", "date"])
             .dropna(subset=[f"aligned{n}" for n in HOLDS])   # 末尾没有未来收益的行丢掉
         )
         n_pl = min(int(args.placebo), len(pool))
         pick = pool.sample(n=n_pl, random_state=SEED)
-        flip = rng.choice([1.0, -1.0], size=n_pl)
+        # flip 存成列而不是并行数组: 下面要按市况取子集, 位置对不上就会算错
+        pick = pick.assign(_flip=rng.choice([1.0, -1.0], size=n_pl))
+        flip = pick["_flip"].to_numpy(dtype=float)
         logger.info("安慰剂对照 n=%d (随机标的/日期/方向)", n_pl)
         print(f"\n---- 安慰剂对照 (随机事件 x {n_pl}, 期望 ≈ {-COST * 100:.2f}% 只亏手续费) ----")
         for n in HOLDS:
             v = pick[f"aligned{n}"].to_numpy(dtype=float) + COST   # 先把成本加回来
             print(f"  {n:>2}日: 随机方向均值 {(float(np.mean(v * flip)) - COST) * 100:+.3f}%")
+        # 按市况分组的安慰剂 —— 这一栏是"熊市效应"能不能成立的裁判:
+        # 熊市波动更大, 若**随机**事件在熊市也明显更负, 那上面那些"熊市里更极端"
+        # 有一部分是波动/基准的锅, 不能全记在信号头上。
+        print("  安慰剂按市况分组(20 日): 熊市栏若明显偏离 "
+              f"{-COST * 100:.2f}%, 上面的市况结论要打折")
+        for rg in ("bear", "chop", "bull"):
+            g = pick[pick["regime"] == rg]
+            if len(g) < 500:
+                print(f"    {rg:<5} 样本不足({len(g)})")
+                continue
+            v = g["aligned20"].to_numpy(dtype=float) + COST
+            f = g["_flip"].to_numpy(dtype=float)
+            placebo_regimes[rg] = round((float(np.mean(v * f)) - COST) * 100, 3)
+            print(f"    {rg:<5} n={len(g):>7}  随机方向均值 {placebo_regimes[rg]:+.3f}%")
+        if "bear" in placebo_regimes and "bull" in placebo_regimes:
+            placebo_gap = round(placebo_regimes["bull"] - placebo_regimes["bear"], 3)
+            print(f"    安慰剂自身的 牛−熊 = {placebo_gap:+.3f}% —— "
+                  "信号那一列的差要减掉这个数才是净效应")
         print()
 
     # ── 4. BH-FDR(按**实际检定次数**) ──
@@ -611,6 +762,27 @@ def main() -> int:
     merged_q = bh_fdr([r["p"][str(n)] for r in rows for n in HOLDS])
     for i, r in enumerate(rows):
         r["q"] = {str(n): merged_q[i * len(HOLDS) + j] for j, n in enumerate(HOLDS)}
+
+    # 市场状态族单独校正。
+    # 它问的是另一个问题("这个效应是否依赖市况"), 与主结论("这条腿有没有超额")不是
+    # 同一个假设族。不并进主族, 是为了避免新增的这几十次检定把**原来那族**的门槛放松
+    # —— 但代价要认: 分族意味着这族只对自己这堆 p 负责, 若同时拿两族一起挑最小 p 去
+    # 讲故事, 实际假阳性率会高于 0.05。所以 regime 结论**只作附加说明, 不改主结论**。
+    rflat: list[tuple[int, str, int]] = []
+    rflat_p: list[float] = []
+    for i, r in enumerate(rows):
+        for leg_name in ("long", "short"):
+            rg = (r["legs"][leg_name] or {}).get("regimes")
+            if not rg:
+                continue
+            for n in HOLDS:
+                if str(n) in rg["p"]:
+                    rflat.append((i, leg_name, n))
+                    rflat_p.append(rg["p"][str(n)])
+    rqs = bh_fdr(rflat_p)
+    for (i, leg_name, n), q in zip(rflat, rqs, strict=True):
+        rows[i]["legs"][leg_name]["regimes"].setdefault("q", {})[str(n)] = round(q, 6)
+    logger.info("BH-FDR 校正 %d 次市场状态检定(单独成族)", len(rflat_p))
 
     alpha = 0.05
     signals: dict[str, dict] = {}
@@ -715,6 +887,9 @@ def main() -> int:
     payload_out = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "sample": sample,
+        # 安慰剂按市况分组: 判断"市况效应"时, 信号那一列的 牛−熊 差要减掉
+        # 安慰剂自身的 牛−熊 差, 剩下的才是净效应。
+        "placebo_by_regime": placebo_regimes,
         "signals": signals,
     }
 
@@ -759,6 +934,35 @@ def main() -> int:
               f"{'✓' if st['trustworthy'] else '✗':>6}")
     print("  保留率 = 测试段(Q4-Q1) ÷ 训练段(Q4-Q1)")
     print("  分档✓ = 两段方向都单调 且 保留率 ≥ 0.5 —— 只单调而幅度塌掉的不给分档")
+
+    print("\n市场状态分段 (过去 60 日全市场 open-to-open 累计: 牛 ≥ "
+          f"{REGIME_UP * 100:+.0f}% / 熊 ≤ {REGIME_DN * 100:+.0f}% / 其余震荡)")
+    print("  标签只吃历史: d 日看到的是 open[d-1]→open[d] —— 拿未来给今天贴标签, "
+          "必然得出『状态有效』的假结论")
+    print(f"{'signal':<12}{'腿':<6}{'熊n':>9}{'熊20':>8}{'震荡20':>9}{'牛20':>8}"
+          f"{'牛−熊':>9}{'q':>9}{'分段':>6}")
+    for key, s in signals.items():
+        rg = s["legs"][s["best_leg"]].get("regimes")
+        if not rg:
+            continue
+        g = rg["groups"]
+        if not (g.get("bear") and g.get("bull")):
+            continue
+        d20 = rg["diff_bull_minus_bear"].get("20")
+        q20 = rg.get("q", {}).get("20")
+        chop = g.get("chop")
+        print(f"{key:<12}{'做多' if s['best_leg'] == 'long' else '做空':<6}"
+              f"{g['bear']['n']:>9}{g['bear']['excess']['20']:>8.2f}"
+              f"{(chop['excess']['20'] if chop else float('nan')):>9.2f}"
+              f"{g['bull']['excess']['20']:>8.2f}"
+              f"{(d20 if d20 is not None else float('nan')):>9.2f}"
+              f"{(q20 if q20 is not None else float('nan')):>9.3f}"
+              f"{'✓' if rg['split_consistent'] else '✗':>6}")
+    print("  牛−熊 = 牛市组 20 日超额 − 熊市组; q 为按日聚类置换检验 + BH-FDR(本族单独校正)")
+    print("  三列超额按**交易日**等权(同一天的信号先取日均) —— 与上面主表的逐事件口径不同, "
+          "不能拿熊市那列去和主表的全样本数字相减")
+    print("  经济门槛: |牛−熊| ≥ 0.60%(2×成本) 才谈得上有实感 —— 显著但没幅度同样是噪声")
+    print("  状态结论只作附加说明, 不改主结论; 两族的 p 不能混着挑最小的那个讲")
 
     if args.probe_strength:
         probe_strength(merged, args.probe_split)
