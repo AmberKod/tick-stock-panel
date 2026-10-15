@@ -46,13 +46,15 @@ try {
   });
   log('2a 默认开启 4 个标注', activeCount.length === 4, activeCount.join(' / '));
 
-  // 3. 证据角标存在 (·未回测, 因为还没跑全市场回测)
+  // 3. 证据角标: 跑过全市场回测后, 每个标注都应带"方向判断"结论(不再显示"未回测")
   const titles = await page.evaluate(() =>
     [...document.querySelectorAll('button[title]')]
       .map((b) => b.getAttribute('title'))
-      .filter((t) => t && t.includes('暂无统计支撑'))
+      .filter((t) => t && t.includes('方向判断：'))
   );
-  log('3a 标注 tooltip 含未回测措辞', titles.length >= 9, `${titles.length} 个`);
+  const tested = titles.filter((t) => !t.includes('未回测'));
+  log('3a 9 个标注均带回测证据', titles.length >= 9 && tested.length >= 9,
+    `${titles.length} 个有证据行, ${tested.length} 个已回测`);
 
   // 4. ECharts canvas 渲染出来
   const canvasCount = await page.locator('canvas').count();
