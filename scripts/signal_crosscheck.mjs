@@ -34,16 +34,16 @@ const WARMUP = 70
 const bars = JSON.parse(readFileSync(BARS, 'utf8'))
 const py = JSON.parse(readFileSync(MARKS_PY, 'utf8'))
 
-/** 一天的标注 → Set("key|dir") */
+/** 一天的标注 → Map("kind|label" -> strength)，强度一并带出用于对拍 */
 function tsMarksAt(rows, i) {
   const sub = rows.slice(0, i + 1)
   const withInd = computeIndicators(sub.map((r) => ({ ...r })))
   const markers = buildSignalMarkers(withInd, ALL)
   const mine = markers.filter((m) => m.date === rows[i].date)
-  const out = new Set()
+  const out = new Map()
   for (const m of mine) {
     const detail = m.detail ?? [{ label: m.label, desc: m.desc ?? '' }]
-    for (const d of detail) out.add(`${m.kind}|${d.label}`)
+    for (const d of detail) out.set(`${m.kind}|${d.label}`, d.strength)
   }
   return out
 }
@@ -87,6 +87,9 @@ function isFloatBoundary(ind, i, key) {
 let checked = 0
 let mismatch = 0
 let boundaryMismatch = 0
+let strengthChecked = 0
+let strengthMismatch = 0
+const strengthSamples = []
 const samples = []
 const hardSamples = []
 const perKey = {}
@@ -94,27 +97,45 @@ const perKey = {}
 for (const sym of Object.keys(py)) {
   const rows = bars[sym]
   if (!rows) { console.log(`FAIL | ${sym} 没有 K 线`); mismatch += 1; continue }
-  // Python 版: {date, key, dir}[]
+  // Python 版: {date, key, dir, strength}[]
   const byDate = new Map()
   for (const e of py[sym]) {
-    if (!byDate.has(e.date)) byDate.set(e.date, new Set())
-    byDate.get(e.date).add(`${e.dir}|${e.key}`)
+    if (!byDate.has(e.date)) byDate.set(e.date, new Map())
+    byDate.get(e.date).set(`${e.dir}|${e.key}`, e.strength ?? null)
   }
   const withIndAll = computeIndicators(rows.map((r) => ({ ...r })))
   for (let i = WARMUP; i < rows.length; i += 1) {
     const date = rows[i].date
     const ts = tsMarksAt(rows, i)
-    const pyset = byDate.get(date) ?? new Set()
-    // TS 用 label, Python 用 key —— 统一到 "dir|key"
-    const norm = new Set()
-    for (const item of ts) {
+    const pyset = byDate.get(date) ?? new Map()
+    // TS 用 label, Python 用 key —— 统一到 "dir|key", 强度一起带过来
+    const norm = new Map()
+    for (const [item, strength] of ts) {
       const [kind, label] = item.split('|')
       const key = LABEL_TO_KEY[label]
       if (!key) { console.log(`FAIL | 未知 label ${label}`); mismatch += 1; continue }
-      norm.add(`${KIND_TO_DIR[kind]}|${key}`)
+      norm.set(`${KIND_TO_DIR[kind]}|${key}`, strength ?? null)
+    }
+    // 强度对拍: 回测算出的分档阈值必须作用在**同一个**强度定义上, 否则前端
+    // 画的"极强档"根本不是回测统计的那个东西。
+    for (const [v, tsStrength] of norm) {
+      const pyStrength = pyset.get(v)
+      if (tsStrength == null || pyStrength == null) continue
+      // 分母设下限 1e-6: 两条都≈0 时(刚上穿当天 dif 与 dea 几乎重合)相对误差会被
+      // 1e-9 的分母放大成假失败 —— 那种量级的强度差异对分档没有任何影响。
+      const denom = Math.max(Math.abs(tsStrength), Math.abs(pyStrength), 1e-6)
+      // 相对 + 绝对双重门槛: 强度是百分比量纲, 1e-6%(≈价格 1e-8 元)的差异对分档
+      // 没有任何影响, 不该判失败; 真正要抓的是量级差(如 newLow 分母取 lo 还是 close)。
+      const absDiff = Math.abs(tsStrength - pyStrength)
+      if (absDiff > 1e-6 && absDiff / denom > 1e-6) {
+        strengthMismatch += 1
+        if (strengthSamples.length < 8) {
+          strengthSamples.push(`${sym} ${date} ${v} TS=${tsStrength.toFixed(6)} PY=${pyStrength.toFixed(6)}`)
+        }
+      } else strengthChecked += 1
     }
     checked += 1
-    for (const v of norm) {
+    for (const v of norm.keys()) {
       perKey[v.split('|')[1]] = (perKey[v.split('|')[1]] ?? 0) + 1
       if (!pyset.has(v)) {
         const boundary = isFloatBoundary(withIndAll, i, v.split('|')[1])
@@ -123,7 +144,7 @@ for (const sym of Object.keys(py)) {
         if (samples.length < 6) samples.push(`${sym} ${date} TS有 ${v} ${boundary ? '(浮点边界)' : ''}`)
       }
     }
-    for (const v of pyset) {
+    for (const v of pyset.keys()) {
       perKey[v.split('|')[1]] = (perKey[v.split('|')[1]] ?? 0) + 1
       if (!norm.has(v)) {
         const boundary = isFloatBoundary(withIndAll, i, v.split('|')[1])
@@ -132,7 +153,10 @@ for (const sym of Object.keys(py)) {
         if (samples.length < 6) samples.push(`${sym} ${date} PY有 ${v} ${boundary ? '(浮点边界)' : ''}`)
       }
     }
-    if ([...norm].some((v) => !pyset.has(v)) || [...pyset].some((v) => !norm.has(v))) {
+    // 注意别写成 [...norm].some(v => !pyset.has(v)) —— 对 Map 展开解出来的是
+    // [key, value] 数组, has(数组) 恒 false, 会变成"只要有信号就算不一致"。
+    if ([...norm.keys()].some((v) => !pyset.has(v))
+      || [...pyset.keys()].some((v) => !norm.has(v))) {
       mismatch += 1
     }
   }
@@ -156,6 +180,12 @@ if (hard > 0) {
 const ratio = boundaryMismatch / checked
 if (ratio > 0.005) {
   console.log(`\n❌ 边界噪声比例 ${(ratio * 100).toFixed(3)}% 超过 0.5% 阈值, 不像纯浮点边界`)
+  process.exit(1)
+}
+console.log(`强度对拍: 比对 ${strengthChecked} 条, 不一致 ${strengthMismatch} 条`)
+if (strengthSamples.length) console.log('强度样例:\n  ' + strengthSamples.join('\n  '))
+if (strengthMismatch > 0) {
+  console.log('\n❌ 强度公式两边不一致 —— 回测算的分档阈值画不到前端标注上, 分档作废')
   process.exit(1)
 }
 console.log(`\n✅ 口径一致 — 残余差异 ${ratio.toFixed(5)}% 全部落在 double 精度边界`)
