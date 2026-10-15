@@ -213,7 +213,19 @@ function evidenceLine(ev?: {
   split_consistent?: boolean
   best_leg?: 'long' | 'short'
   direction?: string
-  legs?: Record<string, { n: number; excess: Record<string, number> } | undefined>
+  legs?: Record<string, {
+    n: number
+    excess: Record<string, number>
+    regimes?: {
+      groups: Record<'bear' | 'chop' | 'bull', {
+        n: number
+        excess: Record<string, number>
+      } | null>
+      diff_bull_minus_bear: Record<string, number>
+      q?: Record<string, number>
+      split_consistent: boolean
+    }
+  } | undefined>
   strength?: Record<string, { q50?: number; q75?: number; trustworthy?: boolean } | null>
 }): string {
   if (!ev || ev.status === 'untested') {
@@ -247,7 +259,45 @@ function evidenceLine(ev?: {
   const otherWord = ev.best_leg === 'long' ? '看跌侧' : '看涨侧'
   const dual = other ? `；另一侧${otherWord} ${fmtExcess(other.excess)}` : ''
   const tier = sizeLine(ev)
-  return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}，超额 ${ex}，${tail}）${dual}${tier}`
+  return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}，超额 ${ex}，${tail}）${dual}${tier}${regimeLine(ev)}`
+}
+
+/**
+ * 市况差异: 同一个信号在熊市/牛市里差多少(20 日超额)。
+ *
+ * 只在「统计显著(q<0.05) + 幅度过经济门槛(≥0.6% = 2×成本) + 训练/测试同号」时才说
+ * 有差异; 其余如实写"未过门槛"。沉默会让用户以为没测过, 但编一个"熊市更危险"的
+ * 故事更糟 —— 这两个门槛任缺一个, 那点差异就只是噪声/过拟合。
+ * 市况定义: 过去 60 日全市场等权累计(牛 ≥ +5% / 熊 ≤ -5%), 只吃历史数据。
+ */
+function regimeLine(ev?: {
+  best_leg?: 'long' | 'short'
+  legs?: Record<string, {
+    regimes?: {
+      groups: Record<'bear' | 'chop' | 'bull', {
+        n: number
+        excess: Record<string, number>
+      } | null>
+      diff_bull_minus_bear: Record<string, number>
+      q?: Record<string, number>
+      split_consistent: boolean
+    }
+  } | undefined>
+}): string {
+  const rg = ev?.legs?.[ev.best_leg ?? 'long']?.regimes
+  if (!rg) return ''
+  const bear = rg.groups?.bear?.excess?.['20']
+  const bull = rg.groups?.bull?.excess?.['20']
+  const d = rg.diff_bull_minus_bear?.['20']
+  if (bear == null || bull == null || d == null) return ''
+  const q = rg.q?.['20']
+  const ok = q != null && q < 0.05 && Math.abs(d) >= 0.6 && rg.split_consistent
+  // 三档数字按**交易日**等权(同一天的信号先取日均), 与主表逐事件口径不同 ——
+  // 不写清楚, 用户拿它去和"全样本超额"相减就会对不上账。
+  const nums = `熊 ${bear.toFixed(2)}% / 牛 ${bull.toFixed(2)}%（20日, 按交易日等权）`
+  return ok
+    ? `；市况差异显著（${nums}，牛−熊 ${d >= 0 ? '+' : ''}${d.toFixed(2)}%）`
+    : `；市况差异未过门槛（${nums}）`
 }
 
 /**

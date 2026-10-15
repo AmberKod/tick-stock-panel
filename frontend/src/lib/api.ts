@@ -2703,6 +2703,22 @@ export const api = {
           q?: Record<string, number>
           train_excess?: Record<string, number>
           test_excess?: Record<string, number>
+          /**
+           * 市场状态: 同一条腿在牛/熊/震荡下的表现。
+           * 状态标签只吃历史数据(过去 60 日全市场 open→open 累计),
+           * 差异检验是按日聚类置换 + 本族单独 BH-FDR。
+           * 只作附加说明, 不改主结论 —— 两族的 p 不能混着挑最小的讲。
+           */
+          regimes?: {
+            groups: Record<'bear' | 'chop' | 'bull', {
+              n: number
+              excess: Record<string, number>
+            } | null>
+            diff_bull_minus_bear: Record<string, number>
+            p: Record<string, number>
+            q?: Record<string, number>
+            split_consistent: boolean
+          }
         }>
         /**
          * 强度分层: 同一个标注的「极端程度」与后续走势有没有剂量-反应关系。
