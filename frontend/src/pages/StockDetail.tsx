@@ -189,29 +189,63 @@ const DEEP_TABS: { key: DeepTab; label: string }[] = [
  * 那部分永远准; 需要证据的是"把它当转强/转弱的方向判断用"。所以 untested
  * 的措辞是"暂无统计支撑, 仅作事实标记", 而不是"这个标注不可信"。
  */
+function fmtExcess(ex?: Record<string, number>): string {
+  if (!ex) return '—'
+  return Object.entries(ex)
+    .map(([k, v]) => `${k}日${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+    .join(' / ')
+}
+
+/**
+ * 证据卡文案。
+ *
+ * 双向信号(金叉/死叉这类)的主结论**取自其中一条腿** —— 合并成一个数会让
+ * "一条灵一条哑"互相掩盖(实测 MACD 做多腿 -0.39% / 做空腿 -0.14%, 合并成
+ * -0.29% 看不出哪边更糟)。所以这里如实报出取用的是哪条腿、另一侧是多少。
+ *
+ * 做空腿在 A 股没有融券可开, 实操含义是"持仓者减仓/回避", 不能写成买点。
+ */
 function evidenceLine(ev?: {
   status?: string
   note?: string
   samples?: number
   excess?: Record<string, number>
   split_consistent?: boolean
+  best_leg?: 'long' | 'short'
+  direction?: string
+  legs?: Record<string, { n: number; excess: Record<string, number> } | undefined>
 }): string {
   if (!ev || ev.status === 'untested') {
     return '方向判断：未回测 —— 只作事实标记，暂无统计支撑'
   }
   const n = ev.samples ?? 0
-  if (ev.status === 'significant') {
-    const ex = ev.excess
-      ? Object.entries(ev.excess)
-          .map(([k, v]) => `${k}日${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
-          .join(' / ')
-      : '—'
-    return `方向判断：显著（样本 ${n}，超额 ${ex}，分段${ev.split_consistent ? '同向✓' : '不一致✗'}）`
-  }
+  const leg = ev.best_leg ? ev.legs?.[ev.best_leg] : undefined
+  // 中性标记(放量)没有多空之分, 说"看涨侧"是自相矛盾 —— 它只是"标记后"
+  const legWord =
+    ev.direction === 'neutral' ? '标记后'
+    : ev.best_leg === 'short' ? '看跌侧'
+    : '看涨侧'
+  const ex = fmtExcess(leg?.excess ?? ev.excess)
+  const tail = ev.split_consistent ? '分段同向✓' : '分段不一致✗'
+  // 做空腿在 A 股开不了(融券门槛), 实操只能是"持仓者减仓/回避" —— 必须写清楚,
+  // 否则用户会把 +0.56% 当成可以去做空赚到的收益。
+  const shortNote =
+    ev.best_leg === 'short' && ev.direction !== 'neutral'
+      ? '（A股无融券，实操为减仓/回避）' : ''
+
+  const prefix =
+    ev.status === 'significant' ? '方向判断：显著'
+    : ev.status === 'rejected' ? '方向判断：反向（跟随反而跑输）'
+    : '方向判断：不显著'
+
   if (ev.status === 'weak') {
-    return `方向判断：不显著（样本 ${n}）—— 与随机买入无差异`
+    return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}）— ${ev.note ?? '与随机买卖无差异'}`
   }
-  return `方向判断：反向（样本 ${n}）${ev.note ? ` — ${ev.note}` : ''}`
+  // 双向信号: 把另一侧也报出来
+  const other = ev.best_leg === 'long' ? ev.legs?.short : ev.legs?.long
+  const otherWord = ev.best_leg === 'long' ? '看跌侧' : '看涨侧'
+  const dual = other ? `；另一侧${otherWord} ${fmtExcess(other.excess)}` : ''
+  return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}，超额 ${ex}，${tail}）${dual}`
 }
 
 /** 证据在按钮上的小角标。significant 才给勾, 其余如实标出。 */

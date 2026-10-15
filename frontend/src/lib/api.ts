@@ -2692,6 +2692,18 @@ export const api = {
         excess?: Record<string, number>
         p_value?: Record<string, number>
         split_consistent?: boolean
+        /** 双向信号的主结论取自哪条腿 —— 'long' 看涨侧 / 'short' 看跌侧 */
+        best_leg?: 'long' | 'short'
+        /** buy=看涨标记 / sell=看跌标记 / both=双向 / neutral=无方向 */
+        direction?: 'buy' | 'sell' | 'both' | 'neutral'
+        /** 双向信号两侧分别统计: 合并成一个数会让"一条灵一条哑"互相掩盖 */
+        legs?: Record<'long' | 'short', {
+          n: number
+          excess: Record<string, number>
+          q?: Record<string, number>
+          train_excess?: Record<string, number>
+          test_excess?: Record<string, number>
+        }>
       }>
     }>('/api/kline/signal-stats'),
 
