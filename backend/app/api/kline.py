@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 from datetime import date, timedelta
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -327,6 +329,73 @@ def _get_previous_closes(
             None,
         )
     return result
+
+
+# ── 标注的回测证据 ────────────────────────────────────────────────────────────
+# 证据不是后端拍的，是 scripts/signal_forward_returns.mjs 跑完写进这个 JSON。
+# 文件不存在 = 一条都没跑过 = 全部 untested。于是「补历史 → 跑回测 → 写文件」
+# 三步都不用再动后端代码。
+_SIGNAL_STATS_FILE = "signal_stats.json"
+
+_SIGNAL_KEYS = (
+    "volume", "newHigh", "newLow", "macd", "rsi", "boll",
+    "maCross", "maGolden60", "ma20Cross",
+)
+
+
+@router.get("/signal-stats")
+def get_signal_stats():
+    """K 线标注的回测证据。
+
+    标注本身是**事实描述**（放量 / 金叉 / 创 60 日新高），那部分永远准 —— 它由
+    OHLCV 确定性派生，判定只读第 i 与 i-1 根，不含未来数据。
+
+    但把某个标注当成「转强 / 转弱」的**方向判断**，需要回测背书：一个标注如果
+    出现之后 N 日的收益跟随机挑一天买入没有区别，它就不配带方向色。所以每个
+    信号配一张证据卡，前端如实显示。
+
+    现在文件还没生成（A 股历史只有 245 根/票，不够跨牛熊，跑出来的结论不可信），
+    一律 untested —— 与其编一个好看的数字，不如明说没验过。
+    """
+    from app.config import settings
+
+    default_sample = {"tickers": 0, "bars": 0, "from": None, "to": None}
+    stats: dict = {}
+    sample = dict(default_sample)
+    generated_at = None
+
+    path = Path(settings.data_dir) / _SIGNAL_STATS_FILE
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw.get("signals"), dict):
+                stats = raw["signals"]
+            if isinstance(raw.get("sample"), dict):
+                sample = {**default_sample, **raw["sample"]}
+            generated_at = raw.get("generated_at")
+        except Exception as exc:  # 文件坏了就当没跑过, 别让整个 K 线页挂掉
+            logger.warning("signal_stats 解析失败, 按未回测处理: %s", exc)
+
+    signals = {}
+    for key in _SIGNAL_KEYS:
+        item = stats.get(key)
+        signals[key] = item if isinstance(item, dict) and item.get("status") else {
+            "status": "untested",
+            "note": "尚未跑回测",
+        }
+
+    # gate_enabled = 证据是否已经硬到可以当渲染闸门。现在是 False：标注照常画，
+    # 但 hover 写明"未回测"。等样本扩到跨牛熊、且每个信号都有结论后自动变 True，
+    # 届时 status=rejected 的信号才会被降级（不给方向色）。
+    all_tested = all(v.get("status") != "untested" for v in signals.values())
+
+    return {
+        "available": True,
+        "generated_at": generated_at,
+        "sample": sample,
+        "gate_enabled": bool(stats) and all_tested,
+        "signals": signals,
+    }
 
 
 @router.get("/daily")
