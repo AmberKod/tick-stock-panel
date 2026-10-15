@@ -56,6 +56,15 @@ try {
   log('3a 9 个标注均带回测证据', titles.length >= 9 && tested.length >= 9,
     `${titles.length} 个有证据行, ${tested.length} 个已回测`);
 
+  // 3b 双向信号的结论必须指明取用的是哪条腿(合并数会把"一条灵一条哑"掩盖掉);
+  //     做空腿还要写明 A 股无融券, 不能让人当成开空信号。
+  const byLeg = titles.filter((t) => t.includes('看涨侧') || t.includes('看跌侧'));
+  // 只认"结论取用的那条腿"(紧跟在 prefix 冒号后); note 里"另一侧看跌侧…"不算
+  const shortLeg = titles.filter((t) => t.includes('：看跌侧'));
+  log('3b 结论指明取用腿', byLeg.length >= 6, `${byLeg.length} 个带腿标注`);
+  log('3c 做空腿注明无融券', shortLeg.length === 0 || shortLeg.every((t) => t.includes('无融券')),
+    `${shortLeg.length} 个做空腿`);
+
   // 4. ECharts canvas 渲染出来
   const canvasCount = await page.locator('canvas').count();
   log('4a K线 canvas 已渲染', canvasCount > 0, `${canvasCount} canvas`);
