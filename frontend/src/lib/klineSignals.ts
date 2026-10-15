@@ -135,10 +135,13 @@ function sma(values: number[], n: number, endIdx: number): number | null {
  * @param rows 已按时间升序、且指标已算好的 K 线(日K / 周K / 月K / 分钟K 都行)
  * @param enabled 用户勾选的标注类型
  */
+/** 生成阶段用的内部标记 —— 带 key，合并后 key 收进 detail。 */
+type RawMark = ChartMarker & { key: SignalKey }
+
 export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): ChartMarker[] {
   if (rows.length === 0 || enabled.size === 0) return []
 
-  const marks: ChartMarker[] = []
+  const marks: RawMark[] = []
   const from = Math.max(0, rows.length - RECENT_WINDOW)
 
   const volumes = rows.map(r => r.volume ?? 0)
@@ -153,7 +156,7 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
     if (enabled.has('volume')) {
       const base = sma(volumes, 20, i)
       if (base && base > 0 && (r.volume ?? 0) >= base * 2) {
-        marks.push({ date, kind: 'neutral', label: '量', above: true, color: C_VOL })
+        marks.push({ date, kind: 'neutral', label: '量', color: C_VOL, key: 'volume' })
       }
     }
 
@@ -165,9 +168,9 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
         const hi = Math.max(...win)
         const lo = Math.min(...win)
         if (enabled.has('newHigh') && r.close > hi) {
-          marks.push({ date, kind: 'buy', label: '高', above: true, color: C_UP })
+          marks.push({ date, kind: 'buy', label: '高', color: C_UP, key: 'newHigh' })
         } else if (enabled.has('newLow') && r.close < lo) {
-          marks.push({ date, kind: 'sell', label: '低', above: true, color: C_DOWN })
+          marks.push({ date, kind: 'sell', label: '低', color: C_DOWN, key: 'newLow' })
         }
       }
     }
@@ -175,38 +178,38 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
     // ── MACD 交叉 ──
     if (enabled.has('macd')) {
       const d = crossed(num(r.macd_dif), num(r.macd_dea), num(prev?.macd_dif), num(prev?.macd_dea))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '金', above: true, color: C_UP })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '死', above: true, color: C_DOWN })
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '金', color: C_UP, key: 'macd' })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '死', color: C_DOWN, key: 'macd' })
     }
 
     // ── MA5/MA20 交叉 ──
     if (enabled.has('maCross')) {
       const d = crossed(num(r.ma5), num(r.ma20), num(prev?.ma5), num(prev?.ma20))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: 'M金', above: true, color: C_UP })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: 'M死', above: true, color: C_DOWN })
+      if (d === 'up') marks.push({ date, kind: 'buy', label: 'M金', color: C_UP, key: 'maCross' })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: 'M死', color: C_DOWN, key: 'maCross' })
     }
 
     // ── MA20/MA60 交叉 ──
     if (enabled.has('maGolden60')) {
       const d = crossed(num(r.ma20), num(r.ma60), num(prev?.ma20), num(prev?.ma60))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '季金', above: true, color: C_UP })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '季死', above: true, color: C_DOWN })
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '季金', color: C_UP, key: 'maGolden60' })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '季死', color: C_DOWN, key: 'maGolden60' })
     }
 
     // ── 收盘价穿越 MA20 ──
     if (enabled.has('ma20Cross')) {
       const d = crossed(num(r.close), num(r.ma20), num(prev?.close), num(prev?.ma20))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '穿', above: true, color: C_UP })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '破', above: true, color: C_DOWN })
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '穿', color: C_UP, key: 'ma20Cross' })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '破', color: C_DOWN, key: 'ma20Cross' })
     }
 
     // ── RSI 超买/超卖 ──
     if (enabled.has('rsi')) {
       const v = num(r.rsi_14)
       if (v != null && v < 30) {
-        marks.push({ date, kind: 'buy', label: '超卖', above: true, color: C_UP })
+        marks.push({ date, kind: 'buy', label: '超卖', color: C_UP, key: 'rsi' })
       } else if (v != null && v > 70) {
-        marks.push({ date, kind: 'sell', label: '超买', above: true, color: C_DOWN })
+        marks.push({ date, kind: 'sell', label: '超买', color: C_DOWN, key: 'rsi' })
       }
     }
 
@@ -215,12 +218,52 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
       const hi = num(r.boll_upper)
       const lo = num(r.boll_lower)
       if (hi != null && r.close > hi) {
-        marks.push({ date, kind: 'buy', label: '轨↑', above: true, color: C_UP })
+        marks.push({ date, kind: 'buy', label: '轨↑', color: C_UP, key: 'boll' })
       } else if (lo != null && r.close < lo) {
-        marks.push({ date, kind: 'sell', label: '轨↓', above: true, color: C_DOWN })
+        marks.push({ date, kind: 'sell', label: '轨↓', color: C_DOWN, key: 'boll' })
       }
     }
   }
 
-  return marks
+  return mergeByDate(marks)
+}
+
+/**
+ * 同一根 K 线上经常同时命中好几条信号(比如放量 + MACD 金叉)。
+ * 逐条画会把徽章叠成一坨, 所以按「日期 + 方向」合并成一个:
+ *   - 看涨类全部收进下方那支朝上的箭头
+ *   - 看跌类全部收进上方那支朝下的箭头
+ *   - 中性(放量)收进上方的圆点
+ * 于是**一天最多两个徽章**, 上下各一个, 永远不会互相压住。
+ * 合并掉的明细放进 detail, hover 时展开 —— 信息一条没少, 只是不挤在一起。
+ */
+function mergeByDate(marks: RawMark[]): ChartMarker[] {
+  if (marks.length === 0) return []
+
+  const slots = new Map<string, RawMark[]>()
+  for (const m of marks) {
+    const slot = `${m.date}|${m.kind}`
+    const arr = slots.get(slot)
+    if (arr) arr.push(m)
+    else slots.set(slot, [m])
+  }
+
+  const out: ChartMarker[] = []
+  for (const arr of slots.values()) {
+    const head = arr[0]
+    out.push({
+      date: head.date,
+      kind: head.kind,
+      // 单条就写本名(金/死/量); 多条写"金+2" —— 数字也在角标里, 这里只是防歧义
+      label: arr.length === 1 ? head.label : `${head.label ?? ''}+${arr.length - 1}`,
+      color: head.color,
+      count: arr.length,
+      detail: arr.map(m => ({
+        key: m.key,
+        label: m.label ?? '',
+        desc: KLINE_SIGNALS.find(s => s.key === m.key)?.desc,
+      })),
+    })
+  }
+  return out
 }

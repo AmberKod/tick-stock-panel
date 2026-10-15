@@ -182,6 +182,48 @@ const DEEP_TABS: { key: DeepTab; label: string }[] = [
   { key: 'xdxr', label: '分红送配' },
 ]
 
+/**
+ * 把回测证据翻成人话, 挂在标注按钮的 tooltip 上。
+ *
+ * 关键分工: 标注本身是**事实描述**(放量/金叉/创新高), 由 OHLCV 确定性派生,
+ * 那部分永远准; 需要证据的是"把它当转强/转弱的方向判断用"。所以 untested
+ * 的措辞是"暂无统计支撑, 仅作事实标记", 而不是"这个标注不可信"。
+ */
+function evidenceLine(ev?: {
+  status?: string
+  note?: string
+  samples?: number
+  excess?: Record<string, number>
+  split_consistent?: boolean
+}): string {
+  if (!ev || ev.status === 'untested') {
+    return '方向判断：未回测 —— 只作事实标记，暂无统计支撑'
+  }
+  const n = ev.samples ?? 0
+  if (ev.status === 'significant') {
+    const ex = ev.excess
+      ? Object.entries(ev.excess)
+          .map(([k, v]) => `${k}日${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+          .join(' / ')
+      : '—'
+    return `方向判断：显著（样本 ${n}，超额 ${ex}，分段${ev.split_consistent ? '同向✓' : '不一致✗'}）`
+  }
+  if (ev.status === 'weak') {
+    return `方向判断：不显著（样本 ${n}）—— 与随机买入无差异`
+  }
+  return `方向判断：反向（样本 ${n}）${ev.note ? ` — ${ev.note}` : ''}`
+}
+
+/** 证据在按钮上的小角标。significant 才给勾, 其余如实标出。 */
+function evidenceMark(ev?: { status?: string }): string {
+  switch (ev?.status) {
+    case 'significant': return '✓'
+    case 'weak': return '?'
+    case 'rejected': return '!'
+    default: return '·'
+  }
+}
+
 function rangeFromMonths(months: number): { start: string; end: string } {
   const now = new Date()
   const end = now.toISOString().slice(0, 10)
@@ -598,6 +640,18 @@ export function StockDetail() {
     })
   }, [])
 
+  /**
+   * 标注的回测证据 —— 全市场一份、不随标的变, 所以长缓存。
+   * 标注本身是事实描述(永远准); 这里问的是"把它当方向判断用, 有没有统计支撑"。
+   */
+  const signalStatsQuery = useQuery({
+    queryKey: QK.klineSignalStats(),
+    queryFn: () => api.klineSignalStats(),
+    staleTime: 30 * 60_000,
+    retry: false,
+  })
+  const signalStats = signalStatsQuery.data
+
   // 实时行情(腾讯) —— 补齐日K里没有的 成交额/换手/PE/PB/市值。10s 短缓存。
   const quoteQuery = useQuery({
     queryKey: ['astock', 'quote', symbol],
@@ -921,27 +975,33 @@ export function StockDetail() {
               全部由当前那串 K 线**确定性派生**(放量/新高/新低/各种交叉), 不是打分、
               不是买卖建议。判定只读第 i 根与第 i-1 根, 不用未来数据(见 lib/klineSignals
               文件头的铁律 —— 九章那套正是栽在这上面)。口径写在 title 里。
-              9 种太多, 按「量能/极值/均线/摆动」分组摆, 组间加分隔线。 */}
+              9 种太多, 按「量能/极值/均线/摆动」分组摆, 组间加分隔线。
+              按钮上的小角标是**回测证据**: ✓显著 / ?不显著 / !反向 / ·未回测。
+              标注本身永远准(事实描述); 证据说的是"能不能当方向判断用"。 */}
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
               <span className="text-fg-muted">标注</span>
               {SIGNAL_GROUPS.map(g => (
                 <span key={g} className="inline-flex items-center gap-1">
-                  {KLINE_SIGNALS.filter(s => s.group === g).map(s => (
-                    <button
-                      key={s.key}
-                      type="button"
-                      onClick={() => toggleSignal(s.key)}
-                      title={`${s.label} · ${s.desc}`}
-                      className={cn('rounded border px-1.5 py-0.5 transition-colors',
-                        signals.has(s.key)
-                          ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                          : 'border-border text-fg-muted hover:text-fg-secondary')}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
+                  {KLINE_SIGNALS.filter(s => s.group === g).map(s => {
+                    const ev = signalStats?.signals?.[s.key]
+                    return (
+                      <button
+                        key={s.key}
+                        type="button"
+                        onClick={() => toggleSignal(s.key)}
+                        title={`${s.label} · ${s.desc}\n${evidenceLine(ev)}`}
+                        className={cn('rounded border px-1.5 py-0.5 transition-colors',
+                          signals.has(s.key)
+                            ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
+                            : 'border-border text-fg-muted hover:text-fg-secondary')}
+                      >
+                        {s.label}
+                        <span className="ml-0.5 opacity-60">{evidenceMark(ev)}</span>
+                      </button>
+                    )
+                  })}
                   <span className="mr-0.5 h-3 w-px bg-border" />
                 </span>
               ))}

@@ -2666,6 +2666,34 @@ export const api = {
     request<{ results: { symbol: string; name: string; code: string; asset_type?: string }[] }>(
       `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}`,
     ),
+  /**
+   * K线标注的**回测证据**。
+   *
+   * 标注本身是事实描述(放量 / 金叉 / 创60日新高), 由 OHLCV 确定性派生, 判定
+   * 只读第 i 与 i-1 根 —— 那部分永远准。但把标注当成"转强/转弱"的方向判断,
+   * 需要回测背书: 出现之后 N 日收益若与随机买入无异, 它就不配带方向色。
+   *
+   * 所以每个信号配一张证据卡, 前端如实显示。文件还没生成时一律 untested —
+   * 与其编个好看的数字, 不如明说没验过。
+   */
+  klineSignalStats: () =>
+    request<{
+      available: boolean
+      /** 回测跑出来的时间; null = 还没跑过 */
+      generated_at: string | null
+      sample: { tickers: number; bars: number; from: string | null; to: string | null }
+      /** 证据是否已硬到可以当渲染闸门(现在 false: 标注照画, 但写明未回测) */
+      gate_enabled: boolean
+      signals: Record<string, {
+        status: 'untested' | 'weak' | 'significant' | 'rejected'
+        note?: string
+        /** 证据充分时才有: 样本数 / 各持有期超额收益 / p 值 / 两半是否同向 */
+        samples?: number
+        excess?: Record<string, number>
+        p_value?: Record<string, number>
+        split_consistent?: boolean
+      }>
+    }>('/api/kline/signal-stats'),
 
   /** 批量查股票名称 (传入 symbol 列表, 返回 {symbol: name}) */
   instrumentNames: (symbols: string[]) =>
