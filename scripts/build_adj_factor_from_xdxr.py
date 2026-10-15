@@ -137,14 +137,38 @@ def build_one(symbol: str, bars: list[tuple[str, float]]) -> tuple[list[dict], i
         r = event_ratio(ev, closes[prev_date])
         if r is None:
             continue
-        rows.append({"symbol": symbol, "trade_date": dates[idx], "ex_factor": round(r, 10)})
+        # ⚠️ 方向(踩过的坑): r = (前收-分红+配股×价)/((1+送转+配股)×前收) 是
+        # post/pre(除权后参考价/前收, <1) —— 这是"把历史价乘上去"的方向, 用于
+        # qfq 因子链。而 pipeline._apply_adj_factor 的 ex_factor 语义是
+        # **pre/post**(>1), 它内部 cum_prod + ratio=cum/total 自己完成
+        # "越早越缩"的前复权。传 r 不取倒数会把复权方向整个反掉(实测除权日前
+        # close 反而被抬高 1.0775 倍)。这里必须存 1/r。
+        rows.append({"symbol": symbol, "trade_date": dates[idx], "ex_factor": round(1.0 / r, 10)})
     return rows, skipped_gap
+
+
+def rebuild_enriched(repo, universe: list[str]) -> int:
+    """局部重算 enriched: 只算 A 股 universe, 按日期合并写回。
+
+    为什么不调 run_pipeline() 无参全量: kline_daily/ 里混着港美的 symbol= 分区,
+    全量分支会把 .HK/.US 也喂进 A 股管道, instruments 维表匹配不上 →
+    compute_limit_signals 跳过 → 缺列拒写(实测批次 2 即崩)。symbols= 局部模式
+    正好只重算传入标的, 并保留各 date 分区里其它票的行。
+    """
+    logger.info("局部重算 enriched (A 股 %d 只, 前复权生效, 可能很久)…", len(universe))
+    from app.indicators.pipeline import run_pipeline
+
+    n = run_pipeline(symbols=universe)
+    logger.info("enriched 重算完成: %d 行", n)
+    return n
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="生成 A 股 adj_factor/all.parquet")
     ap.add_argument("--limit-symbols", type=int, default=0, help="只处理前 N 只(试跑)")
     ap.add_argument("--rebuild-enriched", action="store_true", help="完成后全量重算 enriched")
+    ap.add_argument("--enriched-only", action="store_true",
+                    help="跳过因子生成, 只重算 enriched (因子已落盘后补跑用)")
     args = ap.parse_args()
 
     from app.tickflow.repository import DataStore, KlineRepository
@@ -167,6 +191,10 @@ def main() -> int:
     if args.limit_symbols:
         universe = universe[: args.limit_symbols]
     logger.info("处理 %d 只", len(universe))
+
+    if args.enriched_only:
+        rebuild_enriched(repo, universe)
+        return 0
 
     all_rows: list[dict] = []
     no_event = 0
@@ -216,11 +244,7 @@ def main() -> int:
         logger.warning("刷新视图失败(不影响文件): %s", e)
 
     if args.rebuild_enriched:
-        logger.info("全量重算 enriched (前复权生效, 可能很久)…")
-        from app.indicators.pipeline import run_pipeline
-
-        n = run_pipeline()
-        logger.info("enriched 重算完成: %d 行", n)
+        rebuild_enriched(repo, universe)
 
     return 0
 
