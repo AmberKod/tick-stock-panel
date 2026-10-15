@@ -143,7 +143,37 @@ console.log(periodOk
   ? '   ✓ 周K 指标按周线序列重算, 未沿用日K值'
   : '   ✗ 周K 指标异常')
 
+// ── 徽章布局: 同一根 K 线最多上下各一个, 不许叠成一坨 ──────────────────────
+// 这是"美观"能不能站住的硬指标: 标注合并前, 928 个标记里有 169 个是同日同
+// 方向重复的, 画出来就是文字压文字。合并后一天只剩 上/下 两个槽位。
+console.log('\n' + '-'.repeat(64))
+console.log('徽章布局')
+console.log('-'.repeat(64))
+let layoutOk = true
+let totalMarks = 0, totalDetail = 0, maxPerSlot = 0, multiDay = 0
+for (const sym of symbols) {
+  const rows = computeIndicators(data.symbols[sym])
+  const marks = buildSignalMarkers(rows, ALL)
+  totalMarks += marks.length
+  const slotCount = new Map()
+  for (const m of marks) {
+    const slot = `${m.date}|${m.kind}`
+    // 一个槽位只允许一个徽章 —— 出现重复说明 mergeByDate 漏了
+    slotCount.set(slot, (slotCount.get(slot) ?? 0) + 1)
+    totalDetail += m.detail?.length ?? 1
+    if ((m.count ?? 1) > 1) multiDay += 1
+  }
+  for (const c of slotCount.values()) maxPerSlot = Math.max(maxPerSlot, c)
+}
+const dedup = totalDetail - totalMarks
+console.log(`徽章 ${totalMarks} 个, 合并掉 ${dedup} 条重复`
+  + ` (${(dedup / Math.max(totalDetail, 1) * 100).toFixed(1)}%)`)
+console.log(`同一槽位最多 ${maxPerSlot} 个徽章 (要求 = 1) → ${maxPerSlot === 1 ? '✓' : '✗'}`)
+console.log(`带角标(同日≥2 条)的徽章 ${multiDay} 个 → ${multiDay > 0 ? '✓ 合并生效' : '✗ 没合并'}`)
+if (maxPerSlot !== 1 || multiDay === 0) layoutOk = false
+
 console.log('\n' + '='.repeat(64))
-const allOk = pass && periodOk && summary.every(s => s.pct === 100) && fPct < 5
+const allOk = pass && periodOk && layoutOk
+  && summary.every(s => s.pct === 100) && fPct < 5
 console.log(allOk ? 'PASS: 全部标注均为 point-in-time' : 'FAIL: 存在非 point-in-time 标注')
 process.exit(allOk ? 0 : 1)
