@@ -254,6 +254,72 @@ def _leg(sub: pd.DataFrame, n: int) -> float | None:
     return round(float(v.mean()) * 100, 3)
 
 
+def _leg_stats(sub: pd.DataFrame, rng, perm: int) -> dict | None:
+    """一条腿的完整统计。样本不足(单向信号那条不存在的腿)返回 None。
+
+    注意这里 n<200 就判 None —— 一条腿只有几十个样本时 bootstrap 毫无意义，
+    宁可写"该腿无结论"也不能拿噪声当证据。
+    """
+    if sub is None or len(sub) < 200:
+        return None
+    excess, p, train, test = {}, {}, {}, {}
+    for n in HOLDS:
+        col = f"aligned{n}"
+        v = sub[["date", col]].dropna()
+        vals = v[col].to_numpy(dtype=float)
+        if len(vals) < 200:
+            return None
+        excess[str(n)] = round(float(vals.mean()) * 100, 3)
+        p[str(n)] = cluster_bootstrap_p(v["date"].to_numpy(), vals, rng, perm)
+        tr = sub[sub["is_train"]][col].dropna()
+        te = sub[~sub["is_train"]][col].dropna()
+        # 训练/测试任一段样本太少, 分段一致性无从谈起 —— 如实留空而不是猜
+        train[str(n)] = round(float(tr.mean()) * 100, 3) if len(tr) >= 100 else None
+        test[str(n)] = round(float(te.mean()) * 100, 3) if len(te) >= 100 else None
+    return {"n": int(len(sub)), "excess": excess, "p": p,
+            "train_excess": train, "test_excess": test}
+
+
+def _split_ok(leg: dict | None) -> bool:
+    """训练/测试两段的符号是否一致(任一段缺样本则无从判断, 返回 False)。"""
+    if not leg:
+        return False
+    for n in HOLDS:
+        tr, te = leg["train_excess"][str(n)], leg["test_excess"][str(n)]
+        if tr is None or te is None:
+            return False
+        if (tr >= 0) != (te >= 0):
+            return False
+    return True
+
+
+def _fmt(leg: dict | None) -> str:
+    """一条腿的三周期超额, 给人看。"""
+    if not leg:
+        return "—"
+    return "/".join(f"{leg['excess'][str(n)]:+.2f}%" for n in HOLDS)
+
+
+def _verdict(leg: dict | None) -> tuple[str, str, float]:
+    """一条腿 → (status, note_detail, mean_excess)。三道闸依次拦:
+    ① BH 校正后至少一期显著 ② 训练/测试同向 ③ 经济上够本(≥2×成本)。
+    """
+    if not leg:
+        return "untested", "", 0.0
+    mean = float(np.mean(list(leg["excess"].values())))
+    sig = [str(n) for n in HOLDS if leg["q"][str(n)] < 0.05]
+    if not sig:
+        return "weak", "三周期多重校正后均不显著 —— 与随机买卖无差异", mean
+    if not _split_ok(leg):
+        return "weak", "统计显著但训练/测试段方向不一致, 视为不稳健", mean
+    # 经济显著性门槛: 平均超额得够得上"再翻一倍手续费"(2×30bp=60bp)才配给结论。
+    # 否则百万级样本里 pb 级的差异也会被 bootstrap 判显著 —— 那是统计显著, 不是能赚钱。
+    if abs(mean) < 0.6:
+        return "weak", (f"统计显著但三周期均值仅 {mean:+.2f}%, "
+                        f"扣费后不足 1 倍交易成本的 2 倍, 没有实操意义"), mean
+    return ("significant" if mean > 0 else "rejected"), "", mean
+
+
 def bh_fdr(pvals: list[float]) -> list[float]:
     """Benjamini-Hochberg 校正后的 q 值(升序返回原顺序)。"""
     m = len(pvals)
@@ -357,20 +423,21 @@ def main() -> int:
         p_map: dict[str, float] = {}
         for n in HOLDS:
             col = f"aligned{n}"
-            v = sub[[ "date", col]].dropna()
+            v = sub[["date", col]].dropna()
             vals = v[col].to_numpy(dtype=float)
             excess_map[str(n)] = round(float(vals.mean()) * 100, 3)
             p_map[str(n)] = cluster_bootstrap_p(v["date"].to_numpy(), vals, rng, args.perm)
+        # 双向信号里"金叉做多"和"死叉做空"可能一条灵一条哑, 合并成一个数会互相掩盖,
+        # 所以统计下沉到腿。拆腿是**结构性**的(buy/sell 本就是两条独立规则),
+        # 不是看完测试段再挑 —— 符号不参与拆不拆的决策。
+        long_sub = sub[sub["dir"] != "sell"]     # buy + neutral 归看涨侧
+        short_sub = sub[sub["dir"] == "sell"]
         rows.append({
             "key": key, "direction": direction, "n": len(sub),
             "excess": excess_map, "p": p_map,
-            # 双向信号里"金叉做多"和"死叉做空"可能一个灵一个哑, 合并成一个数会互相
-            # 掩盖。拆开写进证据卡, 让看的人一眼知道哪条腿在赚钱、哪条腿在亏。
-            "long_excess": {
-                str(n): _leg(sub[sub["dir"] != "sell"], n) for n in HOLDS
-            },
-            "short_excess": {
-                str(n): _leg(sub[sub["dir"] == "sell"], n) for n in HOLDS
+            "legs": {
+                "long": _leg_stats(long_sub, rng, args.perm),
+                "short": _leg_stats(short_sub, rng, args.perm),
             },
             "train_excess": {
                 str(n): round(float(sub[sub["is_train"]][f"aligned{n}"].mean()) * 100, 3)
@@ -402,56 +469,103 @@ def main() -> int:
             print(f"  {n:>2}日: 随机方向均值 {(float(np.mean(v * flip)) - COST) * 100:+.3f}%")
         print()
 
-    # ── 4. BH-FDR(27 次同时检定) ──
-    flat_p = [r["p"][str(n)] for r in rows for n in HOLDS]
-    qs = bh_fdr(flat_p)
+    # ── 4. BH-FDR(按**实际检定次数**) ──
+    # 拆分到腿之后检定数从 27 变成"存在的腿 × 3"(双向信号 6 次)。校正次数不跟着加
+    # 就是欠校正 —— 等于偷偷放宽了显著性门槛。这里把所有腿的 p 摊平一起校正。
+    flat: list[tuple[int, str, int]] = []
+    flat_p: list[float] = []
     for i, r in enumerate(rows):
-        r["q"] = {str(n): qs[i * len(HOLDS) + j] for j, n in enumerate(HOLDS)}
+        for leg_name in ("long", "short"):
+            lg = r["legs"][leg_name]
+            if not lg:
+                continue
+            for n in HOLDS:
+                flat.append((i, leg_name, n))
+                flat_p.append(lg["p"][str(n)])
+    qs = bh_fdr(flat_p)
+    for (i, leg_name, n), q in zip(flat, qs, strict=True):
+        rows[i]["legs"][leg_name].setdefault("q", {})[str(n)] = round(q, 6)
+    logger.info("BH-FDR 校正 %d 次检定(拆腿后, 不是 27)", len(flat_p))
+    # 合并口径的 q 也留着(展示整体用), 但主结论不再基于它
+    merged_q = bh_fdr([r["p"][str(n)] for r in rows for n in HOLDS])
+    for i, r in enumerate(rows):
+        r["q"] = {str(n): merged_q[i * len(HOLDS) + j] for j, n in enumerate(HOLDS)}
 
     alpha = 0.05
     signals: dict[str, dict] = {}
     for r in rows:
         key = r["key"]
-        # 主结论 = 至少一个持有期 BH 显著; 且要求训练/测试同向(不同向说明是某段行情的偶然)
-        sig_holds = [str(n) for n in HOLDS if r["q"][str(n)] < alpha]
-        mean_all = float(np.mean([r["excess"][str(n)] for n in HOLDS]))
-        consistent = all(
-            (r["train_excess"][str(n)] >= 0) == (r["test_excess"][str(n)] >= 0) for n in HOLDS
-        )
-        # 经济显著性门槛: 平均超额得够得上"再翻一倍手续费"(2×30bp=60bp)才配给结论。
-        # 否则百万级样本里 pb 级的差异也会被 bootstrap 判显著, 那是统计显著不是能赚钱。
-        economic = abs(mean_all) >= 0.6
-        if not sig_holds:
-            status = "weak"
-            note_detail = "三周期多重校正后均不显著 —— 与随机买入无差异"
-        elif not consistent:
-            status = "weak"
-            note_detail = "统计显著但训练/测试段方向不一致, 视为不稳健"
-        elif not economic:
-            status = "weak"
-            note_detail = (f"统计显著但三周期均值仅 {mean_all:+.2f}%, "
-                           f"扣费后不足 1 倍交易成本的 2 倍, 没有实操意义")
+        direction = r["direction"]
+        lg, sh = r["legs"]["long"], r["legs"]["short"]
+        v_long, v_short = _verdict(lg), _verdict(sh)
+        # 主结论取"站得住的那条腿": 两条都给出结论时取幅度大的那条。
+        # 都不站得住 → weak, 并把两腿各自的结论写进 note 说明是哪一步没过。
+        cands = [(-abs(v[2]), name, v) for name, v, leg in
+                 (("long", v_long, lg), ("short", v_short, sh))
+                 if leg and v[0] in ("significant", "rejected")]
+        if cands:
+            cands.sort()
+            _, best_leg, (status, note_detail, mean_all) = cands[0]
+            both = len(cands) == 2
         else:
-            status = "significant" if mean_all > 0 else "rejected"
+            # 两条腿都没站住 —— 也别默认甩给看涨侧, 取**幅度大的那条**展示:
+            # 它离门槛最近、信息量最大。(只比 |mean|, 不比符号, 所以不是挑好的看)
+            pick = sorted((-abs(v[2]), name, v) for name, v, leg in
+                          (("long", v_long, lg), ("short", v_short, sh)) if leg)
+            if pick:
+                _, best_leg, (status, note_detail, mean_all) = pick[0]
+            else:
+                best_leg, status, note_detail, mean_all = "long", "weak", "", 0.0
+            both = False
+        ref_leg = lg if best_leg == "long" else sh
+        mean_leg = float(np.mean(list(ref_leg["excess"].values()))) if ref_leg else 0.0
+        sig_holds = ([str(n) for n in HOLDS if ref_leg["q"][str(n)] < alpha]
+                     if ref_leg else [])
+        # 分段一致性看**取用的那条腿**自己; 单向信号只有一条腿, 不能因为"没有第二条
+        # 腿"就被判不一致。
+        consistent = _split_ok(ref_leg)
 
-        note = note_detail if status == "weak" else ""
-        if status == "rejected":
-            # 中性标记(放量)本身不带方向, 说"跟随该方向跑输"是自相矛盾的 ——
-            # 改成它真正的用法: 别把它当利好暗示。
-            note = (
-                f"放量后反而跑输({mean_all:+.2f}%) —— 把它当『要涨』的暗示是错的"
-                if r["direction"] == "neutral"
-                else "跟随该方向反而跑输 —— 是警示标记, 不是买卖机会"
-            )
-        # 方向语义 + 幸存者偏差都如实写进证据卡
+        # ── 措辞: 结论指向哪条腿, 就说哪条腿; A 股没有融券, 做空腿 = 减仓/回避 ──
+        leg_word = "看涨侧(做多)" if best_leg == "long" else "看跌侧(做空/减仓回避)"
+        if status == "weak":
+            note = note_detail
+            if both or (lg and sh and v_long[0] != "untested" and v_short[0] != "untested"):
+                note = (f"看涨侧 {_fmt(lg)} / 看跌侧 {_fmt(sh)} —— 两条腿分别验证, "
+                        f"均不成立({note_detail})")
+            elif direction == "neutral":
+                note = f"放量后跑输 {mean_leg:+.2f}% —— 把它当『要涨』的暗示是错的"
+        elif status == "rejected":
+            note = (f"{leg_word}跟随后跑输 {mean_leg:+.2f}% —— 是警示标记, 不是买卖机会"
+                    if direction != "neutral"
+                    else f"放量后跑输 {mean_leg:+.2f}% —— 把它当『要涨』的暗示是错的")
+        else:
+            note = f"{leg_word} {mean_leg:+.2f}%"
+
         extra = []
-        if r["direction"] == "neutral":
+        if direction == "neutral":
             extra.append("中性标记, 不带方向")
+        elif direction == "both" and lg and sh:
+            other = sh if best_leg == "long" else lg
+            # two legs both failed 时别说"取自更显著的一侧" —— 没有一侧显著,
+            # 只是取幅度大的那条展示而已。措辞必须和状态自洽。
+            extra.append(
+                f"双向信号两侧分别统计, 展示幅度较大的一侧({leg_word})"
+                if status == "weak"
+                else f"双向信号另一侧 {_fmt(other)}"
+            )
+        # 把**测试段**的幅度直接写出来: 训练/测试只查同向不够, 幅度衰减一半同样不算数,
+        # 而看的人有权知道 out-of-sample 到底剩多少。
+        if ref_leg:
+            te = [ref_leg["test_excess"][str(n)] for n in HOLDS]
+            if all(v is not None for v in te):
+                extra.append(f"测试段(2023年后) {np.mean(te):+.2f}%")
         extra.append("样本为当前在市股票, 未剔除幸存者偏差, 收益偏乐观")
         signals[key] = {
             "status": status,
             "note": ("；".join([note] + extra) if note else "；".join(extra)),
             "samples": int(r["n"]),
+            "best_leg": best_leg,
+            "direction": direction,
             "excess": {str(n): r["excess"][str(n)] for n in HOLDS},
             "p_value": {str(n): r["p"][str(n)] for n in HOLDS},
             "q_value": {str(n): r["q"][str(n)] for n in HOLDS},
@@ -459,9 +573,8 @@ def main() -> int:
             "test_excess": {str(n): r["test_excess"][str(n)] for n in HOLDS},
             "split_consistent": bool(consistent),
             "primary_holds": sig_holds,
-            # 双腿分解: 双向信号里可能一条腿有效、另一条拖后腿, 合并数会掩盖。
-            "long_excess": {str(n): r["long_excess"][str(n)] for n in HOLDS},
-            "short_excess": {str(n): r["short_excess"][str(n)] for n in HOLDS},
+            # 双腿分解: 每条腿各自的样本/超额/校正后 q/训练-测试分解
+            "legs": {name: leg for name, leg in (("long", lg), ("short", sh)) if leg},
         }
 
     sample = {
@@ -483,22 +596,28 @@ def main() -> int:
     print("\n================ 回测结果 ================")
     print(f"样本: {sample['tickers']} 只 / {sample['bars']} 行 / "
           f"{sample['from']} ~ {sample['to']} / 成本 {sample['cost_bp']}bp")
-    print(f"{'signal':<12}{'status':<13}{'n':>9}{'5日%':>9}{'10日%':>9}{'20日%':>9}{'q':>9}{'分段':>6}")
+    print(f"{'signal':<12}{'status':<13}{'取用腿':<8}{'n':>9}"
+          f"{'5日%':>9}{'10日%':>9}{'20日%':>9}{'q':>9}{'分段':>6}")
     for key, s in signals.items():
-        ex = s["excess"]
-        qmin = min(s["q_value"].values())
-        print(f"{key:<12}{s['status']:<13}{s['samples']:>9}"
-              f"{ex['5']:>9.2f}{ex['10']:>9.2f}{ex['20']:>9.2f}{qmin:>9.3f}"
+        leg = s["legs"][s["best_leg"]]
+        ex = leg["excess"]
+        qmin = min(leg["q"].values())
+        print(f"{key:<12}{s['status']:<13}{('做多' if s['best_leg'] == 'long' else '做空'):<8}"
+              f"{leg['n']:>9}{ex['5']:>9.2f}{ex['10']:>9.2f}{ex['20']:>9.2f}{qmin:>9.3f}"
               f"{'✓' if s['split_consistent'] else '✗':>6}")
-    print("\n分方向拆解 (做多腿 = buy 标记后的持有收益超额; 做空腿 = sell 标记后做空的超额)")
-    print(f"{'signal':<12}{'腿':<6}{'n:':<0}{'5日%':>9}{'10日%':>9}{'20日%':>9}")
+    print("\n分方向拆解 (做多腿 = buy/中性标记后持有; 做空腿 = sell 标记后做空 —— "
+          "A股无融券, 实操含义是持仓者减仓/回避)")
+    print(f"{'signal':<12}{'腿':<6}{'n':>10}{'5日%':>9}{'10日%':>9}{'20日%':>9}{'最低q':>9}")
     for key, s in signals.items():
-        for leg_name, leg in (("做多", s["long_excess"]), ("做空", s["short_excess"])):
-            if all(v is None for v in leg.values()):
+        for leg_name in ("long", "short"):
+            leg = s["legs"].get(leg_name)
+            if not leg:
                 continue
-            print(f"{key:<12}{leg_name:<6}"
-                  + "".join(f"{leg[str(n)]:>9.2f}" if leg[str(n)] is not None else f"{'—':>9}"
-                            for n in HOLDS))
+            mark = "*" if s["best_leg"] == leg_name else " "
+            print(f"{key:<12}{('做多' if leg_name == 'long' else '做空') + mark:<6}"
+                  f"{leg['n']:>10}"
+                  + "".join(f"{leg['excess'][str(n)]:>9.2f}" for n in HOLDS)
+                  + f"{min(leg['q'].values()):>9.3f}")
 
     if args.out:
         Path(args.out).write_text(
