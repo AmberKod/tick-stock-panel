@@ -155,52 +155,73 @@ def events_for_symbol(g: pd.DataFrame, dump_sym: str | None = None) -> list[dict
     pdif = np.r_[np.nan, dif[:-1]]
     pdea = np.r_[np.nan, dea[:-1]]
 
+    # strength = 信号"超出基准的相对幅度"(统一成百分比量纲, 越大越强), 用来检验
+    # 同一个标注在不同强度下后续走势是否单调 —— 阈值本身不动(RSI 30/70 是市场惯例),
+    # 只回答"同样是超买, RSI 75 和 RSI 92 是不是一回事"。
+    def _pct(a, b) -> float:
+        """超出量占基准的百分比 (a-b)/b*100 —— 用于"价格超出某条线多少"。"""
+        return float((a - b) / b * 100.0) if np.isfinite(a) and np.isfinite(b) and b else float("nan")
+
+    def _ratio(a, b) -> float:
+        """幅度占基准的百分比 a/b*100 —— 用于"某个差值相对价格有多大"。
+
+        注意别写成 _pct: (|dif-dea| - close)/close 会得到 -99.x, 看起来像单调
+        其实量纲是错的。
+        """
+        return float(a / b * 100.0) if np.isfinite(a) and np.isfinite(b) and b else float("nan")
+
     out: list[dict] = []
     for i in range(WARMUP, n):
         dt = dates[i]
         # 量能
         if np.isfinite(vb[i]) and vb[i] > 0 and vol[i] >= vb[i] * 2:
-            out.append({"date": dt, "key": "volume", "dir": "neutral"})
+            # 放量用"量/基准×100"(即 200 = 2 倍量), 与前端同一公式
+            out.append({"date": dt, "key": "volume", "dir": "neutral",
+                        "strength": _ratio(vol[i], vb[i])})
         # 极值(newHigh / newLow 互斥, 与 TS 的 if/else if 一致)
         if np.isfinite(hi60[i]) and close[i] > hi60[i]:
-            out.append({"date": dt, "key": "newHigh", "dir": "buy"})
+            out.append({"date": dt, "key": "newHigh", "dir": "buy",
+                        "strength": _pct(close[i], hi60[i])})
         elif np.isfinite(lo60[i]) and close[i] < lo60[i]:
-            out.append({"date": dt, "key": "newLow", "dir": "sell"})
+            out.append({"date": dt, "key": "newLow", "dir": "sell",
+                        "strength": _pct(lo60[i], close[i])})
         # MACD
         c = crossed(dif[i], dea[i], pdif[i], pdea[i])
-        if c == "up":
-            out.append({"date": dt, "key": "macd", "dir": "buy"})
-        elif c == "down":
-            out.append({"date": dt, "key": "macd", "dir": "sell"})
+        if c:
+            out.append({"date": dt, "key": "macd", "dir": "buy" if c == "up" else "sell",
+                        "strength": _ratio(abs(dif[i] - dea[i]), close[i])})
         # MA5/20
         c = crossed(ma5[i], ma20[i], pma5[i], pma20[i])
-        if c == "up":
-            out.append({"date": dt, "key": "maCross", "dir": "buy"})
-        elif c == "down":
-            out.append({"date": dt, "key": "maCross", "dir": "sell"})
+        if c:
+            out.append({"date": dt, "key": "maCross", "dir": "buy" if c == "up" else "sell",
+                        "strength": _ratio(abs(ma5[i] - ma20[i]), ma20[i])})
         # MA20/60
         c = crossed(ma20[i], ma60[i], pma20[i], pma60[i])
-        if c == "up":
-            out.append({"date": dt, "key": "maGolden60", "dir": "buy"})
-        elif c == "down":
-            out.append({"date": dt, "key": "maGolden60", "dir": "sell"})
+        if c:
+            out.append({"date": dt, "key": "maGolden60", "dir": "buy" if c == "up" else "sell",
+                        "strength": _ratio(abs(ma20[i] - ma60[i]), ma60[i])})
         # 收盘穿 MA20
         c = crossed(close[i], ma20[i], prev_close[i], pma20[i])
-        if c == "up":
-            out.append({"date": dt, "key": "ma20Cross", "dir": "buy"})
-        elif c == "down":
-            out.append({"date": dt, "key": "ma20Cross", "dir": "sell"})
-        # RSI
+        if c:
+            out.append({"date": dt, "key": "ma20Cross", "dir": "buy" if c == "up" else "sell",
+                        "strength": _ratio(abs(close[i] - ma20[i]), ma20[i])})
+        # RSI: 用 |rsi-50| 做强度(30→20, 70→20, 92→42), 和别的信号同量纲
         if np.isfinite(rsi[i]):
             if rsi[i] < 30:
-                out.append({"date": dt, "key": "rsi", "dir": "buy"})
+                out.append({"date": dt, "key": "rsi", "dir": "buy",
+                            "strength": abs(rsi[i] - 50.0)})
             elif rsi[i] > 70:
-                out.append({"date": dt, "key": "rsi", "dir": "sell"})
-        # 布林
-        if np.isfinite(bu[i]) and close[i] > bu[i]:
-            out.append({"date": dt, "key": "boll", "dir": "buy"})
-        elif np.isfinite(bl[i]) and close[i] < bl[i]:
-            out.append({"date": dt, "key": "boll", "dir": "sell"})
+                out.append({"date": dt, "key": "rsi", "dir": "sell",
+                            "strength": abs(rsi[i] - 50.0)})
+        # 布林: 超出量用带宽归一化, 避免高价股天然数值大
+        bw = bu[i] - bl[i]
+        if np.isfinite(bw) and bw > 0:
+            if np.isfinite(bu[i]) and close[i] > bu[i]:
+                out.append({"date": dt, "key": "boll", "dir": "buy",
+                            "strength": _ratio(close[i] - bu[i], bw)})
+            elif np.isfinite(bl[i]) and close[i] < bl[i]:
+                out.append({"date": dt, "key": "boll", "dir": "sell",
+                            "strength": _ratio(bl[i] - close[i], bw)})
     return out
 
 
@@ -300,6 +321,96 @@ def _fmt(leg: dict | None) -> str:
     return "/".join(f"{leg['excess'][str(n)]:+.2f}%" for n in HOLDS)
 
 
+def _strength_bins(sub: pd.DataFrame) -> dict | None:
+    """一条腿的强度分层: 全样本分位数切档, 分别报训练/测试段 Q1..Q4 的超额。
+
+    阈值用**全样本**分位数而不是段内分位数 —— 前端要拿它给标注分档渲染,
+    同一条阈值对所有票、所有时间都得一致, 否则同一个强度今天算"强"明天算"弱"。
+    """
+    s = sub.dropna(subset=["strength"] + [f"aligned{n}" for n in HOLDS])
+    if len(s) < 2000:
+        return None
+    q25, q50, q75 = (float(s["strength"].quantile(q)) for q in (0.25, 0.5, 0.75))
+    edges = [q25, q50, q75]
+    bins: dict[str, dict] = {}
+    rho: dict[str, dict] = {}
+    for seg_name, mask in (("train", s["is_train"]), ("test", ~s["is_train"])):
+        seg = s[mask]
+        idx = np.digitize(seg["strength"].to_numpy(dtype=float), edges)
+        means: dict[int, dict] = {}
+        for b in range(4):
+            grp = seg[idx == b]
+            if len(grp) < 200:
+                continue
+            means[b] = {str(n): round(float(grp[f"aligned{n}"].mean()) * 100, 3)
+                        for n in HOLDS}
+            bins[f"{seg_name}_Q{b + 1}"] = means[b]
+        if len(means) == 4:
+            rho[seg_name] = {
+                str(n): round(float(np.corrcoef(
+                    np.arange(4), [means[b][str(n)] for b in range(4)])[0, 1]), 3)
+                for n in HOLDS
+            }
+    if not bins or "train" not in rho or "test" not in rho:
+        return None
+    # 幅度保留率: 测试段 (Q4-Q1) 相对训练段还剩几成。衰减过半就是 winner's curse ——
+    # 训练段挑出来的"最强档"在新数据上根本不剩多少, 这条必须露出来。
+    ret = {}
+    for n in HOLDS:
+        d_tr = bins[f"train_Q4"][str(n)] - bins[f"train_Q1"][str(n)]
+        d_te = bins[f"test_Q4"][str(n)] - bins[f"test_Q1"][str(n)]
+        ret[str(n)] = round(d_te / d_tr, 3) if abs(d_tr) > 1e-9 else None
+    monotone = all(
+        (rho["train"][str(n)] >= 0) == (rho["test"][str(n)] >= 0)
+        and abs(rho["train"][str(n)]) >= 0.8 and abs(rho["test"][str(n)]) >= 0.8
+        for n in HOLDS
+    )
+    # trustworthy = 方向在两段都单调 **且** 幅度没塌。只满足前者照样会误导:
+    # rsi 做空腿训练段 Q4 +1.86% → 测试段只剩 +0.21%(保留 0.13), 单调是真的, 但
+    # 按训练段幅度把箭头画大就是拿过拟合的幅度当信息。衰减过半就不给分档。
+    r20 = ret.get("20")
+    trustworthy = bool(monotone) and r20 is not None and r20 >= 0.5
+    return {"q25": round(q25, 4), "q50": round(q50, 4), "q75": round(q75, 4),
+            "bins": bins, "rho": rho, "monotone": bool(monotone),
+            "retained": ret, "trustworthy": trustworthy, "n": int(len(s))}
+
+
+def probe_strength(merged: pd.DataFrame, split: str) -> None:
+    """强度分层诊断: 同一个标注按"超出基准的幅度"四分位分档, 看超额是否单调。
+
+    默认只在**训练段**跑 —— 这是设计工具, 流程是: 训练段看出剂量-反应关系 →
+    拿测试段验一次 → 定稿。两头一起扫就是在拟合噪声。
+    """
+    m = merged.dropna(subset=["strength"] + [f"aligned{n}" for n in HOLDS])
+    if split == "train":
+        m = m[m["is_train"]]
+    elif split == "test":
+        m = m[~m["is_train"]]
+    print(f"\n---- 强度分层诊断 [{split} 段] (Q1 最弱 → Q4 最强, 单元格=超额%) ----")
+    print(f"{'signal':<12}{'腿':<6}{'档':<5}{'n':>9}{'强度中位':>10}"
+          + "".join(f"{str(n) + '日':>9}" for n in HOLDS))
+    for key in SIGNAL_DIR:
+        sub = m[m["key"] == key]
+        for leg_name, mask in (("做多", sub["dir"] != "sell"), ("做空", sub["dir"] == "sell")):
+            s = sub[mask]
+            if len(s) < 2000:
+                continue
+            try:
+                binned = pd.qcut(s["strength"], 4, labels=["Q1", "Q2", "Q3", "Q4"])
+            except ValueError:
+                continue
+            for b, grp in s.groupby(binned, observed=True):
+                print(f"{key:<12}{leg_name:<6}{str(b):<5}{len(grp):>9}"
+                      f"{grp['strength'].median():>10.2f}"
+                      + "".join(f"{grp[f'aligned{n}'].mean() * 100:>9.2f}" for n in HOLDS))
+            # 单调性: 四档均值随档位递增/递减的秩相关, |rho|=1 为完全单调
+            means = [s.groupby(binned, observed=True)[f"aligned{n}"].mean().to_numpy()
+                     for n in HOLDS]
+            rho = [float(np.corrcoef(np.arange(len(x)), x)[0, 1]) for x in means]
+            print(f"{'':<12}{'':<6}{'单调ρ':<5}{'':>9}{'':>10}"
+                  + "".join(f"{r:>9.2f}" for r in rho))
+
+
 def _verdict(leg: dict | None) -> tuple[str, str, float]:
     """一条腿 → (status, note_detail, mean_excess)。三道闸依次拦:
     ① BH 校正后至少一期显著 ② 训练/测试同向 ③ 经济上够本(≥2×成本)。
@@ -341,6 +452,10 @@ def main() -> int:
     ap.add_argument("--perm", type=int, default=PERM)
     ap.add_argument("--placebo", type=int, default=20000,
                     help="安慰剂对照样本数(随机事件), 0=不做")
+    ap.add_argument("--probe-strength", action="store_true",
+                    help="强度分层诊断(只打印, 不改结论)")
+    ap.add_argument("--probe-split", default="train", choices=("train", "test", "all"),
+                    help="强度诊断跑在哪一段; 默认 train —— 设计阶段不许碰测试段")
     args = ap.parse_args()
 
     root = Path(args.data_dir)
@@ -384,7 +499,8 @@ def main() -> int:
     if args.dump:
         payload: dict = defaultdict(list)
         for r in ev_rows:
-            payload[r["symbol"]].append({"date": r["date"], "key": r["key"], "dir": r["dir"]})
+            payload[r["symbol"]].append({"date": r["date"], "key": r["key"],
+                                         "dir": r["dir"], "strength": r.get("strength")})
         Path(args.dump).write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         logger.info("已导出信号明细 %s", args.dump)
@@ -438,6 +554,11 @@ def main() -> int:
             "legs": {
                 "long": _leg_stats(long_sub, rng, args.perm),
                 "short": _leg_stats(short_sub, rng, args.perm),
+            },
+            # 强度分层: 同一个标注"多极端"和后续走势有剂量-反应关系吗?
+            "strength": {
+                "long": _strength_bins(long_sub),
+                "short": _strength_bins(short_sub),
             },
             "train_excess": {
                 str(n): round(float(sub[sub["is_train"]][f"aligned{n}"].mean()) * 100, 3)
@@ -575,6 +696,10 @@ def main() -> int:
             "primary_holds": sig_holds,
             # 双腿分解: 每条腿各自的样本/超额/校正后 q/训练-测试分解
             "legs": {name: leg for name, leg in (("long", lg), ("short", sh)) if leg},
+            # 强度分层: 前端按 thresholds 给标注分档渲染; monotone=True 才说明
+            # "越强越极端"这件事在训练/测试两段都站得住。
+            "strength": {name: r["strength"][name] for name in ("long", "short")
+                         if r["strength"][name]},
         }
 
     sample = {
@@ -618,6 +743,25 @@ def main() -> int:
                   f"{leg['n']:>10}"
                   + "".join(f"{leg['excess'][str(n)]:>9.2f}" for n in HOLDS)
                   + f"{min(leg['q'].values()):>9.3f}")
+
+    print("\n强度分层 (同一标注的「极端程度」与后续走势: Q1 最弱 / Q4 最强, 取 20 日)")
+    print(f"{'signal':<12}{'腿':<6}{'训练Q1':>9}{'训练Q4':>9}{'测试Q1':>9}{'测试Q4':>9}"
+          f"{'保留率':>8}{'单调':>6}")
+    for key, s in signals.items():
+        st = s["strength"].get(s["best_leg"])
+        if not st:
+            continue
+        b, rt = st["bins"], st["retained"]["20"]
+        print(f"{key:<12}{'做多' if s['best_leg'] == 'long' else '做空':<6}"
+              f"{b['train_Q1']['20']:>9.2f}{b['train_Q4']['20']:>9.2f}"
+              f"{b['test_Q1']['20']:>9.2f}{b['test_Q4']['20']:>9.2f}"
+              f"{(rt if rt is not None else float('nan')):>8.2f}"
+              f"{'✓' if st['trustworthy'] else '✗':>6}")
+    print("  保留率 = 测试段(Q4-Q1) ÷ 训练段(Q4-Q1)")
+    print("  分档✓ = 两段方向都单调 且 保留率 ≥ 0.5 —— 只单调而幅度塌掉的不给分档")
+
+    if args.probe_strength:
+        probe_strength(merged, args.probe_split)
 
     if args.out:
         Path(args.out).write_text(
