@@ -9,7 +9,7 @@ import { priceColorClass } from '@/lib/format'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import {
   KLINE_SIGNALS, SIGNAL_GROUPS, DEFAULT_SIGNALS,
-  buildSignalMarkers, type SignalKey,
+  buildSignalMarkers, strengthTiersFromStats, type SignalKey,
 } from '@/lib/klineSignals'
 import { ADJUST_MODES, type AdjustMode } from '@/lib/adjust'
 import { computeChips } from '@/lib/chips'
@@ -214,6 +214,7 @@ function evidenceLine(ev?: {
   best_leg?: 'long' | 'short'
   direction?: string
   legs?: Record<string, { n: number; excess: Record<string, number> } | undefined>
+  strength?: Record<string, { q50?: number; q75?: number; trustworthy?: boolean } | null>
 }): string {
   if (!ev || ev.status === 'untested') {
     return '方向判断：未回测 —— 只作事实标记，暂无统计支撑'
@@ -239,13 +240,28 @@ function evidenceLine(ev?: {
     : '方向判断：不显著'
 
   if (ev.status === 'weak') {
-    return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}）— ${ev.note ?? '与随机买卖无差异'}`
+    return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}）— ${ev.note ?? '与随机买卖无差异'}${sizeLine(ev)}`
   }
   // 双向信号: 把另一侧也报出来
   const other = ev.best_leg === 'long' ? ev.legs?.short : ev.legs?.long
   const otherWord = ev.best_leg === 'long' ? '看跌侧' : '看涨侧'
   const dual = other ? `；另一侧${otherWord} ${fmtExcess(other.excess)}` : ''
-  return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}，超额 ${ex}，${tail}）${dual}`
+  const tier = sizeLine(ev)
+  return `${prefix}：${legWord}${shortNote}（样本 ${leg?.n ?? n}，超额 ${ex}，${tail}）${dual}${tier}`
+}
+
+/**
+ * 箭头大小的依据。只有回测证明"强度越大、后续走势越极端"(训练/测试两段都单调
+ * 且幅度没塌)才按强度放大箭头; 其余信号一律常规大小 —— 否则大箭头就是凭空
+ * 暗示"这条更重要", 而数据并不支持。
+ */
+function sizeLine(ev?: {
+  best_leg?: 'long' | 'short'
+  strength?: Record<string, { q50?: number; q75?: number; trustworthy?: boolean } | null>
+}): string {
+  const st = ev?.strength?.[ev.best_leg ?? 'long']
+  if (!st?.trustworthy || st.q50 == null || st.q75 == null) return ''
+  return `；箭头按强度分档（≥${st.q50}% 较大 / ≥${st.q75}% 最大）`
 }
 
 /** 证据在按钮上的小角标。significant 才给勾, 其余如实标出。 */
@@ -610,10 +626,29 @@ export function StockDetail() {
 
   const dateRange = useMemo(() => rangeFromMonths(months), [months])
 
+  /**
+   * 标注的回测证据 —— 全市场一份、不随标的变, 所以长缓存。
+   * 标注本身是事实描述(永远准); 这里问的是"把它当方向判断用, 有没有统计支撑",
+   * 以及"同一个标注的极端程度能不能画出来"(强度分档阈值也在这里)。
+   */
+  const signalStatsQuery = useQuery({
+    queryKey: QK.klineSignalStats(),
+    queryFn: () => api.klineSignalStats(),
+    staleTime: 30 * 60_000,
+    retry: false,
+  })
+  const signalStats = signalStatsQuery.data
+
+  // 强度分档阈值: 只有训练/测试两段都单调且幅度没塌的信号才给, 见 strengthTiersFromStats
+  const strengthTiers = useMemo(
+    () => strengthTiersFromStats(signalStats?.signals),
+    [signalStats?.signals],
+  )
+
   // 标注基于**当前周期那串 K**算(日K就用日K, 分钟K就用分钟K), 不跨周期混用。
   const signalMarkers = useMemo(
-    () => buildSignalMarkers(kline?.rows ?? [], signals),
-    [kline?.rows, signals],
+    () => buildSignalMarkers(kline?.rows ?? [], signals, strengthTiers),
+    [kline?.rows, signals, strengthTiers],
   )
 
   /**
@@ -673,18 +708,6 @@ export function StockDetail() {
       return next
     })
   }, [])
-
-  /**
-   * 标注的回测证据 —— 全市场一份、不随标的变, 所以长缓存。
-   * 标注本身是事实描述(永远准); 这里问的是"把它当方向判断用, 有没有统计支撑"。
-   */
-  const signalStatsQuery = useQuery({
-    queryKey: QK.klineSignalStats(),
-    queryFn: () => api.klineSignalStats(),
-    staleTime: 30 * 60_000,
-    retry: false,
-  })
-  const signalStats = signalStatsQuery.data
 
   // 实时行情(腾讯) —— 补齐日K里没有的 成交额/换手/PE/PB/市值。10s 短缓存。
   const quoteQuery = useQuery({

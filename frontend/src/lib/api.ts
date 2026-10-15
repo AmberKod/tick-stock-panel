@@ -2704,6 +2704,20 @@ export const api = {
           train_excess?: Record<string, number>
           test_excess?: Record<string, number>
         }>
+        /**
+         * 强度分层: 同一个标注的「极端程度」与后续走势有没有剂量-反应关系。
+         * q25/q50/q75 是全市场分位数, 前端拿它给标注分档渲染。
+         * trustworthy = 训练/测试两段都单调 **且** 幅度保留率 ≥ 0.5。
+         */
+        strength?: Record<'long' | 'short', {
+          q25: number
+          q50: number
+          q75: number
+          monotone: boolean
+          trustworthy: boolean
+          retained: Record<string, number | null>
+          bins?: Record<string, Record<string, number>>
+        } | null>
       }>
     }>('/api/kline/signal-stats'),
 

@@ -135,10 +135,24 @@ function sma(values: number[], n: number, endIdx: number): number | null {
  * @param rows 已按时间升序、且指标已算好的 K 线(日K / 周K / 月K / 分钟K 都行)
  * @param enabled 用户勾选的标注类型
  */
-/** 生成阶段用的内部标记 —— 带 key，合并后 key 收进 detail。 */
-type RawMark = ChartMarker & { key: SignalKey }
+/**
+ * 标注「强度」= 超出基准的相对幅度(%), 与回测脚本 scripts/signal_backtest.py
+ * 同一公式 —— 两边必须逐条对齐, 否则回测出来的强度分层根本画不到对应的标注上。
+ * 分母非法返回 undefined(该标注就没有强度档, 按常规大小画)。
+ */
+function pct(delta: number, base: number | null): number | undefined {
+  if (base == null || !base || !Number.isFinite(base) || !Number.isFinite(delta)) return undefined
+  return (delta / base) * 100
+}
 
-export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): ChartMarker[] {
+/** 生成阶段用的内部标记 —— 带 key，合并后 key 收进 detail。 */
+type RawMark = ChartMarker & { key: SignalKey; strength?: number }
+
+export function buildSignalMarkers(
+  rows: OHLC[],
+  enabled: ReadonlySet<string>,
+  tiers?: ReadonlyMap<SignalKey, { q50: number; q75: number }>,
+): ChartMarker[] {
   if (rows.length === 0 || enabled.size === 0) return []
 
   const marks: RawMark[] = []
@@ -156,7 +170,8 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
     if (enabled.has('volume')) {
       const base = sma(volumes, 20, i)
       if (base && base > 0 && (r.volume ?? 0) >= base * 2) {
-        marks.push({ date, kind: 'neutral', label: '量', color: C_VOL, key: 'volume' })
+        marks.push({ date, kind: 'neutral', label: '量', color: C_VOL, key: 'volume',
+          strength: ((r.volume ?? 0) / base) * 100 })
       }
     }
 
@@ -168,9 +183,11 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
         const hi = Math.max(...win)
         const lo = Math.min(...win)
         if (enabled.has('newHigh') && r.close > hi) {
-          marks.push({ date, kind: 'buy', label: '高', color: C_UP, key: 'newHigh' })
+          marks.push({ date, kind: 'buy', label: '高', color: C_UP, key: 'newHigh',
+            strength: pct(r.close - hi, hi) })
         } else if (enabled.has('newLow') && r.close < lo) {
-          marks.push({ date, kind: 'sell', label: '低', color: C_DOWN, key: 'newLow' })
+          marks.push({ date, kind: 'sell', label: '低', color: C_DOWN, key: 'newLow',
+            strength: pct(lo - r.close, r.close) })
         }
       }
     }
@@ -178,38 +195,42 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
     // ── MACD 交叉 ──
     if (enabled.has('macd')) {
       const d = crossed(num(r.macd_dif), num(r.macd_dea), num(prev?.macd_dif), num(prev?.macd_dea))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '金', color: C_UP, key: 'macd' })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '死', color: C_DOWN, key: 'macd' })
+      const macdStrength = pct(Math.abs((num(r.macd_dif) ?? 0) - (num(r.macd_dea) ?? 0)), r.close)
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '金', color: C_UP, key: 'macd', strength: macdStrength })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '死', color: C_DOWN, key: 'macd', strength: macdStrength })
     }
 
     // ── MA5/MA20 交叉 ──
     if (enabled.has('maCross')) {
       const d = crossed(num(r.ma5), num(r.ma20), num(prev?.ma5), num(prev?.ma20))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: 'M金', color: C_UP, key: 'maCross' })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: 'M死', color: C_DOWN, key: 'maCross' })
+      const maCrossStrength = pct(Math.abs((num(r.ma5) ?? 0) - (num(r.ma20) ?? 0)), num(r.ma20))
+      if (d === 'up') marks.push({ date, kind: 'buy', label: 'M金', color: C_UP, key: 'maCross', strength: maCrossStrength })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: 'M死', color: C_DOWN, key: 'maCross', strength: maCrossStrength })
     }
 
     // ── MA20/MA60 交叉 ──
     if (enabled.has('maGolden60')) {
       const d = crossed(num(r.ma20), num(r.ma60), num(prev?.ma20), num(prev?.ma60))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '季金', color: C_UP, key: 'maGolden60' })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '季死', color: C_DOWN, key: 'maGolden60' })
+      const goldenStrength = pct(Math.abs((num(r.ma20) ?? 0) - (num(r.ma60) ?? 0)), num(r.ma60))
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '季金', color: C_UP, key: 'maGolden60', strength: goldenStrength })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '季死', color: C_DOWN, key: 'maGolden60', strength: goldenStrength })
     }
 
     // ── 收盘价穿越 MA20 ──
     if (enabled.has('ma20Cross')) {
       const d = crossed(num(r.close), num(r.ma20), num(prev?.close), num(prev?.ma20))
-      if (d === 'up') marks.push({ date, kind: 'buy', label: '穿', color: C_UP, key: 'ma20Cross' })
-      else if (d === 'down') marks.push({ date, kind: 'sell', label: '破', color: C_DOWN, key: 'ma20Cross' })
+      const ma20Strength = pct(Math.abs(r.close - (num(r.ma20) ?? 0)), num(r.ma20))
+      if (d === 'up') marks.push({ date, kind: 'buy', label: '穿', color: C_UP, key: 'ma20Cross', strength: ma20Strength })
+      else if (d === 'down') marks.push({ date, kind: 'sell', label: '破', color: C_DOWN, key: 'ma20Cross', strength: ma20Strength })
     }
 
     // ── RSI 超买/超卖 ──
     if (enabled.has('rsi')) {
       const v = num(r.rsi_14)
       if (v != null && v < 30) {
-        marks.push({ date, kind: 'buy', label: '超卖', color: C_UP, key: 'rsi' })
+        marks.push({ date, kind: 'buy', label: '超卖', color: C_UP, key: 'rsi', strength: Math.abs(v - 50) })
       } else if (v != null && v > 70) {
-        marks.push({ date, kind: 'sell', label: '超买', color: C_DOWN, key: 'rsi' })
+        marks.push({ date, kind: 'sell', label: '超买', color: C_DOWN, key: 'rsi', strength: Math.abs(v - 50) })
       }
     }
 
@@ -217,15 +238,58 @@ export function buildSignalMarkers(rows: OHLC[], enabled: ReadonlySet<string>): 
     if (enabled.has('boll')) {
       const hi = num(r.boll_upper)
       const lo = num(r.boll_lower)
+      const bw = hi != null && lo != null ? hi - lo : 0
       if (hi != null && r.close > hi) {
-        marks.push({ date, kind: 'buy', label: '轨↑', color: C_UP, key: 'boll' })
+        marks.push({ date, kind: 'buy', label: '轨↑', color: C_UP, key: 'boll', strength: pct(r.close - hi, bw) })
       } else if (lo != null && r.close < lo) {
-        marks.push({ date, kind: 'sell', label: '轨↓', color: C_DOWN, key: 'boll' })
+        marks.push({ date, kind: 'sell', label: '轨↓', color: C_DOWN, key: 'boll', strength: pct(lo - r.close, bw) })
       }
     }
   }
 
+  // 强度分档必须在合并**之前**逐条打: 合并后一个徽章里可能混着不同 key 的信号,
+  // 各自的阈值不同, 只有先各自归一成档才可比。合并时取最强的那一档。
+  if (tiers && tiers.size > 0) {
+    for (const m of marks) m.tier = tierOf(m.strength, tiers.get(m.key))
+  }
   return mergeByDate(marks)
+}
+
+/** 强度 → 档位。没有强度值或该信号没有可信阈值 → 不分档(按常规大小画)。 */
+function tierOf(
+  strength: number | undefined,
+  th: { q50: number; q75: number } | undefined,
+): 1 | 2 | 3 | undefined {
+  if (strength == null || !th || !Number.isFinite(strength)) return undefined
+  if (strength >= th.q75) return 3
+  if (strength >= th.q50) return 2
+  return 1
+}
+
+/**
+ * 从回测证据表取每个信号的强度分档阈值(全市场分位数)。
+ *
+ * 只有 trustworthy(训练/测试两段都单调 **且** 幅度保留率 ≥ 0.5) 的信号才给阈值。
+ * 光方向单调不够: rsi 做空腿训练段最强档 +1.86%、测试段只剩 +0.21%, 单调是真的,
+ * 但按训练段幅度把箭头画大就是拿过拟合的数字当信息。
+ */
+export function strengthTiersFromStats(
+  stats?: Record<string, {
+    best_leg?: string
+    strength?: Record<string, {
+      q50?: number; q75?: number; monotone?: boolean; trustworthy?: boolean
+    } | null>
+  }>,
+): Map<SignalKey, { q50: number; q75: number }> {
+  const out = new Map<SignalKey, { q50: number; q75: number }>()
+  if (!stats) return out
+  for (const [key, v] of Object.entries(stats)) {
+    const st = v?.strength?.[v.best_leg ?? 'long']
+    if (st?.trustworthy && st.q50 != null && st.q75 != null) {
+      out.set(key as SignalKey, { q50: st.q50, q75: st.q75 })
+    }
+  }
+  return out
 }
 
 /**
@@ -258,10 +322,17 @@ function mergeByDate(marks: RawMark[]): ChartMarker[] {
       label: arr.length === 1 ? head.label : `${head.label ?? ''}+${arr.length - 1}`,
       color: head.color,
       count: arr.length,
+      // 多条合并时画最强的那一档 —— 取 max, 不是取第一条
+      tier: arr.reduce<1 | 2 | 3 | undefined>(
+        (acc, m) => (m.tier != null && (acc == null || m.tier > acc) ? m.tier : acc),
+        undefined,
+      ),
       detail: arr.map(m => ({
         key: m.key,
         label: m.label ?? '',
         desc: KLINE_SIGNALS.find(s => s.key === m.key)?.desc,
+        // 强度值带出来, 供 hover 展示与回测对拍(证明阈值画在了对的标注上)
+        strength: m.strength,
       })),
     })
   }

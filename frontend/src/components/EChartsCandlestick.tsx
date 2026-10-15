@@ -44,7 +44,14 @@ export interface ChartMarker {
   /** 同一根 K 线、同一方向上合并了几条信号（>1 时徽章里显示数字）。 */
   count?: number
   /** 合并进来的每一条信号，hover 时展开。key 用于查回测证据。 */
-  detail?: { key: string; label: string; desc?: string }[]
+  detail?: { key: string; label: string; desc?: string; strength?: number }[]
+  /**
+   * 强度档 1/2/3（常规 / 较强 / 极强），由回测证据表的全市场分位数切出来。
+   *
+   * 只有"训练段与测试段都单调"的信号才会分档 —— 强度跟后续走势没有剂量-反应
+   * 关系时, 把箭头画大一点只是假装更有信息。
+   */
+  tier?: 1 | 2 | 3
 }
 
 export interface ChartRange {
@@ -660,7 +667,11 @@ function buildMarkPoint(m: ChartMarker, d: OHLC, compact: boolean): any | null {
     name: `${m.date}|${m.kind}`,
     coord: [m.date, isBuy ? d.low : d.high],
     symbol: isBuy ? ARROW_UP : isSell ? ARROW_DOWN : 'circle',
-    symbolSize: isNeutral ? 6 : [11, 10],
+    // 强度档把"极端程度"画出来: 1 常规 / 2 较强 / 3 极强。只有回测证明该信号的
+    // 强度与后续走势有剂量-反应关系(且幅度没塌)时才有 tier —— 否则一律常规大小。
+    symbolSize: isNeutral
+      ? [6, 6]
+      : m.tier === 3 ? [15, 14] : m.tier === 2 ? [13, 12] : [11, 10],
     // symbolOffset 是像素、y 向下为正：箭头推离 K 线，别压在影线上
     symbolOffset: [0, isBuy ? 17 : -17],
     itemStyle: {
