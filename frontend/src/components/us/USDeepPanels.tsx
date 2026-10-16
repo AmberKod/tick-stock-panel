@@ -492,8 +492,13 @@ export function USStatementPanel({ symbol, limit = 4 }: {
     queryKey: QK.usDeepStatement(symbol, kind, period, limit),
     queryFn: () => api.usDeepStatement(symbol, { kind, period, limit }),
     staleTime: 600_000,
-    // 切 tab/年度季度时保留上一份, 避免整块闪成"加载中"
-    placeholderData: (prev) => prev,
+    // 切 tab(三表)/年度季度时保留上一份, 避免整块闪成"加载中";
+    // 但**切标的必须清空** —— 否则上一只票的报表会挂在新票的页面上, 而面板
+    // 标题里又不写 ticker, 用户看到的就是一份张冠李戴的"真"报表。
+    placeholderData: (prev) =>
+      prev?.symbol != null && String(prev.symbol).replace(/\.US$/, '') !== symbol
+        ? undefined
+        : prev,
   })
 
   return (
@@ -594,16 +599,17 @@ export function USSummaryPanel({ symbol }: { symbol: string }) {
   })
 
   const resp = query.data
-  const rawText = resp?.available ? (resp.data?.text ?? '').trim() : ''
+  const rawText = (resp?.data?.text ?? '').trim()
   /**
-   * ⚠️ 实测(2026-10-16): 上游 quote 取不到时后端仍返回 ``available:true``,
-   * text 是哨兵串 "OpenBB 无此标的数据"。直接渲染会把它当成摘要正文 ——
-   * 这里归一成 unavailable, 走 body() 的不可用分支。
+   * ⚠️ 后端契约: available=false 时响应体**没有 data 键**, reason 是唯一线索
+   * (provider_error: 上游没起 / no_data: 真空数据)。所以失败时必须**原样透出**
+   * 后端 reason —— 反过来写(失败也走"无数据"分支)会把上游宕机显示成"没有数据",
+   * 运维没法区分。只有 available=true 但 text 是空/哨兵串时才归一成不可用。
    */
-  const usable = !!rawText && rawText !== US_DEEP_NO_DATA_TEXT
-  const view: Resp<unknown> | undefined = usable
-    ? (resp as Resp<unknown> | undefined)
-    : { available: false, source: resp?.source, reason: 'no_data: 上游未给出盘口摘要' }
+  const sentinel = !!resp?.available && (!rawText || rawText === US_DEEP_NO_DATA_TEXT)
+  const view: Resp<unknown> | undefined = sentinel
+    ? { available: false, source: resp?.source, reason: 'no_data: 上游未给出盘口摘要' }
+    : (resp as Resp<unknown> | undefined)
 
   return (
     <PanelShell
