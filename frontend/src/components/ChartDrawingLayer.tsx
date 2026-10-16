@@ -704,13 +704,13 @@ export function ChartDrawingLayer({
             if (e.key === 'Enter' || e.key === 'Escape') finishText()
           }}
           onBlur={finishText}
-          className="absolute z-10 w-40 rounded border border-amber-400/70 bg-bg px-1.5 py-0.5 text-[11px] text-fg shadow outline-none"
+          className="absolute z-10 w-40 rounded border border-amber-400/70 bg-bg px-1.5 py-0.5 text-[11px] text-foreground shadow outline-none"
           style={{ left: Math.max(0, editingPx[0]), top: Math.max(0, editingPx[1] - 10) }}
         />
       )}
 
       {tool && tool !== 'cursor' && (
-        <div className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded bg-fg/85 px-2 py-0.5 text-[10px] text-bg">
+        <div className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded bg-foreground/85 px-2 py-0.5 text-[10px] text-bg">
           {draft?.stage === 'width'
             ? '再点一下定通道宽度（Esc 取消）'
             : DRAW_TOOLS.find(t => t.value === tool)?.hint}

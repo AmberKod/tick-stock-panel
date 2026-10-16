@@ -54,9 +54,9 @@ export function MarketWatchlist({ market }: MarketWatchlistProps) {
       {/* 标题区 */}
       <div className="flex items-center gap-2 border-b border-border/50 px-4 py-3">
         <Star className="h-4 w-4 shrink-0 text-accent" aria-hidden="true" />
-        <h3 className="text-sm font-medium text-fg">
+        <h3 className="text-sm font-medium text-foreground">
           我的{meta.label}自选
-          <span className="ml-2 text-xs font-normal text-fg-muted">
+          <span className="ml-2 text-xs font-normal text-muted">
             {rows.length} 只 · {meta.hint}
           </span>
         </h3>
@@ -79,9 +79,9 @@ export function MarketWatchlist({ market }: MarketWatchlistProps) {
         )}
 
         {!watchlist.isLoading && rows.length === 0 && (
-          <div className="px-2 py-4 text-xs text-fg-muted">
+          <div className="px-2 py-4 text-xs text-muted">
             还没有{meta.label}自选。
-            <span className="text-fg-muted/80">{' '}可在看板榜单点击星标，或进入个股详情页添加。</span>
+            <span className="text-muted/80">{' '}可在看板榜单点击星标，或进入个股详情页添加。</span>
           </div>
         )}
 
@@ -97,8 +97,8 @@ export function MarketWatchlist({ market }: MarketWatchlistProps) {
                   className="flex min-w-0 flex-1 items-center gap-2 py-2"
                   title={`查看 ${r.symbol} 详情`}
                 >
-                  <span className="shrink-0 font-mono text-sm text-fg">{r.symbol}</span>
-                  <span className="truncate text-xs text-fg-muted">
+                  <span className="shrink-0 font-mono text-sm text-foreground">{r.symbol}</span>
+                  <span className="truncate text-xs text-muted">
                     {r.name || '—'}
                   </span>
                 </Link>

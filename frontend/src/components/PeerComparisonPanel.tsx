@@ -127,9 +127,9 @@ export function PeerComparisonPanel({
     <div className={cn('rounded-md border border-border bg-surface', className)}>
       {/* ── 标题 + 口径 ───────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
-        <span className="text-[12px] font-medium text-fg">同行业对比</span>
+        <span className="text-[12px] font-medium text-foreground">同行业对比</span>
         {industryLabel && (
-          <span className="text-[11px] text-fg-secondary">{industryLabel}</span>
+          <span className="text-[11px] text-secondary">{industryLabel}</span>
         )}
         <span className="rounded bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-500">
           东财 F10 真源
@@ -137,14 +137,14 @@ export function PeerComparisonPanel({
         <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-500">
           非全部成分股
         </span>
-        <span className="text-[10px] text-fg-muted">
+        <span className="text-[10px] text-muted">
           {peerCount} 家同行
           {peers.length < peerCount && `（显示前 ${peers.length} 家）`}
         </span>
         <button
           type="button"
           onClick={() => setShowCaveats(v => !v)}
-          className="ml-auto inline-flex items-center gap-0.5 text-[10px] text-fg-muted hover:text-fg-secondary"
+          className="ml-auto inline-flex items-center gap-0.5 text-[10px] text-muted hover:text-secondary"
         >
           口径说明
           <ChevronDown className={cn('h-3 w-3 transition-transform', showCaveats && 'rotate-180')} />
@@ -153,7 +153,7 @@ export function PeerComparisonPanel({
 
       {showCaveats && (
         <div className="border-b border-border bg-elevated/40 px-3 py-1.5">
-          <ul className="list-disc space-y-0.5 pl-4 text-[10px] leading-relaxed text-fg-muted">
+          <ul className="list-disc space-y-0.5 pl-4 text-[10px] leading-relaxed text-muted">
             {(caveats ?? [
               '同行名单来自东财 F10「行业对比」: 成长性/估值/杜邦三块各给出该指标行业前列的几家公司, 再加本公司。不是行业全部成分股。',
               '三块的入选标准不同, 因此不是每家公司每个指标都有数: 缺的显示 —。',
@@ -170,7 +170,7 @@ export function PeerComparisonPanel({
 
       {/* ── 本公司规模与行业名次 ──────────────────────────────── */}
       {selfSize && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3 py-1.5 text-[10px] text-fg-muted">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3 py-1.5 text-[10px] text-muted">
           <span>
             {name ?? code} 行业名次
             {selfSize.report_type && `（${selfSize.report_type}）`}：
@@ -182,7 +182,7 @@ export function PeerComparisonPanel({
       )}
 
       {/* ── 报告期 + 过滤 ─────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1.5 text-[10px] text-fg-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1.5 text-[10px] text-muted">
         {reportDates?.valuation && <span>估值 {reportDates.valuation}</span>}
         {reportDates?.growth && <span>· 成长 {reportDates.growth}</span>}
         {reportDates?.dupont && <span>· 杜邦 {reportDates.dupont}</span>}
@@ -204,7 +204,7 @@ export function PeerComparisonPanel({
       <div className="overflow-x-auto">
         <table className="w-full min-w-[880px] text-[11px]">
           <thead>
-            <tr className="text-fg-muted">
+            <tr className="text-muted">
               <th className="px-3 py-1.5 text-left font-normal">公司</th>
               <th className="px-2 py-1.5 text-right font-normal">总市值(亿)</th>
               {COLS.map(c => (
@@ -212,7 +212,7 @@ export function PeerComparisonPanel({
                   key={c.key}
                   title={c.hint}
                   onClick={() => clickSort(c.key)}
-                  className="cursor-pointer px-2 py-1.5 text-right font-normal hover:text-fg-secondary"
+                  className="cursor-pointer px-2 py-1.5 text-right font-normal hover:text-secondary"
                 >
                   <span className="inline-flex items-center gap-0.5">
                     {c.label}
@@ -237,14 +237,14 @@ export function PeerComparisonPanel({
               >
                 <td className="px-3 py-1.5">
                   <span className="inline-flex items-center gap-1">
-                    <span className="font-mono text-[10px] text-fg-muted">{p.code}</span>
-                    <span className={cn(p.is_self ? 'text-fg' : 'text-fg-secondary')}>{p.name}</span>
+                    <span className="font-mono text-[10px] text-muted">{p.code}</span>
+                    <span className={cn(p.is_self ? 'text-foreground' : 'text-secondary')}>{p.name}</span>
                     {p.is_self && (
                       <span className="rounded bg-amber-400/15 px-1 text-[9px] text-amber-500">本公司</span>
                     )}
                     {p.same_industry === false && (
                       <span
-                        className="inline-flex items-center gap-0.5 rounded bg-border px-1 text-[9px] text-fg-muted"
+                        className="inline-flex items-center gap-0.5 rounded bg-border px-1 text-[9px] text-muted"
                         title={`东财把它算作同行, 但它的 EM2016 三级行业是「${p.industry ?? '未知'}」, 与本公司不同`}
                       >
                         <AlertTriangle className="h-2.5 w-2.5" />
@@ -253,10 +253,10 @@ export function PeerComparisonPanel({
                     )}
                   </span>
                 </td>
-                <td className="px-2 py-1.5 text-right font-mono text-fg-secondary">
+                <td className="px-2 py-1.5 text-right font-mono text-secondary">
                   {fmtYi(num(p.total_cap))}
                   {p.cap_rank != null && p.cap_rank > 0 && (
-                    <span className="ml-1 text-[9px] text-fg-muted">#{Math.round(p.cap_rank)}</span>
+                    <span className="ml-1 text-[9px] text-muted">#{Math.round(p.cap_rank)}</span>
                   )}
                 </td>
                 {COLS.map(c => {
@@ -267,10 +267,10 @@ export function PeerComparisonPanel({
                       className={cn(
                         'px-2 py-1.5 text-right font-mono',
                         v == null
-                          ? 'text-fg-muted'
+                          ? 'text-muted'
                           : c.pct
                             ? (v >= 0 ? 'text-bull' : 'text-bear')
-                            : 'text-fg-secondary',
+                            : 'text-secondary',
                       )}
                     >
                       {fmtCell(v, c.digits, c.pct)}
@@ -279,7 +279,7 @@ export function PeerComparisonPanel({
                 })}
               </tr>
             ))}
-            <tr className="border-t border-border bg-elevated/40 text-fg-muted">
+            <tr className="border-t border-border bg-elevated/40 text-muted">
               <td className="px-3 py-1.5">行业中值</td>
               <td className="px-2 py-1.5" />
               {COLS.map(c => (
@@ -288,7 +288,7 @@ export function PeerComparisonPanel({
                 </td>
               ))}
             </tr>
-            <tr className="border-t border-border bg-elevated/40 text-fg-muted">
+            <tr className="border-t border-border bg-elevated/40 text-muted">
               <td className="px-3 py-1.5">行业平均</td>
               <td className="px-2 py-1.5" />
               {COLS.map(c => (
@@ -301,7 +301,7 @@ export function PeerComparisonPanel({
         </table>
       </div>
 
-      <div className="px-3 py-1.5 text-[10px] text-fg-muted">
+      <div className="px-3 py-1.5 text-[10px] text-muted">
         点表头按该列排序（缺值的行永远沉底，不按 0 算）。本公司那行高亮，行业中值/平均由东财给出。
       </div>
     </div>
@@ -312,8 +312,8 @@ function Stat({ label, value, rank }: { label: string; value: string; rank: numb
   return (
     <span className="inline-flex items-center gap-1">
       {label}
-      <span className="font-mono text-fg-secondary">{value}</span>
-      {rank != null && rank > 0 && <span className="text-fg-muted">行业第 {Math.round(rank)}</span>}
+      <span className="font-mono text-secondary">{value}</span>
+      {rank != null && rank > 0 && <span className="text-muted">行业第 {Math.round(rank)}</span>}
     </span>
   )
 }

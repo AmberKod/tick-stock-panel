@@ -88,7 +88,7 @@ function signedPct(v: number | null | undefined): string {
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-start gap-2 py-2 text-[11px] leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-start gap-2 py-2 text-[11px] leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading
         ? <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin" />
         : warn
@@ -106,8 +106,8 @@ function Cell({ label, value, valueClass }: {
 }) {
   return (
     <div className="min-w-0">
-      <div className="truncate text-[10px] text-fg-muted">{label}</div>
-      <div className={`truncate text-xs font-medium tabular-nums ${valueClass ?? 'text-fg'}`}>
+      <div className="truncate text-[10px] text-muted">{label}</div>
+      <div className={`truncate text-xs font-medium tabular-nums ${valueClass ?? 'text-foreground'}`}>
         {value}
       </div>
     </div>
@@ -147,9 +147,9 @@ export function HKUSQuoteBox({ symbol, className = '' }: {
   return (
     <div className={`rounded-lg border border-border bg-surface/60 px-3 py-2 ${className}`}>
       <div className="mb-1.5 flex items-center gap-1.5">
-        <Gauge className="h-3.5 w-3.5 text-fg-muted" />
-        <h3 className="text-xs font-semibold text-fg">实时行情 / 五档</h3>
-        <span className="ml-auto text-[10px] text-fg-muted">MAC-EX · 通达信</span>
+        <Gauge className="h-3.5 w-3.5 text-muted" />
+        <h3 className="text-xs font-semibold text-foreground">实时行情 / 五档</h3>
+        <span className="ml-auto text-[10px] text-muted">MAC-EX · 通达信</span>
       </div>
 
       {snap.isLoading && <StateLine loading text="加载实时快照…" />}
@@ -178,7 +178,7 @@ export function HKUSQuoteBox({ symbol, className = '' }: {
             <Cell label="内盘" value={big(s.inside_volume)} />
             <Cell label="外盘" value={big(s.outside_volume)} />
           </div>
-          <p className="mt-1.5 text-[10px] leading-relaxed text-fg-muted">
+          <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
             快照时间 {s.server_time ?? '—'}（北京时间）
             {s.derived?.includes('turnover_pct') && ' · 换手率由上游千分比换算'}
             {s.name ? ` · ${s.name}` : ''}
@@ -196,7 +196,7 @@ export function HKUSQuoteBox({ symbol, className = '' }: {
         )}
         {b && b.depth_available && <DepthRows bids={b.bids ?? []} asks={b.asks ?? []} />}
         {b && (
-          <p className="mt-1 text-[10px] text-fg-muted">
+          <p className="mt-1 text-[10px] text-muted">
             总量 {big(b.total_volume)} 股 · 内盘 {big(b.inside_volume)} / 外盘 {big(b.outside_volume)}
           </p>
         )}
@@ -230,9 +230,9 @@ function DepthRows({ bids, asks }: { bids: Level[]; asks: Level[] }) {
 function DepthRow({ label, lv, cls }: { label: string; lv: Level; cls: string }) {
   return (
     <div className="grid grid-cols-[2.2rem_1fr_1fr] items-baseline gap-2">
-      <span className="text-fg-muted">{label}</span>
+      <span className="text-muted">{label}</span>
       <span className={`text-right font-mono tabular-nums ${cls}`}>{num(lv.price)}</span>
-      <span className="text-right font-mono tabular-nums text-fg-secondary">{big(lv.volume)}</span>
+      <span className="text-right font-mono tabular-nums text-secondary">{big(lv.volume)}</span>
     </div>
   )
 }

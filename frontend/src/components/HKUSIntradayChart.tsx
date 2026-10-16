@@ -298,7 +298,7 @@ export function HKUSIntradayChart({ symbol, height = 430, className }: Props) {
 
   if (!market) {
     return (
-      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-fg-muted', className)}
+      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted', className)}
            style={{ height }}>
         <span>分时只覆盖带市场后缀的代码</span>
         <span className="text-[11px] opacity-70">
@@ -310,7 +310,7 @@ export function HKUSIntradayChart({ symbol, height = 430, className }: Props) {
 
   if (query.isLoading) {
     return (
-      <div className={cn('flex items-center justify-center gap-2 text-xs text-fg-muted', className)}
+      <div className={cn('flex items-center justify-center gap-2 text-xs text-muted', className)}
            style={{ height }}>
         <Loader2 className="h-3.5 w-3.5 animate-spin" /> 分时数据加载中…
       </div>
@@ -319,7 +319,7 @@ export function HKUSIntradayChart({ symbol, height = 430, className }: Props) {
 
   if (!data || points.length === 0 || data.prev_close == null) {
     return (
-      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-fg-muted', className)}
+      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted', className)}
            style={{ height }}>
         <span>当日分时不可用</span>
         <span className="text-[11px] opacity-70">
@@ -342,35 +342,35 @@ export function HKUSIntradayChart({ symbol, height = 430, className }: Props) {
         <span className={cn('font-mono', up ? 'text-bull' : 'text-bear')}>
           {up ? '+' : ''}{last.pct.toFixed(2)}%
         </span>
-        <span className="text-fg-muted">
-          均价 <span className="font-mono text-fg-secondary">{last.avg.toFixed(3)}</span>
+        <span className="text-muted">
+          均价 <span className="font-mono text-secondary">{last.avg.toFixed(3)}</span>
         </span>
-        <span className="text-fg-muted">
+        <span className="text-muted">
           最高 <span className="font-mono text-bull">{(data.high ?? last.price).toFixed(3)}</span>
         </span>
-        <span className="text-fg-muted">
+        <span className="text-muted">
           最低 <span className="font-mono text-bear">{(data.low ?? last.price).toFixed(3)}</span>
         </span>
-        <span className="text-fg-muted">
-          昨收 <span className="font-mono text-fg-secondary">{data.prev_close.toFixed(3)}</span>
+        <span className="text-muted">
+          昨收 <span className="font-mono text-secondary">{data.prev_close.toFixed(3)}</span>
         </span>
-        <span className="text-fg-muted">
-          量 <span className="font-mono text-fg-secondary">{fmtBigNum(data.volume ?? 0)}股</span>
+        <span className="text-muted">
+          量 <span className="font-mono text-secondary">{fmtBigNum(data.volume ?? 0)}股</span>
         </span>
-        <span className="text-fg-muted">
-          额 <span className="font-mono text-fg-secondary">{fmtBigNum(data.amount ?? 0)}</span>
+        <span className="text-muted">
+          额 <span className="font-mono text-secondary">{fmtBigNum(data.amount ?? 0)}</span>
         </span>
-        <span className="ml-auto text-[11px] text-fg-muted">
+        <span className="ml-auto text-[11px] text-muted">
           {data.session_date} · {points.length} 个分钟点
           {data.session_complete === false && <span className="text-[#F59E0B]"> · 未收盘</span>}
         </span>
       </div>
 
       {/* 口径说明: 这条曲线是怎么来的、截至什么时候、昨收取自哪里 —— 不写就是让人默认"今天" */}
-      <div className="mb-1 px-1 text-[10.5px] leading-relaxed text-fg-muted">
+      <div className="mb-1 px-1 text-[10.5px] leading-relaxed text-muted">
         分时由 1 分钟K 合成（通达信扩展市场 MAC-EX，横轴钟点为北京时间
         {market === 'us' ? '；美股会话跨零点，凌晨那段沿用同一个交易日标签' : ''}），
-        昨收取自<span className="text-fg-secondary">{prevCloseLabel(data.prev_close_from)}</span>
+        昨收取自<span className="text-secondary">{prevCloseLabel(data.prev_close_from)}</span>
         ，成交量已换算成股数。
         {data.session_complete === false && data.note
           ? <span className="text-[#F59E0B]"> {data.note}</span>

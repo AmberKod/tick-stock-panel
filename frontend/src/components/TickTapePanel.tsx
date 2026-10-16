@@ -51,7 +51,7 @@ const SIDES: Record<AstockTickTrade['side'], { label: string; cls: string }> = {
   buy: { label: '买', cls: 'text-bull' },
   sell: { label: '卖', cls: 'text-bear' },
   auction: { label: '竞价', cls: 'text-amber-600 dark:text-amber-400' },
-  unknown: { label: '—', cls: 'text-fg-muted' },
+  unknown: { label: '—', cls: 'text-muted' },
 }
 
 const SESSION_MARKS: Record<string, { label: string; cls: string; hint: string }> = {
@@ -64,7 +64,7 @@ const SESSION_MARKS: Record<string, { label: string; cls: string; hint: string }
     hint: '15:00 收盘集合竞价撮合',
   },
   after_hours: {
-    label: '盘后', cls: 'bg-fg/10 text-fg-muted',
+    label: '盘后', cls: 'bg-foreground/10 text-muted',
     hint: '15:00 之后的成交, 恒等于收盘价(盘后固定价格/大宗), 不计入当日成交量',
   },
 }
@@ -72,8 +72,8 @@ const SESSION_MARKS: Record<string, { label: string; cls: string; hint: string }
 function Stat({ label, value, hint, cls }: { label: string; value: string; hint?: string; cls?: string }) {
   return (
     <div className="rounded border border-border bg-elevated px-2 py-1" title={hint}>
-      <div className="text-[10px] leading-tight text-fg-muted">{label}</div>
-      <div className={cn('font-mono text-[12px] leading-tight', cls ?? 'text-fg')}>{value}</div>
+      <div className="text-[10px] leading-tight text-muted">{label}</div>
+      <div className={cn('font-mono text-[12px] leading-tight', cls ?? 'text-foreground')}>{value}</div>
     </div>
   )
 }
@@ -113,15 +113,15 @@ export function TickTapePanel({
   }, [trades])
 
   const netCls = (stats.buyVol - stats.sellVol) > 0 ? 'text-bull'
-    : (stats.buyVol - stats.sellVol) < 0 ? 'text-bear' : 'text-fg-secondary'
+    : (stats.buyVol - stats.sellVol) < 0 ? 'text-bear' : 'text-secondary'
 
   const checkVerified = crossCheck.available && crossCheck.verified
 
   return (
     <div className={cn('rounded-md border border-border bg-surface p-2', className)}>
       <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[12px] font-medium text-fg">成交明细</span>
-        {name && <span className="text-[11px] text-fg-muted">{name}</span>}
+        <span className="text-[12px] font-medium text-foreground">成交明细</span>
+        {name && <span className="text-[11px] text-muted">{name}</span>}
         {/* 粒度徽章: 绿 —— 真逐笔, 一行一笔 */}
         <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400"
               title="通达信标准市 GetHistoryTransactionDataCmd(0x0fb5) —— 一行就是一笔成交, 不是时间窗合计">
@@ -129,7 +129,7 @@ export function TickTapePanel({
         </span>
         {/* 交叉校验徽章 —— 校验不过就红字, 不假装正常 */}
         {!crossCheck.available ? (
-          <span className="rounded bg-fg/10 px-1.5 py-0.5 text-[10px] text-fg-muted"
+          <span className="rounded bg-foreground/10 px-1.5 py-0.5 text-[10px] text-muted"
                 title={crossCheck.reason ?? ''}>
             未交叉校验
           </span>
@@ -144,8 +144,8 @@ export function TickTapePanel({
             校验未通过 {(crossCheck.close_diff_pct ?? 0).toFixed(4)}%
           </span>
         )}
-        <span className="text-[10px] text-fg-muted">{date}</span>
-        <span className="text-[10px] text-fg-muted">
+        <span className="text-[10px] text-muted">{date}</span>
+        <span className="text-[10px] text-muted">
           {trades[0]?.time} ~ {trades[trades.length - 1]?.time}
         </span>
 
@@ -154,7 +154,7 @@ export function TickTapePanel({
             <select
               value={date}
               onChange={e => onDateChange(e.target.value)}
-              className="rounded border border-border bg-elevated px-1 py-0.5 text-[10px] text-fg-secondary"
+              className="rounded border border-border bg-elevated px-1 py-0.5 text-[10px] text-secondary"
               title="交易日。列表来自腾讯日K日历 —— 非交易日不在里面, 选了也拿不到数据"
             >
               {dates.map(d => <option key={d} value={d}>{d}</option>)}
@@ -164,7 +164,7 @@ export function TickTapePanel({
             <select
               value={tail}
               onChange={e => onTailChange(Number(e.target.value))}
-              className="rounded border border-border bg-elevated px-1 py-0.5 text-[10px] text-fg-secondary"
+              className="rounded border border-border bg-elevated px-1 py-0.5 text-[10px] text-secondary"
               title="取最近多少**笔**成交。已剔除上游的 vol=0 标记行, 所以笔数是真实成交数"
             >
               {[50, 100, 200, 400, 800].map(n => (
@@ -177,7 +177,7 @@ export function TickTapePanel({
               type="button"
               onClick={onRefresh}
               title="重新拉取(后端有 60 秒缓存)"
-              className="rounded border border-border p-0.5 text-fg-muted transition-colors hover:text-fg"
+              className="rounded border border-border p-0.5 text-muted transition-colors hover:text-foreground"
             >
               <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
             </button>
@@ -201,12 +201,12 @@ export function TickTapePanel({
             className={cn('rounded border px-1.5 py-0.5 text-[10.5px] transition-colors',
               side === v
                 ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                : 'border-border text-fg-muted hover:text-fg-secondary')}
+                : 'border-border text-muted hover:text-secondary')}
           >
             {label}
           </button>
         ))}
-        <span className="text-[10px] text-fg-muted">
+        <span className="text-[10px] text-muted">
           {side === 'all' ? `共 ${trades.length} 笔` : `筛出 ${filtered.length} 笔`}
           {shown.length < filtered.length && ` · 只渲染前 ${shown.length} 笔`}
         </span>
@@ -229,7 +229,7 @@ export function TickTapePanel({
 
       <div className="max-h-[320px] overflow-auto rounded border border-border">
         <table className="w-full text-[11px]">
-          <thead className="sticky top-0 bg-elevated text-fg-muted">
+          <thead className="sticky top-0 bg-elevated text-muted">
             <tr className="text-left">
               <th className="px-2 py-1 font-normal">时间</th>
               <th className="px-2 py-1 text-right font-normal">成交价</th>
@@ -243,7 +243,7 @@ export function TickTapePanel({
               const mark = SESSION_MARKS[t.session]
               return (
                 <tr key={t.seq} className="border-t border-border/50">
-                  <td className="px-2 py-0.5 font-mono text-fg-secondary">
+                  <td className="px-2 py-0.5 font-mono text-secondary">
                     {t.time}
                     {mark && (
                       <span className={cn('ml-1 rounded px-1 text-[9.5px]', mark.cls)} title={mark.hint}>
@@ -251,9 +251,9 @@ export function TickTapePanel({
                       </span>
                     )}
                   </td>
-                  <td className="px-2 py-0.5 text-right font-mono text-fg">{t.price.toFixed(2)}</td>
-                  <td className="px-2 py-0.5 text-right font-mono text-fg-secondary">{t.vol}</td>
-                  <td className="px-2 py-0.5 text-right font-mono text-fg-secondary">
+                  <td className="px-2 py-0.5 text-right font-mono text-foreground">{t.price.toFixed(2)}</td>
+                  <td className="px-2 py-0.5 text-right font-mono text-secondary">{t.vol}</td>
+                  <td className="px-2 py-0.5 text-right font-mono text-secondary">
                     {fmtBigNum(amountOf(t))}
                   </td>
                   <td className={cn('px-2 py-0.5 text-center font-mono', SIDES[t.side].cls)}>
@@ -264,7 +264,7 @@ export function TickTapePanel({
             })}
             {shown.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-2 py-3 text-center text-fg-muted">
+                <td colSpan={5} className="px-2 py-3 text-center text-muted">
                   当前筛选下没有成交
                 </td>
               </tr>
@@ -274,27 +274,27 @@ export function TickTapePanel({
       </div>
 
       {/* 口径说明 —— 这是**真数据**但有判定边界, 与筹码那种"估算"警示是两种性质 */}
-      <div className="mt-1.5 rounded border border-border bg-elevated/50 px-2 py-1.5 text-[10.5px] leading-relaxed text-fg-muted">
+      <div className="mt-1.5 rounded border border-border bg-elevated/50 px-2 py-1.5 text-[10.5px] leading-relaxed text-muted">
         <div>
-          <span className="text-fg-secondary">来源</span>：通达信标准市 TCP 7709（source: tdx-tick），
-          一行 = <strong className="text-fg-secondary">一笔成交</strong>；时间精度只到分钟，同一分钟内沿用上游顺序。
+          <span className="text-secondary">来源</span>：通达信标准市 TCP 7709（source: tdx-tick），
+          一行 = <strong className="text-secondary">一笔成交</strong>；时间精度只到分钟，同一分钟内沿用上游顺序。
           {unitNote && <span className="ml-0.5">{unitNote}</span>}
         </div>
         <div className="mt-0.5">
-          <span className="text-fg-secondary">方向</span>：{directionNote ?? '买卖方向由行情商判定, 不是交易所披露字段。'}
+          <span className="text-secondary">方向</span>：{directionNote ?? '买卖方向由行情商判定, 不是交易所披露字段。'}
         </div>
         <div className="mt-0.5">
-          <span className="text-fg-secondary">盘后</span>：{afterHoursNote ?? '15:00 之后的成交不计入当日成交量。'}
+          <span className="text-secondary">盘后</span>：{afterHoursNote ?? '15:00 之后的成交不计入当日成交量。'}
         </div>
         <div className="mt-0.5">
-          <span className="text-fg-secondary">清洗</span>：上游夹了 {summary.marker_rows_dropped} 行
+          <span className="text-secondary">清洗</span>：上游夹了 {summary.marker_rows_dropped} 行
           vol=0 的行情标记行（非成交），已剔除；本次取回的 {summary.upstream_rows} 行里有
           {' '}{trades.length} 笔真实成交
           {summary.after_hours_count > 0 && `（含盘后 ${summary.after_hours_count} 笔）`}。
         </div>
         <div className="mt-0.5">
-          <span className="text-fg-secondary">口径</span>：上方汇总只对
-          <strong className="text-fg-secondary">最近 {tail} 笔这一窗口</strong>负责，不是全日数据；
+          <span className="text-secondary">口径</span>：上方汇总只对
+          <strong className="text-secondary">最近 {tail} 笔这一窗口</strong>负责，不是全日数据；
           {checkVerified && ` 每天全量逐笔的量会与日K成交量对账（两样本 0.000000%）。`}
         </div>
       </div>

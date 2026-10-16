@@ -79,7 +79,7 @@ function big(v: number | null | undefined): string {
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-start gap-2 py-4 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-start gap-2 py-4 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
         : warn ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}
       <span className="min-w-0 break-words">{text}</span>
@@ -106,9 +106,9 @@ export function HKUSBoardsPage() {
   return (
     <div className="mx-auto max-w-[1400px] space-y-3 px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Layers3 className="h-4 w-4 text-fg-muted" />
-        <h1 className="text-lg font-semibold text-fg">港美股板块 / 概念榜</h1>
-        <span className="text-xs text-fg-muted">MAC-EX · 通达信扩展市场</span>
+        <Layers3 className="h-4 w-4 text-muted" />
+        <h1 className="text-lg font-semibold text-foreground">港美股板块 / 概念榜</h1>
+        <span className="text-xs text-muted">MAC-EX · 通达信扩展市场</span>
         <div className="ml-auto inline-flex flex-wrap gap-1">
           {KINDS.map(k => (
             <button
@@ -116,7 +116,7 @@ export function HKUSBoardsPage() {
               type="button"
               onClick={() => { setKind(k.key); setOpen(null) }}
               className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                kind === k.key ? 'bg-elevated text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary'
+                kind === k.key ? 'bg-elevated text-foreground shadow-sm' : 'text-muted hover:text-secondary'
               }`}
             >
               {k.label}
@@ -126,7 +126,7 @@ export function HKUSBoardsPage() {
       </div>
 
       <div className="rounded-lg border border-border bg-surface p-3">
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-muted">
           <span>按板块涨跌降序 · 前 {limit} 个板块</span>
           <div className="ml-auto inline-flex items-center gap-1">
             {[30, 50, 100].map(n => (
@@ -135,7 +135,7 @@ export function HKUSBoardsPage() {
                 type="button"
                 onClick={() => setLimit(n)}
                 className={`rounded px-1.5 py-0.5 text-[11px] ${
-                  limit === n ? 'bg-elevated text-fg' : 'text-fg-muted hover:text-fg-secondary'
+                  limit === n ? 'bg-elevated text-foreground' : 'text-muted hover:text-secondary'
                 }`}
               >{n}</button>
             ))}
@@ -151,7 +151,7 @@ export function HKUSBoardsPage() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-xs text-fg-muted">
+                <tr className="text-xs text-muted">
                   <th className="py-1 pr-2 text-left font-normal">板块</th>
                   <th className="py-1 pr-2 text-right font-normal">指数</th>
                   <th className="py-1 pr-2 text-right font-normal">涨跌%</th>
@@ -170,8 +170,8 @@ export function HKUSBoardsPage() {
                         onClick={() => setOpen(active ? null : key)}
                       >
                         <td className="py-1 pr-2">
-                          <span className="text-fg">{b.board_name ?? key}</span>
-                          <span className="ml-1 font-mono text-[10px] text-fg-muted">{key}</span>
+                          <span className="text-foreground">{b.board_name ?? key}</span>
+                          <span className="ml-1 font-mono text-[10px] text-muted">{key}</span>
                         </td>
                         <td className="py-1 pr-2 text-right font-mono text-xs">{num(b.close)}</td>
                         <td className={`py-1 pr-2 text-right font-mono text-xs ${priceColorClass(b.pct)}`}>
@@ -181,10 +181,10 @@ export function HKUSBoardsPage() {
                           {b.leader_code
                             ? <Link
                                 to={`/stock/${encodeURIComponent(`${b.leader_code}${suffix}`)}`}
-                                className="text-fg hover:underline"
+                                className="text-foreground hover:underline"
                                 onClick={e => e.stopPropagation()}
                               >{b.leader_name ?? b.leader_code}</Link>
-                            : <span className="text-fg-muted">—</span>}
+                            : <span className="text-muted">—</span>}
                         </td>
                         <td className={`py-1 text-right font-mono text-xs ${priceColorClass(b.leader_pct)}`}>
                           {pctText(b.leader_pct)}
@@ -202,7 +202,7 @@ export function HKUSBoardsPage() {
                 })}
               </tbody>
             </table>
-            <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">
+            <p className="mt-2 text-[11px] leading-relaxed text-muted">
               板块指数是通达信自己编的扩展板块指数（非官方指数），涨跌为该指数当日值换算；
               领涨股取板块内当日涨幅最高者。点行展开看成分股。
             </p>
@@ -237,7 +237,7 @@ function BoardMembers({ boardCode, mkt, suffix }: {
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
-          <tr className="text-fg-muted">
+          <tr className="text-muted">
             <th className="py-1 pr-2 text-left font-normal">名称</th>
             <th className="py-1 pr-2 text-right font-normal">最新</th>
             <th className="py-1 pr-2 text-right font-normal">涨跌%</th>
@@ -252,10 +252,10 @@ function BoardMembers({ boardCode, mkt, suffix }: {
                 {r.code
                   ? <Link
                       to={`/stock/${encodeURIComponent(`${r.code}${suffix}`)}`}
-                      className="text-fg hover:underline"
+                      className="text-foreground hover:underline"
                     >{r.name ?? r.code}</Link>
                   : <span>{r.name ?? '—'}</span>}
-                <span className="ml-1 font-mono text-[10px] text-fg-muted">{r.code}</span>
+                <span className="ml-1 font-mono text-[10px] text-muted">{r.code}</span>
               </td>
               <td className="py-1 pr-2 text-right font-mono">{num(r.close)}</td>
               <td className={`py-1 pr-2 text-right font-mono ${priceColorClass(r.pct)}`}>

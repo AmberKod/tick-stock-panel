@@ -98,7 +98,7 @@ export function USStockAnalysisPage() {
   const r = realtime.data
   const changeColor =
     r?.change_pct == null
-      ? 'text-fg-muted'
+      ? 'text-muted'
       : r.change_pct >= 0
         ? 'text-emerald-500'
         : 'text-rose-500'
@@ -127,10 +127,10 @@ export function USStockAnalysisPage() {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-baseline gap-3">
-        <Link to="/us" className="text-sm text-fg-muted hover:text-fg">← 美股热门池</Link>
-        <span className="text-fg-muted">/</span>
-        <h1 className="text-2xl font-semibold text-fg">
-          {r?.name || symbol} <span className="text-sm text-fg-muted font-mono">{symbol}</span>
+        <Link to="/us" className="text-sm text-muted hover:text-foreground">← 美股热门池</Link>
+        <span className="text-muted">/</span>
+        <h1 className="text-2xl font-semibold text-foreground">
+          {r?.name || symbol} <span className="text-sm text-muted font-mono">{symbol}</span>
         </h1>
         <span className="inline-block px-1.5 py-0.5 text-xs rounded bg-blue-500/10 text-blue-500">
           US · USD
@@ -139,7 +139,7 @@ export function USStockAnalysisPage() {
           <MarketWatchlistButton symbol={symbol} market="us" />
         </span>
         {r && (
-          <span className="text-xs text-fg-muted">
+          <span className="text-xs text-muted">
             数据源: {r.source} {r.source === 'yfinance' ? '(延迟 15min)' : ''}
           </span>
         )}
@@ -152,7 +152,7 @@ export function USStockAnalysisPage() {
               ${r.price.toFixed(2)}
             </span>
           ) : (
-            <span className="text-fg-muted">--</span>
+            <span className="text-muted">--</span>
           )}
         </Card>
         <Card label="涨跌幅">
@@ -162,7 +162,7 @@ export function USStockAnalysisPage() {
               {r.change_pct.toFixed(2)}%
             </span>
           ) : (
-            <span className="text-fg-muted">--</span>
+            <span className="text-muted">--</span>
           )}
         </Card>
         <Card label="今开">{r?.open != null ? `$${r.open.toFixed(2)}` : '--'}</Card>
@@ -177,7 +177,7 @@ export function USStockAnalysisPage() {
         </Card>
       </div>
 
-      <div className="text-xs text-fg-muted p-3 rounded border border-border bg-surface/40">
+      <div className="text-xs text-muted p-3 rounded border border-border bg-surface/40">
         美股惯例: 绿涨红跌 · T+0 交收 · 无涨跌停 · K线为本地 enriched 全量日K (新浪源优先, yfinance 兜底)
       </div>
 
@@ -245,7 +245,7 @@ export function USStockAnalysisPage() {
         >
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-xs text-fg-muted border-b border-border">
+              <tr className="text-left text-xs text-muted border-b border-border">
                 <th className="py-1.5 font-medium">报告期</th>
                 <th className="py-1.5 font-medium text-right">营收</th>
                 <th className="py-1.5 font-medium text-right">净利</th>
@@ -254,12 +254,12 @@ export function USStockAnalysisPage() {
             <tbody>
               {finRows.map((row, i) => (
                 <tr key={row.end ?? i} className="border-b border-border/40 last:border-0">
-                  <td className="py-1.5 font-mono text-fg-muted">{row.end || '--'}</td>
-                  <td className="py-1.5 text-right font-mono text-fg">{formatUSD(row.revenue)}</td>
+                  <td className="py-1.5 font-mono text-muted">{row.end || '--'}</td>
+                  <td className="py-1.5 text-right font-mono text-foreground">{formatUSD(row.revenue)}</td>
                   <td
                     className={`py-1.5 text-right font-mono ${
                       row.netIncome == null
-                        ? 'text-fg-muted'
+                        ? 'text-muted'
                         : row.netIncome >= 0
                           ? 'text-emerald-500'
                           : 'text-rose-500'
@@ -302,11 +302,11 @@ export function USStockAnalysisPage() {
                     <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono text-xs shrink-0">
                       {raw || '--'}
                     </span>
-                    <span className="text-xs text-fg-muted truncate" title={meta.desc}>
+                    <span className="text-xs text-muted truncate" title={meta.desc}>
                       {meta.short}
                     </span>
                   </span>
-                  <span className="text-sm text-fg-muted font-mono shrink-0">
+                  <span className="text-sm text-muted font-mono shrink-0">
                     {f.filing_date ? f.filing_date.slice(0, 10) : '--'}
                   </span>
                 </li>
@@ -402,12 +402,12 @@ function Panel({
   return (
     <section className="rounded-lg border border-border bg-surface/60 p-4">
       <div className="flex items-center gap-2 mb-3">
-        <Icon className="h-4 w-4 text-fg-muted" />
-        <h2 className="text-sm font-semibold text-fg">{title}</h2>
-        {hint && <span className="ml-auto text-xs text-fg-muted">{hint}</span>}
+        <Icon className="h-4 w-4 text-muted" />
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+        {hint && <span className="ml-auto text-xs text-muted">{hint}</span>}
       </div>
       {isLoading ? (
-        <div className="flex items-center gap-2 text-sm text-fg-muted py-4">
+        <div className="flex items-center gap-2 text-sm text-muted py-4">
           <Loader2 className="h-4 w-4 animate-spin" /> 加载中…
         </div>
       ) : error ? (
@@ -484,7 +484,7 @@ function PriceSize({ price, size }: { price: number | null | undefined; size: nu
     <span>
       {price != null ? `$${price.toFixed(2)}` : '--'}
       {size != null && (
-        <span className="ml-1 text-xs font-normal text-fg-muted">×{size}</span>
+        <span className="ml-1 text-xs font-normal text-muted">×{size}</span>
       )}
     </span>
   )
@@ -493,8 +493,8 @@ function PriceSize({ price, size }: { price: number | null | undefined; size: nu
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-border bg-surface/60 p-3">
-      <div className="text-xs text-fg-muted mb-1">{label}</div>
-      <div className="text-lg font-semibold text-fg">{children}</div>
+      <div className="text-xs text-muted mb-1">{label}</div>
+      <div className="text-lg font-semibold text-foreground">{children}</div>
     </div>
   )
 }

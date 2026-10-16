@@ -397,15 +397,15 @@ function QuoteStrip({ kline, quote }: {
       >
         {items.map(([k, v]) => (
           <div key={k} className="min-w-0">
-            <div className="truncate text-[11px] text-fg-muted">{k}</div>
-            <div className="truncate font-mono text-[13px] text-fg">{v}</div>
+            <div className="truncate text-[11px] text-muted">{k}</div>
+            <div className="truncate font-mono text-[13px] text-foreground">{v}</div>
           </div>
         ))}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 border-t border-border/60 pt-1.5 text-[11px] text-fg-muted">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 border-t border-border/60 pt-1.5 text-[11px] text-muted">
         {q?.limit_up != null && q?.limit_down != null && (
-          <span>涨停 <b className="font-mono text-fg">{num(q.limit_up)}</b> · 跌停{' '}
-            <b className="font-mono text-fg">{num(q.limit_down)}</b></span>
+          <span>涨停 <b className="font-mono text-foreground">{num(q.limit_up)}</b> · 跌停{' '}
+            <b className="font-mono text-foreground">{num(q.limit_down)}</b></span>
         )}
         {quote?.available ? (
           <span>行情源 {quote.source} · {q?.quote_time ? `快照 ${q.quote_time.slice(0, 8)} ${q.quote_time.slice(8, 10)}:${q.quote_time.slice(10, 12)}` : q?.updated_at}</span>
@@ -441,8 +441,8 @@ function SectorRow({ symbol }: { symbol: string }) {
   return (
     <div className="rounded-lg border border-border bg-surface px-3 py-2">
       <div className="mb-1.5 flex items-center gap-2">
-        <h3 className="text-sm font-semibold text-fg">所属板块</h3>
-        <span className="ml-auto text-[11px] text-fg-muted">源 {query.data?.source}</span>
+        <h3 className="text-sm font-semibold text-foreground">所属板块</h3>
+        <span className="ml-auto text-[11px] text-muted">源 {query.data?.source}</span>
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-xs">
@@ -465,7 +465,7 @@ function SectorRow({ symbol }: { symbol: string }) {
               'rounded border px-1.5 py-0.5 transition-colors',
               b.precise
                 ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:border-sky-400 hover:text-sky-200'
-                : 'border-border bg-elevated text-fg-muted hover:text-fg-secondary',
+                : 'border-border bg-elevated text-muted hover:text-secondary',
             )}
           >
             {b.name}
@@ -473,7 +473,7 @@ function SectorRow({ symbol }: { symbol: string }) {
         ))}
       </div>
 
-      <div className="mt-1.5 text-[11px] text-fg-muted">
+      <div className="mt-1.5 text-[11px] text-muted">
         紫=行业 · 蓝=核心题材 · 悬停看入选理由
       </div>
     </div>
@@ -490,32 +490,32 @@ function NewsCard({ symbol, name }: { symbol: string; name?: string | null }) {
   return (
     <div className="rounded-lg border border-border bg-surface p-3">
       <div className="mb-2 flex items-center gap-2">
-        <Newspaper className="h-4 w-4 text-fg-muted" />
-        <h3 className="text-sm font-semibold text-fg">资讯 / 舆情</h3>
-        <span className="text-xs text-fg-muted">近 7 天</span>
+        <Newspaper className="h-4 w-4 text-muted" />
+        <h3 className="text-sm font-semibold text-foreground">资讯 / 舆情</h3>
+        <span className="text-xs text-muted">近 7 天</span>
       </div>
       {query.isLoading && (
-        <div className="flex items-center gap-2 py-3 text-xs text-fg-muted">
+        <div className="flex items-center gap-2 py-3 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" /> 加载中…
         </div>
       )}
       {query.error && <div className="py-3 text-xs text-amber-500">请求失败: {(query.error as Error).message}</div>}
       {query.data && !query.data.success && (
-        <div className="py-3 text-xs text-fg-muted">
+        <div className="py-3 text-xs text-muted">
           资讯不可用: {query.data.error_message ?? '无结果'}（fail-closed，不显示占位内容）
         </div>
       )}
       {query.data?.success && query.data.results.length === 0 && (
-        <div className="py-3 text-xs text-fg-muted">近 7 天无相关资讯。</div>
+        <div className="py-3 text-xs text-muted">近 7 天无相关资讯。</div>
       )}
       <ul className="space-y-1.5">
         {(query.data?.results ?? []).map((n, i) => (
           <li key={`${n.url}-${i}`} className="text-xs">
             <a href={n.url} target="_blank" rel="noreferrer"
-               className="text-fg hover:underline" title={n.snippet}>
+               className="text-foreground hover:underline" title={n.snippet}>
               {n.title}
             </a>
-            <span className="ml-2 text-[11px] text-fg-muted">
+            <span className="ml-2 text-[11px] text-muted">
               {n.source}{n.published_date ? ` · ${String(n.published_date).slice(0, 10)}` : ''}
             </span>
           </li>
@@ -779,7 +779,7 @@ export function StockDetail() {
 
   if (!symbol) {
     return (
-      <div className="p-6 text-sm text-fg-muted">
+      <div className="p-6 text-sm text-muted">
         缺少股票代码。<Link to="/" className="underline">返回首页</Link>
       </div>
     )
@@ -790,13 +790,13 @@ export function StockDetail() {
     <div className={cn('w-full space-y-3 px-3 py-3', wide ? '' : 'mx-auto max-w-[1400px]')}>
       {/* ── 头部 ── */}
       <div className="flex flex-wrap items-baseline gap-3">
-        <Link to="/" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg">
+        <Link to="/" className="inline-flex items-center gap-1 text-xs text-muted hover:text-foreground">
           <ArrowLeft className="h-3.5 w-3.5" /> 返回
         </Link>
-        <h1 className="text-xl font-semibold text-fg">{rt?.name || kline?.name || symbol}</h1>
-        <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-xs text-fg-secondary">{symbol}</span>
+        <h1 className="text-xl font-semibold text-foreground">{rt?.name || kline?.name || symbol}</h1>
+        <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-xs text-secondary">{symbol}</span>
         {aCode && (
-          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-fg-muted">
+          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted">
             {marketLabel(aCode)}
           </span>
         )}
@@ -816,7 +816,7 @@ export function StockDetail() {
           <MarketWatchlistButton symbol={symbol} />
           <Link
             to={`/compare?symbols=${encodeURIComponent(symbol)}&days=250`}
-            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-fg-muted hover:text-fg"
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted hover:text-foreground"
             title="把这只票带进多股对比页，再添加其他标的做归一化叠加对比"
           >
             <GitCompare className="h-3 w-3" /> 对比
@@ -824,7 +824,7 @@ export function StockDetail() {
           <button
             type="button"
             onClick={() => setWide(v => { localStorage.setItem('stockDetail:wide', v ? '0' : '1'); return !v })}
-            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-fg-muted hover:text-fg"
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted hover:text-foreground"
             title={wide ? '切回标准宽度（左右留白，阅读更聚焦）' : '宽屏铺满（消除左右留白）'}
           >
             {wide ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
@@ -869,7 +869,7 @@ export function StockDetail() {
                   if (bars > 0) setVisibleBars(bars)
                 }}
                 className={cn('rounded px-2 py-0.5 transition-colors',
-                  kPeriod === p.value && !mkPeriod ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  kPeriod === p.value && !mkPeriod ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
               >
                 {p.label}
               </button>
@@ -889,7 +889,7 @@ export function StockDetail() {
                     setVisibleBars(120)
                   }}
                   className={cn('rounded px-2 py-0.5 transition-colors',
-                    mkPeriod === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                    mkPeriod === p.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                 >
                   {p.label}
                 </button>
@@ -904,7 +904,7 @@ export function StockDetail() {
             <>
               <span className="mx-1 h-4 w-px bg-border" />
 
-              <span className="text-fg-muted">区间</span>
+              <span className="text-muted">区间</span>
               <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
                 {PERIODS.map(p => (
                   <button
@@ -912,7 +912,7 @@ export function StockDetail() {
                     type="button"
                     onClick={() => setMonths(p.months)}
                     className={cn('rounded px-2 py-0.5 transition-colors',
-                      months === p.months ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                      months === p.months ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                   >
                     {p.label}
                   </button>
@@ -921,18 +921,18 @@ export function StockDetail() {
 
               <span className="mx-1 h-4 w-px bg-border" />
 
-              <label className="inline-flex items-center gap-1 text-fg-muted">
+              <label className="inline-flex items-center gap-1 text-muted">
                 <input type="checkbox" checked={showMA} onChange={e => setShowMA(e.target.checked)} />
                 MA
               </label>
 
               <span className="mx-1 h-4 w-px bg-border" />
 
-              <span className="text-fg-muted">缩放</span>
+              <span className="text-muted">缩放</span>
               <button
                 type="button"
                 onClick={() => setVisibleBars(v => Math.min(500, v + 20))}
-                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                className="rounded border border-border p-1 text-secondary hover:text-foreground"
                 title="缩小(看更多)"
               >
                 <Minus className="h-3 w-3" />
@@ -940,7 +940,7 @@ export function StockDetail() {
               <button
                 type="button"
                 onClick={() => setVisibleBars(v => Math.max(20, v - 20))}
-                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                className="rounded border border-border p-1 text-secondary hover:text-foreground"
                 title="放大(看更少)"
               >
                 <Plus className="h-3 w-3" />
@@ -948,12 +948,12 @@ export function StockDetail() {
               <button
                 type="button"
                 onClick={() => setVisibleBars(60)}
-                className="rounded border border-border p-1 text-fg-secondary hover:text-fg"
+                className="rounded border border-border p-1 text-secondary hover:text-foreground"
                 title="复位"
               >
                 <RotateCcw className="h-3 w-3" />
               </button>
-              <span className="text-[11px] text-fg-muted">
+              <span className="text-[11px] text-muted">
                 当前 {visibleBars} 根 · 副图指标用图表右上控件切换
               </span>
             </>
@@ -965,7 +965,7 @@ export function StockDetail() {
           {kPeriod !== 'minute' && !mkPeriod && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
-              <span className="text-fg-muted">复权</span>
+              <span className="text-muted">复权</span>
               <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
                 {ADJUST_MODES.map(t => (
                   <button
@@ -974,14 +974,14 @@ export function StockDetail() {
                     onClick={() => changeAdjust(t.value)}
                     title={t.hint}
                     className={cn('rounded px-2 py-0.5 transition-colors',
-                      adjust === t.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                      adjust === t.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                   >
                     {t.label}
                   </button>
                 ))}
               </div>
               {adjustInfo && !adjustInfo.hasAdjust && adjustInfo.available && adjust !== 'none' && (
-                <span className="text-[11px] text-fg-muted" title="该股在腾讯返回的区间内没有除权事件, 所以三档数值一致 —— 不是开关坏了">
+                <span className="text-[11px] text-muted" title="该股在腾讯返回的区间内没有除权事件, 所以三档数值一致 —— 不是开关坏了">
                   (无除权记录)
                 </span>
               )}
@@ -994,7 +994,7 @@ export function StockDetail() {
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
-              <span className="text-fg-muted">主图</span>
+              <span className="text-muted">主图</span>
               <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
                 {MAIN_CHART_TYPES.map(t => (
                   <button
@@ -1003,7 +1003,7 @@ export function StockDetail() {
                     onClick={() => changeMainType(t.value)}
                     title={t.hint}
                     className={cn('rounded px-2 py-0.5 transition-colors',
-                      mainType === t.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                      mainType === t.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                   >
                     {t.label}
                   </button>
@@ -1018,7 +1018,7 @@ export function StockDetail() {
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
-              <span className="text-fg-muted">分布</span>
+              <span className="text-muted">分布</span>
               <button
                 type="button"
                 onClick={() => changeVP(!showVP)}
@@ -1026,7 +1026,7 @@ export function StockDetail() {
                 className={cn('rounded border px-1.5 py-0.5 transition-colors',
                   showVP
                     ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+                    : 'border-border text-muted hover:text-secondary')}
               >
                 成交量
                 <EstimateTag className="ml-0.5" title="行情源不提供日内逐笔成交的价格分布, 单根 K 的量在 [low, high] 内按价格均摊 —— 是分摊假设, 不是逐笔真实分布">均摊</EstimateTag>
@@ -1038,7 +1038,7 @@ export function StockDetail() {
                 className={cn('rounded border px-1.5 py-0.5 transition-colors',
                   showChips
                     ? 'border-amber-400/40 bg-amber-400/10 text-amber-500'
-                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+                    : 'border-border text-muted hover:text-secondary')}
               >
                 筹码
                 <EstimateTag className="ml-0.5" title="筹码分布是模型估算: 交易所不公开各价位持仓量, 图是用日K量价 + 流通股本反推的, 不是真实持仓成本">估算</EstimateTag>
@@ -1054,7 +1054,7 @@ export function StockDetail() {
                 className={cn('rounded border px-1.5 py-0.5 transition-colors',
                   showTicks
                     ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+                    : 'border-border text-muted hover:text-secondary')}
               >
                 成交明细
                 <span className="ml-0.5 text-[9px] text-emerald-600 dark:text-emerald-400">逐笔</span>
@@ -1070,7 +1070,7 @@ export function StockDetail() {
                 className={cn('rounded border px-1.5 py-0.5 transition-colors',
                   showPeersPref
                     ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-500'
-                    : 'border-border text-fg-muted hover:text-fg-secondary')}
+                    : 'border-border text-muted hover:text-secondary')}
               >
                 同行业对比
                 <EstimateTag className="ml-0.5" title="名单是各指标行业前列的几家公司, 不是行业全部成分股">非全成分</EstimateTag>
@@ -1088,7 +1088,7 @@ export function StockDetail() {
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
-              <span className="text-fg-muted">标注</span>
+              <span className="text-muted">标注</span>
               {SIGNAL_GROUPS.map(g => (
                 <span key={g} className="inline-flex items-center gap-1">
                   {KLINE_SIGNALS.filter(s => s.group === g).map(s => {
@@ -1102,7 +1102,7 @@ export function StockDetail() {
                         className={cn('rounded border px-1.5 py-0.5 transition-colors',
                           signals.has(s.key)
                             ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                            : 'border-border text-fg-muted hover:text-fg-secondary')}
+                            : 'border-border text-muted hover:text-secondary')}
                       >
                         {s.label}
                         <span className="ml-0.5 opacity-60">{evidenceMark(ev)}</span>
@@ -1121,7 +1121,7 @@ export function StockDetail() {
           {kPeriod !== 'minute' && (
             <>
               <span className="mx-1 h-4 w-px bg-border" />
-              <span className="text-fg-muted">画图</span>
+              <span className="text-muted">画图</span>
               {DRAW_TOOLS.map(t => (
                 <button
                   key={t.value}
@@ -1131,7 +1131,7 @@ export function StockDetail() {
                   className={cn('rounded border px-1.5 py-0.5 transition-colors',
                     drawTool === t.value
                       ? 'border-amber-400/40 bg-amber-400/10 text-amber-500'
-                      : 'border-border text-fg-muted hover:text-fg-secondary')}
+                      : 'border-border text-muted hover:text-secondary')}
                 >
                   {t.label}
                 </button>
@@ -1141,7 +1141,7 @@ export function StockDetail() {
                   type="button"
                   onClick={() => persistDrawings([])}
                   title="清除这只股票上画的所有图形(只清本地存储)"
-                  className="rounded border border-border px-1.5 py-0.5 text-fg-muted transition-colors hover:border-red-400/40 hover:text-red-400"
+                  className="rounded border border-border px-1.5 py-0.5 text-muted transition-colors hover:border-red-400/40 hover:text-red-400"
                 >
                   清除 {drawings.length}
                 </button>
@@ -1149,7 +1149,7 @@ export function StockDetail() {
             </>
           )}
 
-          <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-fg-muted">
+          <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted">
             {kPeriod !== 'minute' && <span>双击图表可加水平线 · 滚轮缩放 · 拖动平移</span>}
             <Maximize2 className="h-3 w-3" /> 图表区
           </span>
@@ -1157,7 +1157,7 @@ export function StockDetail() {
 
         {/* 画图模式的代价要提前说清: 图层吃掉了鼠标事件, 这段时间滚轮缩放/拖动平移用不了。 */}
         {drawTool && (
-          <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-fg-muted">
+          <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-muted">
             <span className="text-amber-500">画图模式</span>
             <span>
               滚轮缩放与拖动平移暂时不可用（鼠标事件归画图层），退出工具即恢复；画完点一下当前工具按钮即可退出。
@@ -1169,9 +1169,9 @@ export function StockDetail() {
         )}
         {/* 别的周期/复权档下画的图形, 在当前坐标系里没有意义 —— 说明为什么不显示, 而不是默默消失 */}
         {hiddenDrawings > 0 && (
-          <div className="px-1 text-[10.5px] text-fg-muted">
+          <div className="px-1 text-[10.5px] text-muted">
             另有 {hiddenDrawings} 条图形是在
-            <span className="text-fg-secondary">其他周期/复权档</span>
+            <span className="text-secondary">其他周期/复权档</span>
             下画的（价格体系不同），当前视图不显示 —— 切回去就能看到。
           </div>
         )}
@@ -1179,15 +1179,15 @@ export function StockDetail() {
         {/* 已加的水平线 —— 可删。放在图表上方而不是图里, 免得遮 K 线。 */}
         {kPeriod !== 'minute' && priceLines.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 px-1 text-[11px]">
-            <span className="text-fg-muted">水平线</span>
+            <span className="text-muted">水平线</span>
             {priceLines.map((l, i) => (
               <span key={`${l.value}-${i}`}
-                    className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-fg-secondary">
+                    className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-secondary">
                 {l.label ?? l.value.toFixed(2)}
                 <button
                   type="button"
                   onClick={() => persistPriceLines(priceLines.filter((_, j) => j !== i))}
-                  className="text-fg-muted hover:text-fg"
+                  className="text-muted hover:text-foreground"
                   title="删除这条水平线"
                 >
                   <X className="h-3 w-3" />
@@ -1210,11 +1210,11 @@ export function StockDetail() {
             {/* 图上右侧那条分布带容易被当成"逐笔成交堆出来的真实分布" —— 在图表正上方
                 写清它的分摊假设, 别让人默认它比实际更精确。 */}
             {showVP && (
-              <div className="mb-1 flex items-start gap-1.5 px-1 text-[10.5px] leading-relaxed text-fg-muted">
+              <div className="mb-1 flex items-start gap-1.5 px-1 text-[10.5px] leading-relaxed text-muted">
                 <EstimateTag title="行情源不提供日内逐笔成交的价格分布">均摊口径</EstimateTag>
                 <span>
                   K 线右侧的成交量分布：把可见区间每根 K 的成交量在 [low, high]
-                  内<b className="text-fg-secondary">按价格均摊</b>后统计（行情源只给日内的开高低收和总量，不给逐笔分布）。
+                  内<b className="text-secondary">按价格均摊</b>后统计（行情源只给日内的开高低收和总量，不给逐笔分布）。
                   均摊是不引入额外假设的那一种，但仍是分摊而非真实分布。
                 </span>
               </div>
@@ -1254,9 +1254,9 @@ export function StockDetail() {
         <ChipDistributionPanel result={chips} name={kline?.name} className="mt-2" />
       )}
       {chipsBlocked && (
-        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-muted">
           筹码分布需要「流通股本」才能算（每日换手率 = 成交量 / 流通股本）—— 本地 stock_info 没给到
-          {' '}<span className="font-mono text-fg-secondary">{symbol}</span>{' '}的流通股本，所以这里不做。
+          {' '}<span className="font-mono text-secondary">{symbol}</span>{' '}的流通股本，所以这里不做。
           不拿估算股本凑版面。
         </div>
       )}
@@ -1284,12 +1284,12 @@ export function StockDetail() {
         />
       )}
       {showTicks && ticksQuery.isLoading && (
-        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-fg-muted">
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-muted">
           正在拉取逐笔成交（最近 {tickTail} 笔）…
         </div>
       )}
       {ticksBlocked && (
-        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-muted">
           逐笔成交取不到 —— {ticksQuery.data?.reason ?? '上游无返回'}。
           {' '}常见情形是当日无成交（停牌 / 尚未开盘）、该日期是非交易日，或代码不是沪深 A股（北交所暂不支持）；
           这里不补一行占位数据。
@@ -1300,7 +1300,7 @@ export function StockDetail() {
           东财 F10 真源。默认关闭(要打上游); 取不到(北交所 / F10 未覆盖)就明说,
           不拿别的分类顶替。 */}
       {showPeers && peersQuery.isLoading && (
-        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-fg-muted">
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-muted">
           正在拉取同行业对比（东财 F10「行业对比」）…
         </div>
       )}
@@ -1321,7 +1321,7 @@ export function StockDetail() {
         />
       )}
       {peersBlocked && (
-        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-fg-muted">
+        <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-muted">
           同行业对比取不到 —— {peers?.reason ?? '上游无返回'}。
           {' '}常见情形是该标的不在东财 F10「行业对比」的覆盖范围内（例如部分北交所标的）；
           不用别的分类方式凑一份名单。
@@ -1340,7 +1340,7 @@ export function StockDetail() {
           <HKUSMultiDayChart symbol={symbol} className="mt-2" />
           {/* 逐笔成交: 港股 0x23FC/0x2406、美股 0x122F(两条协议, 后端已分叉) */}
           <HKUSTransactionsPanel symbol={symbol} className="mt-2" />
-          <div className="mt-2 rounded-lg border border-border bg-surface p-3 text-xs text-fg-muted">
+          <div className="mt-2 rounded-lg border border-border bg-surface p-3 text-xs text-muted">
             深度数据（资金流 / 龙虎榜 / 研报 / 公告 / 财务摘要）当前仅覆盖 A股 ——
             非 A股代码不显示这五块，也不会用占位内容冒充。
             {(symbol.trim().toUpperCase().endsWith('.HK') || symbol.trim().toUpperCase().endsWith('.US')) && (
@@ -1351,8 +1351,8 @@ export function StockDetail() {
       ) : (
         <div className="rounded-lg border border-border bg-surface p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold text-fg">深度数据</h3>
-            <span className="text-xs text-fg-muted">A股全栈 · 全部为真实数据（过 source_gate 白名单）</span>
+            <h3 className="text-sm font-semibold text-foreground">深度数据</h3>
+            <span className="text-xs text-muted">A股全栈 · 全部为真实数据（过 source_gate 白名单）</span>
             <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
               {DEEP_TABS.map(t => (
                 <button
@@ -1360,7 +1360,7 @@ export function StockDetail() {
                   type="button"
                   onClick={() => setDeepTab(t.key)}
                   className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-                    deepTab === t.key ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                    deepTab === t.key ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                 >
                   {t.label}
                 </button>

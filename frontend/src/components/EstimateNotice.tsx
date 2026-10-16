@@ -68,8 +68,8 @@ export function EstimateBanner({
       <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0 text-amber-500" />
       <div className="min-w-0 text-[10.5px] leading-relaxed">
         <div className="font-medium text-amber-500">{title}</div>
-        {how && <div className="mt-0.5 text-fg-secondary">{how}</div>}
-        {limit && <div className="mt-0.5 text-fg-muted">{limit}</div>}
+        {how && <div className="mt-0.5 text-secondary">{how}</div>}
+        {limit && <div className="mt-0.5 text-muted">{limit}</div>}
       </div>
     </div>
   )
@@ -79,7 +79,7 @@ export function EstimateBanner({
 export function EstimateWatermark({ text = '模型估算' }: { text?: string }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
-      <span className="select-none whitespace-nowrap text-[15px] font-semibold tracking-[0.3em] text-fg-muted/15">
+      <span className="select-none whitespace-nowrap text-[15px] font-semibold tracking-[0.3em] text-muted/15">
         {text}
       </span>
     </div>

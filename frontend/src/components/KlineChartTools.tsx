@@ -148,7 +148,7 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
     <div className={className}>
       <div className="flex flex-wrap items-center gap-1.5 px-1 text-[11px]">
         {/* ── 主图画法: 四种画法共用同一份 OHLC, 换的只是视觉编码 ── */}
-        <span className="text-fg-muted">主图</span>
+        <span className="text-muted">主图</span>
         <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
           {MAIN_CHART_TYPES.map(t => (
             <button
@@ -158,8 +158,8 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
               title={t.hint}
               className={cn('rounded px-2 py-0.5 transition-colors',
                 tools.mainType === t.value
-                  ? 'bg-surface text-fg shadow-sm'
-                  : 'text-fg-muted hover:text-fg-secondary')}
+                  ? 'bg-surface text-foreground shadow-sm'
+                  : 'text-muted hover:text-secondary')}
             >
               {t.label}
             </button>
@@ -168,7 +168,7 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
 
         {/* ── K线内标注: 确定性派生, 不是打分也不是买卖建议 ── */}
         <span className="mx-1 h-4 w-px bg-border" />
-        <span className="text-fg-muted">标注</span>
+        <span className="text-muted">标注</span>
         {KLINE_SIGNALS.map(s => (
           <button
             key={s.key}
@@ -178,7 +178,7 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
             className={cn('rounded border px-1.5 py-0.5 transition-colors',
               tools.signals.has(s.key)
                 ? 'border-sky-400/40 bg-sky-400/10 text-sky-500'
-                : 'border-border text-fg-muted hover:text-fg-secondary')}
+                : 'border-border text-muted hover:text-secondary')}
           >
             {s.label}
           </button>
@@ -186,7 +186,7 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
 
         {/* ── 画图工具: 画的是标注不是数据, 只存本地 ── */}
         <span className="mx-1 h-4 w-px bg-border" />
-        <span className="text-fg-muted">画图</span>
+        <span className="text-muted">画图</span>
         {DRAW_TOOLS.map(t => (
           <button
             key={t.value}
@@ -196,7 +196,7 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
             className={cn('rounded border px-1.5 py-0.5 transition-colors',
               drawTool === t.value
                 ? 'border-amber-400/40 bg-amber-400/10 text-amber-500'
-                : 'border-border text-fg-muted hover:text-fg-secondary')}
+                : 'border-border text-muted hover:text-secondary')}
           >
             {t.label}
           </button>
@@ -206,20 +206,20 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
             type="button"
             onClick={() => tools.persistDrawings([])}
             title="清除这只标的在本地存的所有图形(只清本地存储)"
-            className="rounded border border-border px-1.5 py-0.5 text-fg-muted transition-colors hover:border-red-400/40 hover:text-red-400"
+            className="rounded border border-border px-1.5 py-0.5 text-muted transition-colors hover:border-red-400/40 hover:text-red-400"
           >
             清除 {tools.visibleDrawings.length + tools.hiddenDrawings}
           </button>
         )}
 
-        <span className="ml-auto text-[11px] text-fg-muted">
+        <span className="ml-auto text-[11px] text-muted">
           双击图表可加水平线 · 滚轮缩放 · 拖动平移
         </span>
       </div>
 
       {/* 画图的代价要提前说清: 图层会吃掉鼠标事件, 这段时间缩放/平移用不了。 */}
       {drawTool && (
-        <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-fg-muted">
+        <div className="flex flex-wrap items-baseline gap-x-2 px-1 text-[10.5px] text-muted">
           <span className="text-amber-500">画图模式</span>
           <span>
             滚轮缩放与拖动平移暂时不可用（鼠标事件归画图层），画完自动退出、随即恢复。
@@ -231,23 +231,23 @@ export function KlineToolsBar({ tools, className }: { tools: KlineTools; classNa
       )}
       {/* 别处 canvas 坐标系下画的图形不显示 —— 说明原因, 而不是默默消失 */}
       {tools.hiddenDrawings > 0 && (
-        <div className="px-1 text-[10.5px] text-fg-muted">
+        <div className="px-1 text-[10.5px] text-muted">
           另有 {tools.hiddenDrawings} 条图形是在
-          <span className="text-fg-secondary">其他周期/复权档</span>
+          <span className="text-secondary">其他周期/复权档</span>
           下画的（价格体系不同），当前视图不显示 —— 切回去就能看到。
         </div>
       )}
       {tools.priceLines.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 px-1 text-[11px]">
-          <span className="text-fg-muted">水平线</span>
+          <span className="text-muted">水平线</span>
           {tools.priceLines.map((l, i) => (
             <span key={`${l.value}-${i}`}
-                  className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-fg-secondary">
+                  className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-secondary">
               {l.label ?? l.value.toFixed(2)}
               <button
                 type="button"
                 onClick={() => tools.removePriceLine(i)}
-                className="text-fg-muted hover:text-fg"
+                className="text-muted hover:text-foreground"
                 title="删除这条水平线"
               >
                 <X className="h-3 w-3" />

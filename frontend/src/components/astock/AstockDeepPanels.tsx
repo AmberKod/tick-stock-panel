@@ -132,7 +132,7 @@ export function isAShare(symbol: string): boolean {
 /** 加载/失败/不可用 三种状态行(各面板共用, 保持文案口径一致)。 */
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-center gap-2 py-3 text-xs ${warn ? 'text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-center gap-2 py-3 text-xs ${warn ? 'text-amber-500' : 'text-muted'}`}>
       {loading
         ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
         : warn
@@ -153,8 +153,8 @@ function PanelShell({ icon, title, subtitle, children }: {
     <section className="border-t border-border px-4 py-3">
       <div className="mb-1 flex items-center gap-2">
         {icon}
-        <h3 className="text-sm font-semibold text-fg">{title}</h3>
-        <span className="text-xs text-fg-muted">{subtitle}</span>
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="text-xs text-muted">{subtitle}</span>
       </div>
       {children}
     </section>
@@ -166,7 +166,7 @@ function PanelShell({ icon, title, subtitle, children }: {
 function SeatRow({ seat }: { seat: Seat }) {
   return (
     <div className="flex items-baseline gap-2 py-0.5">
-      <span className="truncate text-fg-secondary" title={seat.name}>
+      <span className="truncate text-secondary" title={seat.name}>
         {seat.is_institution && <span className="mr-1 text-amber-500">机构</span>}
         {seat.is_northbound && <span className="mr-1 text-sky-400">北向</span>}
         {seat.name}
@@ -195,7 +195,7 @@ export function DragonTigerPanel({ symbol }: { symbol: string }) {
 
     if (data.records.length === 0) {
       return (
-        <div className="py-3 text-xs text-fg-muted">
+        <div className="py-3 text-xs text-muted">
           近 {data.window_days} 天未登上龙虎榜（该股期间未触发上榜条件）。
         </div>
       )
@@ -208,20 +208,20 @@ export function DragonTigerPanel({ symbol }: { symbol: string }) {
     return (
       <div className="space-y-2">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
-          <span className="text-fg-muted">上榜 <b className="text-fg">{data.records.length}</b> 次</span>
-          <span className="text-fg-muted">{latest.date} · {latest.reason}</span>
-          <span className="text-fg-muted">
+          <span className="text-muted">上榜 <b className="text-foreground">{data.records.length}</b> 次</span>
+          <span className="text-muted">{latest.date} · {latest.reason}</span>
+          <span className="text-muted">
             净买 <b className={priceColorClass(latest.net_buy)}>{wan(latest.net_buy)}</b>
           </span>
-          <span className="text-fg-muted">换手 {latest.turnover}%</span>
+          <span className="text-muted">换手 {latest.turnover}%</span>
         </div>
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
-          <span className="text-fg-muted">
+          <span className="text-muted">
             机构 {inst.seat_count} 席 · 净{' '}
             <b className={priceColorClass(inst.net_amt)}>{wan(inst.net_amt)}</b>
           </span>
           {nb.present && (
-            <span className="text-fg-muted">
+            <span className="text-muted">
               北向净 <b className={priceColorClass(nb.net_amt)}>{wan(nb.net_amt)}</b>
             </span>
           )}
@@ -229,26 +229,26 @@ export function DragonTigerPanel({ symbol }: { symbol: string }) {
         {(data.seats.buy.length > 0 || data.seats.sell.length > 0) && (
           <div className="grid gap-3 pt-1 sm:grid-cols-2">
             <div>
-              <div className="mb-1 flex items-center gap-1 text-xs text-fg-muted">
+              <div className="mb-1 flex items-center gap-1 text-xs text-muted">
                 <TrendingUp className="h-3 w-3" /> 买入席位 TOP5
               </div>
               {data.seats.buy.map((s, i) => <SeatRow key={`b${i}`} seat={s} />)}
             </div>
             <div>
-              <div className="mb-1 flex items-center gap-1 text-xs text-fg-muted">
+              <div className="mb-1 flex items-center gap-1 text-xs text-muted">
                 <TrendingDown className="h-3 w-3" /> 卖出席位 TOP5
               </div>
               {data.seats.sell.map((s, i) => <SeatRow key={`s${i}`} seat={s} />)}
             </div>
           </div>
         )}
-        <div className="pt-1 text-[11px] text-fg-muted">来源 东方财富 datacenter · {data.updated_at}</div>
+        <div className="pt-1 text-[11px] text-muted">来源 东方财富 datacenter · {data.updated_at}</div>
       </div>
     )
   }
 
   return (
-    <PanelShell icon={<Flame className="h-4 w-4 text-fg-muted" />} title="龙虎榜" subtitle="近 30 天 · 席位与机构动向">
+    <PanelShell icon={<Flame className="h-4 w-4 text-muted" />} title="龙虎榜" subtitle="近 30 天 · 席位与机构动向">
       {body()}
     </PanelShell>
   )
@@ -260,7 +260,7 @@ export function DragonTigerPanel({ symbol }: { symbol: string }) {
 function ratingClass(rating: string): string {
   if (/买入|增持/.test(rating)) return 'text-danger'
   if (/减持|卖出/.test(rating)) return 'text-success'
-  return 'text-fg-secondary'
+  return 'text-secondary'
 }
 
 export function ResearchPanel({ symbol, limit = 12 }: { symbol: string; limit?: number }) {
@@ -276,33 +276,33 @@ export function ResearchPanel({ symbol, limit = 12 }: { symbol: string; limit?: 
     const resp = query.data
     if (!resp?.available) return <StateLine warn text={`不可用: ${resp?.reason ?? '服务不可用'}`} />
     const rows = resp.data?.reports ?? []
-    if (rows.length === 0) return <div className="py-3 text-xs text-fg-muted">近期无机构研报覆盖。</div>
+    if (rows.length === 0) return <div className="py-3 text-xs text-muted">近期无机构研报覆盖。</div>
 
     return (
       <div className="space-y-1.5">
         {rows.map((r, i) => (
           <div key={`${r.date}-${i}`} className="flex items-baseline gap-2 text-xs">
-            <span className="shrink-0 font-mono text-fg-muted">{r.date}</span>
-            <span className="w-24 shrink-0 truncate text-fg-secondary" title={r.org}>{r.org}</span>
+            <span className="shrink-0 font-mono text-muted">{r.date}</span>
+            <span className="w-24 shrink-0 truncate text-secondary" title={r.org}>{r.org}</span>
             {r.rating && <span className={`shrink-0 font-semibold ${ratingClass(r.rating)}`}>{r.rating}</span>}
-            <span className="truncate text-fg" title={r.title}>
+            <span className="truncate text-foreground" title={r.title}>
               {r.url
                 ? <a href={r.url} target="_blank" rel="noreferrer" className="hover:underline">{r.title}</a>
                 : r.title}
             </span>
-            <span className="ml-auto shrink-0 tabular-nums text-fg-muted">
+            <span className="ml-auto shrink-0 tabular-nums text-muted">
               {r.target_price != null && <span>目标 {r.target_price.toFixed(0)} · </span>}
               {r.eps_this_year != null && <span>EPS {r.eps_this_year.toFixed(2)}</span>}
             </span>
           </div>
         ))}
-        <div className="pt-1 text-[11px] text-fg-muted">来源 东方财富研报 · {resp.data?.updated_at}</div>
+        <div className="pt-1 text-[11px] text-muted">来源 东方财富研报 · {resp.data?.updated_at}</div>
       </div>
     )
   }
 
   return (
-    <PanelShell icon={<FileText className="h-4 w-4 text-fg-muted" />} title="机构研报" subtitle="评级 · 目标价 · EPS 预测">
+    <PanelShell icon={<FileText className="h-4 w-4 text-muted" />} title="机构研报" subtitle="评级 · 目标价 · EPS 预测">
       {body()}
     </PanelShell>
   )
@@ -323,30 +323,30 @@ export function AnnouncementsPanel({ symbol, limit = 12 }: { symbol: string; lim
     const resp = query.data
     if (!resp?.available) return <StateLine warn text={`不可用: ${resp?.reason ?? '服务不可用'}`} />
     const rows = resp.data?.announcements ?? []
-    if (rows.length === 0) return <div className="py-3 text-xs text-fg-muted">暂无公告。</div>
+    if (rows.length === 0) return <div className="py-3 text-xs text-muted">暂无公告。</div>
 
     return (
       <div className="space-y-1.5">
         {rows.map((a, i) => (
           <div key={`${a.date}-${i}`} className="flex items-baseline gap-2 text-xs">
-            <span className="shrink-0 font-mono text-fg-muted">{a.date}</span>
+            <span className="shrink-0 font-mono text-muted">{a.date}</span>
             {a.type && (
-              <span className="shrink-0 rounded bg-elevated px-1 text-[11px] text-fg-secondary">{a.type}</span>
+              <span className="shrink-0 rounded bg-elevated px-1 text-[11px] text-secondary">{a.type}</span>
             )}
-            <span className="truncate text-fg" title={a.title}>
+            <span className="truncate text-foreground" title={a.title}>
               {a.url
                 ? <a href={a.url} target="_blank" rel="noreferrer" className="hover:underline">{a.title}</a>
                 : a.title}
             </span>
           </div>
         ))}
-        <div className="pt-1 text-[11px] text-fg-muted">来源 巨潮资讯 · {resp.data?.updated_at}</div>
+        <div className="pt-1 text-[11px] text-muted">来源 巨潮资讯 · {resp.data?.updated_at}</div>
       </div>
     )
   }
 
   return (
-    <PanelShell icon={<Bell className="h-4 w-4 text-fg-muted" />} title="公司公告" subtitle="巨潮全文 · 点击看原文">
+    <PanelShell icon={<Bell className="h-4 w-4 text-muted" />} title="公司公告" subtitle="巨潮全文 · 点击看原文">
       {body()}
     </PanelShell>
   )
@@ -367,11 +367,11 @@ export function FundFlowPanel({ symbol, days = 20 }: { symbol: string; days?: nu
     const resp = query.data
     if (!resp?.available) return <StateLine warn text={`不可用: ${resp?.reason ?? '服务不可用'}`} />
     const rows = resp.data?.rows ?? []
-    if (rows.length === 0) return <div className="py-3 text-xs text-fg-muted">暂无资金流数据。</div>
+    if (rows.length === 0) return <div className="py-3 text-xs text-muted">暂无资金流数据。</div>
 
     return (
       <div className="space-y-1.5">
-        <div className="flex items-baseline gap-2 text-[11px] text-fg-muted">
+        <div className="flex items-baseline gap-2 text-[11px] text-muted">
           <span className="w-20 shrink-0">日期</span>
           <span className="w-16 shrink-0 text-right">收盘</span>
           <span className="w-14 shrink-0 text-right">涨跌</span>
@@ -380,7 +380,7 @@ export function FundFlowPanel({ symbol, days = 20 }: { symbol: string; days?: nu
         </div>
         {rows.map((r, i) => (
           <div key={`${r.date}-${i}`} className="flex items-baseline gap-2 text-xs">
-            <span className="w-20 shrink-0 font-mono text-fg-muted">{r.date}</span>
+            <span className="w-20 shrink-0 font-mono text-muted">{r.date}</span>
             <span className="w-16 shrink-0 text-right tabular-nums">{r.close?.toFixed(2) ?? '—'}</span>
             <span className={`w-14 shrink-0 text-right tabular-nums ${priceColorClass(r.change_pct)}`}>
               {r.change_pct != null ? `${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%` : '—'}
@@ -393,7 +393,7 @@ export function FundFlowPanel({ symbol, days = 20 }: { symbol: string; days?: nu
             </span>
           </div>
         ))}
-        <div className="pt-1 text-[11px] text-fg-muted">
+        <div className="pt-1 text-[11px] text-muted">
           来源 新浪财经（东财 push2 在本机网络不可达）· {resp.data?.updated_at}
         </div>
       </div>
@@ -401,7 +401,7 @@ export function FundFlowPanel({ symbol, days = 20 }: { symbol: string; days?: nu
   }
 
   return (
-    <PanelShell icon={<Waves className="h-4 w-4 text-fg-muted" />} title="资金流向" subtitle="主力净额 · 超大单（万元）">
+    <PanelShell icon={<Waves className="h-4 w-4 text-muted" />} title="资金流向" subtitle="主力净额 · 超大单（万元）">
       {body()}
     </PanelShell>
   )
@@ -489,7 +489,7 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
     if (data.count === 0 || data.cash_events === 0) {
       // 新股从未分红是真答案 —— 不能显示"取不到"(把"没分过"谎报成"接口坏")
       return (
-        <div className="py-3 text-xs text-fg-muted">
+        <div className="py-3 text-xs text-muted">
           该股自 {data.coverage.from} 以来没有任何分红 / 送转 / 配股记录。
         </div>
       )
@@ -504,32 +504,32 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
     return (
       <div className="space-y-2">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
-          <span className="text-fg-muted">
-            上市以来现金分红 <b className="text-fg">{data.cash_events}</b> 次
+          <span className="text-muted">
+            上市以来现金分红 <b className="text-foreground">{data.cash_events}</b> 次
           </span>
-          <span className="text-fg-muted">
+          <span className="text-muted">
             最近一次 {latest.date}
             {latest.cash_per_share ? ` · 每股 ${latest.cash_per_share.toFixed(4)} 元` : ''}
             {latest.bonus_share_ratio ? ` · 每 10 股送转 ${(latest.bonus_share_ratio * 10).toFixed(2)} 股` : ''}
           </span>
-          <span className="text-fg-muted">记录覆盖 {data.coverage.from} ~ {data.coverage.to}</span>
+          <span className="text-muted">记录覆盖 {data.coverage.from} ~ {data.coverage.to}</span>
         </div>
 
         {/* 年度派息柱状条 —— 纯 CSS 宽度, 不引第三方图表库 */}
         <div className="space-y-1">
           {years.slice(0, 6).map(y => (
             <div key={y.year} className="flex items-center gap-2 text-xs">
-              <span className="w-10 shrink-0 tabular-nums text-fg-muted">{y.year}</span>
+              <span className="w-10 shrink-0 tabular-nums text-muted">{y.year}</span>
               <div className="h-2 flex-1 rounded bg-border/40">
                 <div
                   className="h-2 rounded bg-danger/60"
                   style={{ width: `${Math.max(2, (y.cash / maxCash) * 100)}%` }}
                 />
               </div>
-              <span className="w-24 shrink-0 text-right tabular-nums text-fg-secondary">
+              <span className="w-24 shrink-0 text-right tabular-nums text-secondary">
                 {y.cash.toFixed(4)} 元/股
               </span>
-              <span className="w-10 shrink-0 text-right text-fg-muted">{y.times}次</span>
+              <span className="w-10 shrink-0 text-right text-muted">{y.times}次</span>
             </div>
           ))}
         </div>
@@ -537,7 +537,7 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
         <div className="-mx-1 overflow-x-auto">
           <table className="w-full min-w-[560px] border-collapse text-xs">
             <thead>
-              <tr className="text-fg-muted">
+              <tr className="text-muted">
                 <th className="px-1 py-1 text-left font-normal">除权日</th>
                 <th className="px-1 py-1 text-right font-normal">每股派息</th>
                 <th className="px-1 py-1 text-right font-normal">每10股送转</th>
@@ -548,17 +548,17 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
             <tbody>
               {rows.map((e, i) => (
                 <tr key={`${e.date}-${i}`} className="border-t border-border/60">
-                  <td className="px-1 py-1 tabular-nums text-fg-secondary">{e.date}</td>
-                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                  <td className="px-1 py-1 tabular-nums text-secondary">{e.date}</td>
+                  <td className="px-1 py-1 text-right tabular-nums text-foreground">
                     {e.cash_per_share ? e.cash_per_share.toFixed(4) : '—'}
                   </td>
-                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                  <td className="px-1 py-1 text-right tabular-nums text-foreground">
                     {e.bonus_share_ratio ? (e.bonus_share_ratio * 10).toFixed(2) : '—'}
                   </td>
-                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                  <td className="px-1 py-1 text-right tabular-nums text-foreground">
                     {e.rights_issue_ratio ? (e.rights_issue_ratio * 10).toFixed(2) : '—'}
                   </td>
-                  <td className="px-1 py-1 text-right tabular-nums text-fg">
+                  <td className="px-1 py-1 text-right tabular-nums text-foreground">
                     {e.rights_issue_price ? e.rights_issue_price.toFixed(2) : '—'}
                   </td>
                 </tr>
@@ -567,10 +567,10 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
           </table>
         </div>
 
-        <p className="text-[11px] leading-relaxed text-fg-muted">{data.unit_note}</p>
+        <p className="text-[11px] leading-relaxed text-muted">{data.unit_note}</p>
         {/* 这句话很重要: 有人会拿这些事件自己去推复权价, 得先告诉他偏差边界在哪 */}
-        <p className="text-[11px] leading-relaxed text-fg-muted">{data.adjust_note}</p>
-        <div className="pt-1 text-[11px] text-fg-muted">
+        <p className="text-[11px] leading-relaxed text-muted">{data.adjust_note}</p>
+        <div className="pt-1 text-[11px] text-muted">
           来源 通达信标准市 GetXdxrInfoCmd · {data.updated_at}
         </div>
       </div>
@@ -579,7 +579,7 @@ export function XdxrPanel({ symbol, limit = 12 }: { symbol: string; limit?: numb
 
   return (
     <PanelShell
-      icon={<Gift className="h-4 w-4 text-fg-muted" />}
+      icon={<Gift className="h-4 w-4 text-muted" />}
       title="分红送配"
       subtitle="除权除息全事件 · 年度派息与配股明细"
     >
@@ -617,10 +617,10 @@ export function FinancialsPanel({ symbol, periods = 8 }: { symbol: string; perio
       <div className="-mx-1 overflow-x-auto">
         {groups.map(g => (
           <div key={g.name} className="mb-3">
-            <div className="mb-1 text-xs font-semibold text-fg-secondary">{g.name}</div>
+            <div className="mb-1 text-xs font-semibold text-secondary">{g.name}</div>
             <table className="w-full min-w-[640px] border-collapse text-xs">
               <thead>
-                <tr className="text-fg-muted">
+                <tr className="text-muted">
                   <th className="sticky left-0 bg-surface px-1 py-1 text-left font-normal">指标</th>
                   {data.periods.map(p => (
                     <th key={p} className="px-1 py-1 text-right font-normal">{fmtPeriod(p)}</th>
@@ -630,9 +630,9 @@ export function FinancialsPanel({ symbol, periods = 8 }: { symbol: string; perio
               <tbody>
                 {g.items.map(ind => (
                   <tr key={`${g.name}-${ind.name}`} className="border-t border-border/60">
-                    <td className="sticky left-0 bg-surface px-1 py-1 text-fg-secondary">{ind.name}</td>
+                    <td className="sticky left-0 bg-surface px-1 py-1 text-secondary">{ind.name}</td>
                     {ind.values.map(v => (
-                      <td key={v.period} className="px-1 py-1 text-right tabular-nums text-fg">
+                      <td key={v.period} className="px-1 py-1 text-right tabular-nums text-foreground">
                         {fmtBig(v.value)}
                       </td>
                     ))}
@@ -642,13 +642,13 @@ export function FinancialsPanel({ symbol, periods = 8 }: { symbol: string; perio
             </table>
           </div>
         ))}
-        <div className="pt-1 text-[11px] text-fg-muted">来源 东财财务指标（akshare）· {data.updated_at}</div>
+        <div className="pt-1 text-[11px] text-muted">来源 东财财务指标（akshare）· {data.updated_at}</div>
       </div>
     )
   }
 
   return (
-    <PanelShell icon={<BarChart3 className="h-4 w-4 text-fg-muted" />} title="财务摘要" subtitle="7 组 80 指标 × 最近报告期">
+    <PanelShell icon={<BarChart3 className="h-4 w-4 text-muted" />} title="财务摘要" subtitle="7 组 80 指标 × 最近报告期">
       {body()}
     </PanelShell>
   )

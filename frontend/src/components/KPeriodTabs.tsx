@@ -36,7 +36,7 @@ export function KPeriodTabs({ value, onChange, periods = K_PERIODS, className }:
           type="button"
           onClick={() => onChange(p.value, PERIOD_DEFAULT_BARS[p.value])}
           className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-            value === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+            value === p.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
         >
           {p.label}
         </button>
@@ -65,7 +65,7 @@ export function MinutePeriodTabs({ value, onChange, className }: {
         type="button"
         onClick={() => onChange(null)}
         className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-          value == null ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+          value == null ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
       >
         关
       </button>
@@ -75,7 +75,7 @@ export function MinutePeriodTabs({ value, onChange, className }: {
           type="button"
           onClick={() => onChange(p.value)}
           className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-            value === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+            value === p.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
         >
           {p.label}
         </button>
@@ -116,7 +116,7 @@ export function MinuteDepthTabs({ value, onChange, className }: {
           type="button"
           onClick={() => onChange(p.value)}
           className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-            value === p.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+            value === p.value ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
         >
           {p.label}
         </button>
@@ -162,10 +162,10 @@ export function DeepCapabilityNote({ market }: { market: 'HK' | 'US' }) {
   if (!unavailable.length && !derived.length) return null
 
   return (
-    <div className="space-y-1 text-xs text-fg-muted">
+    <div className="space-y-1 text-xs text-muted">
       {derived.length > 0 && (
         <div className="flex items-start gap-1.5">
-          <span className="mt-[1px] text-fg-subtle">ⓘ</span>
+          <span className="mt-[1px] text-muted">ⓘ</span>
           <span>
             {derived.map(([k]) => PERIOD_LABEL[k] ?? k).join(' / ')}
             {' '}由真实日K本地聚合而来, 非交易所原生周期K
@@ -174,17 +174,17 @@ export function DeepCapabilityNote({ market }: { market: 'HK' | 'US' }) {
       )}
       {unavailable.length > 0 && (
         <details className="group">
-          <summary className="flex items-center gap-1.5 cursor-pointer hover:text-fg-secondary">
-            <AlertTriangle className="h-3.5 w-3.5 text-warn" />
+          <summary className="flex items-center gap-1.5 cursor-pointer hover:text-secondary">
+            <AlertTriangle className="h-3.5 w-3.5 text-warning" />
             <span>
               {unavailable.map(([k]) => PERIOD_LABEL[k] ?? k).join(' / ')} 不可用
             </span>
-            <span className="text-fg-subtle group-open:hidden">（看原因）</span>
+            <span className="text-muted group-open:hidden">（看原因）</span>
           </summary>
           <ul className="mt-1 ml-5 space-y-1 list-disc">
             {unavailable.map(([k, v]) => (
               <li key={k}>
-                <span className="text-fg-secondary">{PERIOD_LABEL[k] ?? k}</span>: {v.reason ?? '无真源'}
+                <span className="text-secondary">{PERIOD_LABEL[k] ?? k}</span>: {v.reason ?? '无真源'}
               </li>
             ))}
           </ul>

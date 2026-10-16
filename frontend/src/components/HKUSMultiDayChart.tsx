@@ -48,7 +48,7 @@ const LINE_COLORS = ['#2563EB', '#16A34A', '#F59E0B', '#DB2777', '#7C3AED',
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
         : warn ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}
       <span className="min-w-0 break-words">{text}</span>
@@ -199,9 +199,9 @@ export function HKUSMultiDayChart({ symbol, days = 5, className = '' }: {
   return (
     <section className={`rounded-lg border border-border bg-surface p-3 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <LineChart className="h-3.5 w-3.5 text-fg-muted" />
-        <h3 className="text-sm font-semibold text-fg">多日分时</h3>
-        <span className="text-xs text-fg-muted">MAC-EX · 最近 {days} 个交易日</span>
+        <LineChart className="h-3.5 w-3.5 text-muted" />
+        <h3 className="text-sm font-semibold text-foreground">多日分时</h3>
+        <span className="text-xs text-muted">MAC-EX · 最近 {days} 个交易日</span>
         <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
           {([['相对昨收%', true], ['绝对价格', false]] as const).map(([label, val]) => (
             <button
@@ -209,7 +209,7 @@ export function HKUSMultiDayChart({ symbol, days = 5, className = '' }: {
               type="button"
               onClick={() => setRelative(val)}
               className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
-                relative === val ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary'
+                relative === val ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
               }`}
             >{label}</button>
           ))}
@@ -223,7 +223,7 @@ export function HKUSMultiDayChart({ symbol, days = 5, className = '' }: {
       {dayList.length > 0 && (
         <>
           <div ref={hostRef} className="h-[240px] w-full" />
-          <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted">
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
             时间为北京时间；昨收取日K 前一交易日收盘（真源）。后端三重守卫：日期必须在日K
             交易日历内、当日末价必须等于日K 收盘、相邻两日不漏 —— 任一不满足即不下发。
             「相对昨收%」模式下 0% 虚线即昨收基线。

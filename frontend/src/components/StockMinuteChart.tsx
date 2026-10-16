@@ -298,7 +298,7 @@ export function StockMinuteChart({ code, height = 430, className }: Props) {
 
   if (query.isLoading) {
     return (
-      <div className={cn('flex items-center justify-center gap-2 text-xs text-fg-muted', className)}
+      <div className={cn('flex items-center justify-center gap-2 text-xs text-muted', className)}
            style={{ height }}>
         <Loader2 className="h-3.5 w-3.5 animate-spin" /> 分时数据加载中…
       </div>
@@ -307,7 +307,7 @@ export function StockMinuteChart({ code, height = 430, className }: Props) {
 
   if (!data) {
     return (
-      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-fg-muted', className)}
+      <div className={cn('flex flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted', className)}
            style={{ height }}>
         <span>当日分时不可用</span>
         <span className="text-[11px] opacity-70">
@@ -332,27 +332,27 @@ export function StockMinuteChart({ code, height = 430, className }: Props) {
         <span className={cn('font-mono', up ? 'text-bull' : 'text-bear')}>
           {up ? '+' : ''}{data.last_pct.toFixed(2)}%
         </span>
-        <span className="text-fg-muted">
-          均价 <span className="font-mono text-fg-secondary">{data.points[data.points.length - 1].avg.toFixed(2)}</span>
+        <span className="text-muted">
+          均价 <span className="font-mono text-secondary">{data.points[data.points.length - 1].avg.toFixed(2)}</span>
         </span>
-        <span className="text-fg-muted">
+        <span className="text-muted">
           最高 <span className="font-mono text-bull">{data.high.toFixed(2)}</span>
         </span>
-        <span className="text-fg-muted">
+        <span className="text-muted">
           最低 <span className="font-mono text-bear">{data.low.toFixed(2)}</span>
         </span>
-        <span className="text-fg-muted">
-          昨收 <span className="font-mono text-fg-secondary">{data.prev_close.toFixed(2)}</span>
+        <span className="text-muted">
+          昨收 <span className="font-mono text-secondary">{data.prev_close.toFixed(2)}</span>
         </span>
-        <span className="text-fg-muted">
-          量 <span className="font-mono text-fg-secondary">{fmtVol(data.volume)}</span>
+        <span className="text-muted">
+          量 <span className="font-mono text-secondary">{fmtVol(data.volume)}</span>
         </span>
-        <span className="text-fg-muted">
-          额 <span className="font-mono text-fg-secondary">{fmtBigNum(data.amount)}</span>
+        <span className="text-muted">
+          额 <span className="font-mono text-secondary">{fmtBigNum(data.amount)}</span>
         </span>
-        <span className="ml-auto inline-flex items-center gap-2 text-[11px] text-fg-muted">
+        <span className="ml-auto inline-flex items-center gap-2 text-[11px] text-muted">
           {dateStr} · {data.points.length} 个分钟点
-          {inTradingWindow() && <span className="text-fg-muted">· 30s 自动刷新</span>}
+          {inTradingWindow() && <span className="text-muted">· 30s 自动刷新</span>}
           <span>· {data.code}</span>
         </span>
       </div>

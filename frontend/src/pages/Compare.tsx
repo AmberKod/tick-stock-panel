@@ -411,17 +411,17 @@ export function Compare() {
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addSymbol() }}
             placeholder="输入代码添加，如 600519 / 000651 / 688825"
-            className="h-7 w-56 rounded border border-border bg-elevated px-2 text-[12px] text-fg outline-none placeholder:text-fg-muted focus:border-sky-400/60"
+            className="h-7 w-56 rounded border border-border bg-elevated px-2 text-[12px] text-foreground outline-none placeholder:text-muted focus:border-sky-400/60"
           />
           <button
             type="button"
             onClick={addSymbol}
-            className="inline-flex h-7 items-center gap-1 rounded border border-border px-2 text-[12px] text-fg-secondary hover:text-fg"
+            className="inline-flex h-7 items-center gap-1 rounded border border-border px-2 text-[12px] text-secondary hover:text-foreground"
           >
             <Plus className="h-3 w-3" /> 添加
           </button>
           <span className="mx-1 h-4 w-px bg-border" />
-          <span className="text-[11px] text-fg-muted">区间</span>
+          <span className="text-[11px] text-muted">区间</span>
           <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
             {RANGES.map(r => (
               <button
@@ -429,14 +429,14 @@ export function Compare() {
                 type="button"
                 onClick={() => setDays(r.days)}
                 className={cn('rounded px-2 py-0.5 text-[11px] transition-colors',
-                  days === r.days ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  days === r.days ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
               >
                 {r.label}
               </button>
             ))}
           </div>
           <span className="mx-1 h-4 w-px bg-border" />
-          <span className="text-[11px] text-fg-muted">纵轴</span>
+          <span className="text-[11px] text-muted">纵轴</span>
           <div className="inline-flex items-center rounded border border-border bg-elevated p-0.5">
             {([['norm', '归一化'], ['rel', '相对基准'], ['abs', '绝对价格']] as const).map(([v, label]) => {
               // 没有基准时"相对基准"无从谈起 —— 置灰而不是画一条错的 0 线
@@ -450,21 +450,21 @@ export function Compare() {
                   title={disabled ? '需要先拿到基准指数才谈得上相对收益' : undefined}
                   className={cn('rounded px-2 py-0.5 text-[11px] transition-colors',
                     disabled && 'cursor-not-allowed opacity-40',
-                    mode === v ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                    mode === v ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
                 >
                   {label}
                 </button>
               )
             })}
           </div>
-          {query.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-fg-muted" />}
+          {query.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
         </div>
 
         {/* ── 基准指数 ──
             默认沪深300。全部走腾讯真源(本地 index 库只有创业板指一只);
             取不到就明说, 不拿别的指数顶替, 也不画一条"看起来像基准"的线。 */}
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-fg-muted">基准</span>
+          <span className="text-[11px] text-muted">基准</span>
           {BENCHMARKS.map(b => (
             <button
               key={b.code}
@@ -473,8 +473,8 @@ export function Compare() {
               title={b.hint}
               className={cn('rounded border px-1.5 py-0.5 text-[11px] transition-colors',
                 bench === b.code
-                  ? 'border-slate-400/50 bg-slate-400/10 text-fg'
-                  : 'border-border text-fg-muted hover:text-fg-secondary')}
+                  ? 'border-slate-400/50 bg-slate-400/10 text-foreground'
+                  : 'border-border text-muted hover:text-secondary')}
             >
               {b.label}
             </button>
@@ -484,11 +484,11 @@ export function Compare() {
             onClick={() => { setBench(''); if (mode === 'rel') setMode('norm') }}
             title="不加基准: 只看这几只之间的相对走势"
             className={cn('rounded border px-1.5 py-0.5 text-[11px] transition-colors',
-              !bench ? 'border-border bg-elevated text-fg' : 'border-border text-fg-muted hover:text-fg-secondary')}
+              !bench ? 'border-border bg-elevated text-foreground' : 'border-border text-muted hover:text-secondary')}
           >
             无
           </button>
-          {bench && benchQuery.isFetching && <Loader2 className="h-3 w-3 animate-spin text-fg-muted" />}
+          {bench && benchQuery.isFetching && <Loader2 className="h-3 w-3 animate-spin text-muted" />}
           {bench && benchQuery.data && !benchQuery.data.available && (
             <span className="text-[11px] text-amber-500">
               基准取不到（{benchQuery.data.reason ?? '未知原因'}）—— 不画基准线
@@ -498,7 +498,7 @@ export function Compare() {
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {symbols.length === 0 && (
-            <span className="text-[11px] text-fg-muted">
+            <span className="text-[11px] text-muted">
               还没有标的 —— 上面输入框加几只。链接里的 ?symbols= 会记住这次对比。
             </span>
           )}
@@ -511,12 +511,12 @@ export function Compare() {
                 className="h-2 w-2 rounded-full"
                 style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }}
               />
-              <span className="text-fg-secondary">{aligned?.names?.[s] ?? s}</span>
-              <span className="font-mono text-fg-muted">{s}</span>
+              <span className="text-secondary">{aligned?.names?.[s] ?? s}</span>
+              <span className="font-mono text-muted">{s}</span>
               <button
                 type="button"
                 onClick={() => removeSymbol(s)}
-                className="text-fg-muted hover:text-fg"
+                className="text-muted hover:text-foreground"
                 title="移除"
               >
                 <X className="h-3 w-3" />
@@ -530,7 +530,7 @@ export function Compare() {
       <div className="rounded-md border border-border bg-surface p-2">
         <div ref={boxRef} className="w-full" style={{ height: 420 }} />
         {aligned && (
-          <div className="px-1 pt-1 text-[11px] text-fg-muted">
+          <div className="px-1 pt-1 text-[11px] text-muted">
             对齐后 {aligned.dates.length} 个共同交易日（{aligned.dates[0]} ~ {aligned.dates[aligned.dates.length - 1]}）
             {symList.some(s => (aligned.dropped[s] ?? 0) > 0) && (
               <> · 被剔除的天数:
@@ -546,8 +546,8 @@ export function Compare() {
         )}
         {/* 基准的来源与口径: 图上那条灰虚线到底是哪来的, 必须写在同一屏 */}
         {bench && benchData && (
-          <div className="px-1 pt-1 text-[11px] text-fg-muted">
-            基准 <span className="text-fg-secondary">{benchName}</span>
+          <div className="px-1 pt-1 text-[11px] text-muted">
+            基准 <span className="text-secondary">{benchName}</span>
             <span className="font-mono"> {benchData.code}</span>
             {' '}· 腾讯实时源 <span className="font-mono">live-tencent</span>
             {' '}· 覆盖 {benchData.coverage?.from} ~ {benchData.coverage?.to}（{benchData.coverage?.bars}根）
@@ -565,7 +565,7 @@ export function Compare() {
           </div>
         )}
         {symbols.length > 0 && symList.length === 0 && !query.isFetching && (
-          <div className="flex h-[420px] items-center justify-center text-[12px] text-fg-muted">
+          <div className="flex h-[420px] items-center justify-center text-[12px] text-muted">
             这些代码在本地日K库里没有数据 —— 不拿别的品种的曲线冒充
           </div>
         )}
@@ -576,7 +576,7 @@ export function Compare() {
         <div className="overflow-x-auto rounded-md border border-border bg-surface">
           <table className="w-full min-w-[640px] text-[12px]">
             <thead>
-              <tr className="border-b border-border text-left text-[11px] text-fg-muted">
+              <tr className="border-b border-border text-left text-[11px] text-muted">
                 <th className="px-3 py-1.5 font-normal">标的</th>
                 <th className="px-3 py-1.5 text-right font-normal">区间收益</th>
                 <th className="px-3 py-1.5 text-right font-normal">最大回撤</th>
@@ -607,36 +607,36 @@ export function Compare() {
                     <td className="px-3 py-1.5">
                       <span className="inline-flex items-center gap-1.5">
                         <span className="h-2 w-2 rounded-full" style={{ background: s.color }} />
-                        <span className="text-fg">{s.name}</span>
-                        <span className="font-mono text-[11px] text-fg-muted">{s.symbol}</span>
+                        <span className="text-foreground">{s.name}</span>
+                        <span className="font-mono text-[11px] text-muted">{s.symbol}</span>
                       </span>
                     </td>
                     <td className={cn('px-3 py-1.5 text-right font-mono',
                       ret >= 0 ? 'text-[#C74040]' : 'text-[#2D9B65]')}>
                       {pct(ret)}
                     </td>
-                    <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    <td className="px-3 py-1.5 text-right font-mono text-secondary">
                       -{(maxDrawdown(s.raw) * 100).toFixed(2)}%
                     </td>
-                    <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    <td className="px-3 py-1.5 text-right font-mono text-secondary">
                       {(annualVol(s.raw) * 100).toFixed(1)}%
                     </td>
                     {benchRaw && (
                       <>
                         <td className={cn('px-3 py-1.5 text-right font-mono',
-                          excess == null ? 'text-fg-muted'
+                          excess == null ? 'text-muted'
                             : excess >= 0 ? 'text-[#C74040]' : 'text-[#2D9B65]')}>
                           {excess == null ? '—' : `${excess >= 0 ? '+' : ''}${(excess * 100).toFixed(2)}pp`}
                         </td>
-                        <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                        <td className="px-3 py-1.5 text-right font-mono text-secondary">
                           {Number.isFinite(b) ? b.toFixed(2) : '—'}
                         </td>
-                        <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                        <td className="px-3 py-1.5 text-right font-mono text-secondary">
                           {Number.isFinite(c) ? c.toFixed(2) : '—'}
                         </td>
                       </>
                     )}
-                    <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                    <td className="px-3 py-1.5 text-right font-mono text-secondary">
                       {last.toFixed(2)}
                     </td>
                   </tr>
@@ -648,8 +648,8 @@ export function Compare() {
                   <td className="px-3 py-1.5">
                     <span className="inline-flex items-center gap-1.5">
                       <span className="h-2 w-2 rounded-full" style={{ background: BENCH_COLOR }} />
-                      <span className="text-fg-secondary">基准 {benchName}</span>
-                      <span className="font-mono text-[11px] text-fg-muted">{benchData?.code ?? bench}</span>
+                      <span className="text-secondary">基准 {benchName}</span>
+                      <span className="font-mono text-[11px] text-muted">{benchData?.code ?? bench}</span>
                     </span>
                   </td>
                   <td className={cn('px-3 py-1.5 text-right font-mono',
@@ -657,16 +657,16 @@ export function Compare() {
                       ? 'text-[#C74040]' : 'text-[#2D9B65]')}>
                     {pct(benchRaw[benchRaw.length - 1] / benchRaw[0] - 1)}
                   </td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                  <td className="px-3 py-1.5 text-right font-mono text-secondary">
                     -{(maxDrawdown(benchRaw) * 100).toFixed(2)}%
                   </td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                  <td className="px-3 py-1.5 text-right font-mono text-secondary">
                     {(annualVol(benchRaw) * 100).toFixed(1)}%
                   </td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">—</td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">1.00</td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-muted">1.00</td>
-                  <td className="px-3 py-1.5 text-right font-mono text-fg-secondary">
+                  <td className="px-3 py-1.5 text-right font-mono text-muted">—</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-muted">1.00</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-muted">1.00</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-secondary">
                     {benchRaw[benchRaw.length - 1].toFixed(2)}
                   </td>
                 </tr>
@@ -674,7 +674,7 @@ export function Compare() {
             </tbody>
           </table>
           {benchRaw && (
-            <div className="border-t border-border px-3 py-1.5 text-[10px] leading-relaxed text-fg-muted">
+            <div className="border-t border-border px-3 py-1.5 text-[10px] leading-relaxed text-muted">
               超额收益 = 个股区间收益 − 基准区间收益（pp = 百分点，不是相对百分比）。
               β 与相关系数都基于对齐区间内的**日对数收益**算，是确定性统计量，不是模型估计；
               基准自身的超额/β 那两格恒为 0 / 1，写出来是为了让表格对齐可读。
@@ -686,14 +686,14 @@ export function Compare() {
       {/* ── 相关性矩阵(基于日对数收益) ── */}
       {seriesData && seriesData.length >= 2 && (
         <div className="overflow-x-auto rounded-md border border-border bg-surface p-2">
-          <div className="mb-1 text-[12px] text-fg">相关系数</div>
-          <div className="mb-1 text-[10px] leading-relaxed text-fg-muted">
+          <div className="mb-1 text-[12px] text-foreground">相关系数</div>
+          <div className="mb-1 text-[10px] leading-relaxed text-muted">
             基于对齐区间内的**日对数收益**算（不是价格本身 —— 两只都涨的票价格序列相关性会虚高）。
             1 = 完全同涨同跌，-1 = 完全反向，0 = 无关。
           </div>
           <table className="w-full min-w-[420px] text-[12px]">
             <thead>
-              <tr className="text-[11px] text-fg-muted">
+              <tr className="text-[11px] text-muted">
                 <th className="px-2 py-1 font-normal" />
                 {seriesData.map(s => (
                   <th key={s.symbol} className="px-2 py-1 text-center font-normal">
@@ -719,7 +719,7 @@ export function Compare() {
                     return (
                       <td
                         key={b.symbol}
-                        className="px-2 py-1 text-center font-mono text-fg-secondary"
+                        className="px-2 py-1 text-center font-mono text-secondary"
                         title={`${a.name} vs ${b.name}`}
                       >
                         {Number.isFinite(c) ? c.toFixed(2) : '—'}

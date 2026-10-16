@@ -102,7 +102,7 @@ export function HKStockAnalysisPage() {
   const r = realtime.data
   const changeColor =
     r?.change_pct == null
-      ? 'text-fg-muted'
+      ? 'text-muted'
       : r.change_pct >= 0
         ? 'text-rose-500'
         : 'text-emerald-500'
@@ -112,13 +112,13 @@ export function HKStockAnalysisPage() {
       <div className="flex items-baseline gap-3">
         <Link
           to="/hk"
-          className="text-sm text-fg-muted hover:text-fg"
+          className="text-sm text-muted hover:text-foreground"
         >
           ← 港股龙头池
         </Link>
-        <span className="text-fg-muted">/</span>
-        <h1 className="text-2xl font-semibold text-fg">
-          {r?.name || symbol} <span className="text-sm text-fg-muted font-mono">{symbol}</span>
+        <span className="text-muted">/</span>
+        <h1 className="text-2xl font-semibold text-foreground">
+          {r?.name || symbol} <span className="text-sm text-muted font-mono">{symbol}</span>
         </h1>
         <span className="inline-block px-1.5 py-0.5 text-xs rounded bg-rose-500/10 text-rose-500">
           HK · HKD
@@ -127,7 +127,7 @@ export function HKStockAnalysisPage() {
           <MarketWatchlistButton symbol={symbol} market="hk" />
         </span>
         {r && (
-          <span className="text-xs text-fg-muted">
+          <span className="text-xs text-muted">
             数据源: {r.source}
           </span>
         )}
@@ -141,7 +141,7 @@ export function HKStockAnalysisPage() {
               {r.price.toFixed(2)}
             </span>
           ) : (
-            <span className="text-fg-muted">--</span>
+            <span className="text-muted">--</span>
           )}
         </Card>
         <Card label="涨跌幅">
@@ -151,7 +151,7 @@ export function HKStockAnalysisPage() {
               {r.change_pct.toFixed(2)}%
             </span>
           ) : (
-            <span className="text-fg-muted">--</span>
+            <span className="text-muted">--</span>
           )}
         </Card>
         <Card label="今开">
@@ -175,7 +175,7 @@ export function HKStockAnalysisPage() {
       </div>
 
       {/* 港股特性说明 */}
-      <div className="text-xs text-fg-muted p-3 rounded border border-border bg-surface/40">
+      <div className="text-xs text-muted p-3 rounded border border-border bg-surface/40">
         港股无涨跌停制度 · T+0 交收 · 货币 HKD 原币（不折算 CNY）· 行情源: 腾讯优先, 新浪降级
       </div>
 
@@ -216,8 +216,8 @@ export function HKStockAnalysisPage() {
       {/* ── 深度数据 3 tab ── */}
       <div className="rounded-lg border border-border bg-surface p-3">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold text-fg">深度数据</h3>
-          <span className="text-xs text-fg-muted">
+          <h3 className="text-sm font-semibold text-foreground">深度数据</h3>
+          <span className="text-xs text-muted">
             港股真源 · 评级走东财港股通，公告走港交所披露易，财报走东财公告原文
           </span>
           <div className="ml-auto inline-flex items-center rounded border border-border bg-elevated p-0.5">
@@ -227,7 +227,7 @@ export function HKStockAnalysisPage() {
                 type="button"
                 onClick={() => setDeepTab(t.key)}
                 className={cn('rounded px-2 py-0.5 text-xs transition-colors',
-                  deepTab === t.key ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary')}
+                  deepTab === t.key ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary')}
               >
                 {t.label}
               </button>
@@ -245,8 +245,8 @@ export function HKStockAnalysisPage() {
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-border bg-surface/60 p-3">
-      <div className="text-xs text-fg-muted mb-1">{label}</div>
-      <div className="text-lg font-semibold text-fg">{children}</div>
+      <div className="text-xs text-muted mb-1">{label}</div>
+      <div className="text-lg font-semibold text-foreground">{children}</div>
     </div>
   )
 }

@@ -113,7 +113,7 @@ export function StrengthLadderPanel({ market, date }: Props) {
         </div>
       ) : query.isError ? (
         <div className="flex items-center gap-2 py-6 text-xs text-muted">
-          <AlertCircle className="h-4 w-4 text-warn" />
+          <AlertCircle className="h-4 w-4 text-warning" />
           梯队数据加载失败 · {String((query.error as Error)?.message || query.error)}
         </div>
       ) : shown.length === 0 ? (

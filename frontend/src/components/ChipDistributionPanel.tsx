@@ -23,8 +23,8 @@ function fmtPrice(v: number): string {
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded border border-border bg-elevated px-2 py-1" title={hint}>
-      <div className="text-[10px] leading-tight text-fg-muted">{label}</div>
-      <div className="font-mono text-[12px] leading-tight text-fg">{value}</div>
+      <div className="text-[10px] leading-tight text-muted">{label}</div>
+      <div className="font-mono text-[12px] leading-tight text-foreground">{value}</div>
     </div>
   )
 }
@@ -36,10 +36,10 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
 
   // 纵轴标注: 只标最高/最低/中位/均成本/现价, 标满会糊成一片
   const marks: { price: number; label: string; cls: string }[] = [
-    { price: rows[n - 1].hi, label: fmtPrice(rows[n - 1].hi), cls: 'text-fg-muted' },
+    { price: rows[n - 1].hi, label: fmtPrice(rows[n - 1].hi), cls: 'text-muted' },
     { price: result.lastPrice, label: `现价 ${fmtPrice(result.lastPrice)}`, cls: 'text-sky-500' },
     { price: result.avgCost, label: `均成本 ${fmtPrice(result.avgCost)}`, cls: 'text-amber-500' },
-    { price: rows[0].lo, label: fmtPrice(rows[0].lo), cls: 'text-fg-muted' },
+    { price: rows[0].lo, label: fmtPrice(rows[0].lo), cls: 'text-muted' },
   ]
   const span = rows[n - 1].hi - rows[0].lo || 1
   const posOf = (p: number) => ((rows[n - 1].hi - p) / span) * 100
@@ -47,10 +47,10 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
   return (
     <div className={cn('rounded-md border border-border bg-surface p-2', className)}>
       <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="text-[12px] font-medium text-fg">筹码分布</span>
-        {name && <span className="text-[11px] text-fg-muted">{name}</span>}
+        <span className="text-[12px] font-medium text-foreground">筹码分布</span>
+        {name && <span className="text-[11px] text-muted">{name}</span>}
         <EstimateTag title="交易所/行情源都不公开「每个价位的持仓量」, 这张图是用公开价量数据反推的模型结果">模型估算</EstimateTag>
-        <span className="text-[10px] text-fg-muted">
+        <span className="text-[10px] text-muted">
           {result.from} ~ {result.to} · {result.bars}根 · 衰减 {result.decay}
         </span>
       </div>
@@ -62,8 +62,8 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
         title="⚠ 模型估算 —— 不是交易所公布的真实持仓 / 成本数据"
         how={
           <>
-            交易所与行情源都不公开「每个价位有多少筹码」。这张图是输入<span className="text-fg">日K的 high/low/close/volume（真数据）</span>
-            {' '}与<span className="text-fg">流通股本 {(result.floatShares / 1e8).toFixed(2)} 亿股（行情源股本字段）</span>，
+            交易所与行情源都不公开「每个价位有多少筹码」。这张图是输入<span className="text-foreground">日K的 high/low/close/volume（真数据）</span>
+            {' '}与<span className="text-foreground">流通股本 {(result.floatShares / 1e8).toFixed(2)} 亿股（行情源股本字段）</span>，
             按「每日换手率 = 成交量 / 流通股本 → 当日新筹码在 [low, high] 呈三角形分布 → 老筹码按 (1 - 换手率 × {result.decay}) 逐日衰减」推出来的。
           </>
         }
@@ -79,7 +79,7 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
         }
       />
 
-      <div className="mb-1 flex items-center gap-1 text-[10px] text-fg-muted">
+      <div className="mb-1 flex items-center gap-1 text-[10px] text-muted">
         <EstimateTag>估算值</EstimateTag>
         <span>以下 6 个指标全部由上面的模型算出，不是交易所披露值</span>
       </div>
@@ -149,7 +149,7 @@ export function ChipDistributionPanel({ result, name, className }: Props) {
         </div>
       </div>
 
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-fg-muted">
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted">
         <span className="inline-flex items-center gap-1">
           <span className="h-2 w-3 bg-[rgba(240,68,56,0.62)]" /> 获利盘(估算成本低于现价)
         </span>

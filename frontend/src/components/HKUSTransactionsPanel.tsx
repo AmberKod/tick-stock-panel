@@ -46,7 +46,7 @@ function num(v: number | null | undefined): string {
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
         : warn ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}
       <span className="min-w-0 break-words">{text}</span>
@@ -58,8 +58,8 @@ function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean;
 const US_SIDE: Record<number, { text: string; cls: string }> = {
   0: { text: '买', cls: 'text-red-600 dark:text-red-500' },
   1: { text: '卖', cls: 'text-green-600 dark:text-green-500' },
-  2: { text: '中性', cls: 'text-fg-muted' },
-  5: { text: '盘后', cls: 'text-fg-muted' },
+  2: { text: '中性', cls: 'text-muted' },
+  5: { text: '盘后', cls: 'text-muted' },
 }
 
 export function HKUSTransactionsPanel({ symbol, limit = 60, className = '' }: {
@@ -84,13 +84,13 @@ export function HKUSTransactionsPanel({ symbol, limit = 60, className = '' }: {
   return (
     <section className={`rounded-lg border border-border bg-surface p-3 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Activity className="h-3.5 w-3.5 text-fg-muted" />
-        <h3 className="text-sm font-semibold text-fg">逐笔成交</h3>
-        <span className="text-xs text-fg-muted">
+        <Activity className="h-3.5 w-3.5 text-muted" />
+        <h3 className="text-sm font-semibold text-foreground">逐笔成交</h3>
+        <span className="text-xs text-muted">
           {isUs ? 'MAC-EX 0x122F' : 'MAC-EX 0x23FC / 0x2406'}
           {q.data?.date ? ` · ${q.data.date === 'today' ? '当日' : q.data.date}` : ''}
         </span>
-        <span className="ml-auto text-[11px] text-fg-muted">
+        <span className="ml-auto text-[11px] text-muted">
           {q.data?.price_unit ?? ''}{q.data?.volume_unit ? ` · 量=${q.data.volume_unit}` : ''}
         </span>
       </div>
@@ -106,7 +106,7 @@ export function HKUSTransactionsPanel({ symbol, limit = 60, className = '' }: {
         <div className="max-h-72 overflow-y-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-surface">
-              <tr className="text-xs text-fg-muted">
+              <tr className="text-xs text-muted">
                 <th className="py-1 pr-2 text-left font-normal">时间</th>
                 <th className="py-1 pr-2 text-right font-normal">成交价</th>
                 <th className="py-1 pr-2 text-right font-normal">成交量(股)</th>
@@ -125,12 +125,12 @@ export function HKUSTransactionsPanel({ symbol, limit = 60, className = '' }: {
                     </td>
                     <td className="py-1 pr-2 text-right font-mono text-xs">{num(r.volume)}</td>
                     {isUs && (
-                      <td className="py-1 pr-2 text-right font-mono text-xs text-fg-muted">
+                      <td className="py-1 pr-2 text-right font-mono text-xs text-muted">
                         {r.trade_count == null ? '—' : num(r.trade_count)}
                       </td>
                     )}
                     {isUs && (
-                      <td className={`py-1 text-right text-xs ${side?.cls ?? 'text-fg-muted'}`}>
+                      <td className={`py-1 text-right text-xs ${side?.cls ?? 'text-muted'}`}>
                         {side?.text ?? '—'}
                       </td>
                     )}
@@ -142,7 +142,7 @@ export function HKUSTransactionsPanel({ symbol, limit = 60, className = '' }: {
         </div>
       )}
 
-      <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted">
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
         {isUs
           ? '方向为上游 bs_flag 的协议注释口径（0 买 / 1 卖 / 2 中性 / 5 盘后）。'
           : '港股逐笔走 ex 扩展行情协议；上游未返回买卖方向字段（nature 映射未实测），故此处不标方向。'}

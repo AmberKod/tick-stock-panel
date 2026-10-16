@@ -78,7 +78,7 @@ function big(v: number | null | undefined): string {
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-start gap-2 py-3 text-xs leading-relaxed ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
         : warn ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}
       <span className="min-w-0 break-words">{text}</span>
@@ -117,10 +117,10 @@ export function HKUSBoardsPanel({ symbol, className = '' }: {
   return (
     <section className={`rounded-lg border border-border bg-surface p-3 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Layers className="h-3.5 w-3.5 text-fg-muted" />
-        <h3 className="text-sm font-semibold text-fg">所属板块 / 同业联动</h3>
-        <span className="text-xs text-fg-muted">MAC-EX · 通达信扩展市场</span>
-        <span className="ml-auto text-[11px] text-fg-muted">
+        <Layers className="h-3.5 w-3.5 text-muted" />
+        <h3 className="text-sm font-semibold text-foreground">所属板块 / 同业联动</h3>
+        <span className="text-xs text-muted">MAC-EX · 通达信扩展市场</span>
+        <span className="ml-auto text-[11px] text-muted">
           {rows.length ? `${rows.length} 个板块` : ''}
         </span>
       </div>
@@ -139,8 +139,8 @@ export function HKUSBoardsPanel({ symbol, className = '' }: {
               onClick={() => setActive(b.board_code)}
               className={`rounded border px-2 py-1 text-[11px] transition-colors ${
                 b.board_code === selected
-                  ? 'border-fg-muted bg-elevated text-fg'
-                  : 'border-border text-fg-muted hover:text-fg-secondary'
+                  ? 'border-muted bg-elevated text-foreground'
+                  : 'border-border text-muted hover:text-secondary'
               }`}
               title={b.board_name ?? undefined}
             >
@@ -172,7 +172,7 @@ function MembersTable({ rows, market }: { rows: MemberRow[]; market: 'hk' | 'us'
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-xs text-fg-muted">
+          <tr className="text-xs text-muted">
             <th className="py-1 pr-2 text-left font-normal">名称</th>
             <th className="py-1 pr-2 text-right font-normal">最新</th>
             <th className="py-1 pr-2 text-right font-normal">涨跌%</th>
@@ -191,10 +191,10 @@ function MembersTable({ rows, market }: { rows: MemberRow[]; market: 'hk' | 'us'
                 {r.code
                   ? <Link
                       to={`/stock/${encodeURIComponent(`${r.code}${suffix}`)}`}
-                      className="text-fg hover:underline"
+                      className="text-foreground hover:underline"
                     >{r.name ?? r.code}</Link>
                   : <span>{r.name ?? '—'}</span>}
-                <span className="ml-1 font-mono text-[10px] text-fg-muted">{r.code}</span>
+                <span className="ml-1 font-mono text-[10px] text-muted">{r.code}</span>
               </td>
               <td className="py-1 pr-2 text-right font-mono text-xs">{num(r.close)}</td>
               <td className={`py-1 pr-2 text-right font-mono text-xs ${priceColorClass(r.pct)}`}>
@@ -210,7 +210,7 @@ function MembersTable({ rows, market }: { rows: MemberRow[]; market: 'hk' | 'us'
           ))}
         </tbody>
       </table>
-      <p className="mt-1.5 text-[11px] text-fg-muted">
+      <p className="mt-1.5 text-[11px] text-muted">
         总股本由上游「万股」换算成股；市值/股息率为绝对金额与百分数口径（已交叉核对）。
         PE 为上游动态口径，与 close/EPS 不等属正常。
       </p>

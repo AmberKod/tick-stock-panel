@@ -76,10 +76,10 @@ export function HKMarketWidget() {
       {/* 指数条 */}
       <div className="rounded-lg border border-border bg-surface/60 p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-fg-muted">港股指数</h2>
-          <span className="text-xs text-fg-muted">10s 自动刷新</span>
+          <h2 className="text-sm font-medium text-muted">港股指数</h2>
+          <span className="text-xs text-muted">10s 自动刷新</span>
         </div>
-        {indices.isLoading && <div className="text-xs text-fg-muted py-2">加载中...</div>}
+        {indices.isLoading && <div className="text-xs text-muted py-2">加载中...</div>}
         {indices.data && (
           <div className="space-y-2">
             {indices.data.map((idx) => (
@@ -88,17 +88,17 @@ export function HKMarketWidget() {
                 className="flex items-center justify-between border-b border-border/40 last:border-0 pb-1.5 last:pb-0"
               >
                 <div>
-                  <div className="text-sm text-fg">{idx.name}</div>
-                  <div className="text-xs text-fg-muted font-mono">{idx.symbol}</div>
+                  <div className="text-sm text-foreground">{idx.name}</div>
+                  <div className="text-xs text-muted font-mono">{idx.symbol}</div>
                 </div>
                 <div className="text-right">
-                  <div className="text-base font-semibold text-fg">
+                  <div className="text-base font-semibold text-foreground">
                     {idx.price != null ? idx.price.toFixed(2) : '--'}
                   </div>
                   <div
                     className={`text-xs font-medium ${
                       idx.change_pct == null
-                        ? 'text-fg-muted'
+                        ? 'text-muted'
                         : idx.change_pct >= 0
                           ? 'text-rose-500'
                           : 'text-emerald-500'
@@ -118,10 +118,10 @@ export function HKMarketWidget() {
       {/* 龙头涨幅榜 */}
       <div className="rounded-lg border border-border bg-surface/60 p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-fg-muted">港股龙头涨幅榜</h2>
-          <span className="text-xs text-fg-muted">{leaders.data?.length ?? 0} 只</span>
+          <h2 className="text-sm font-medium text-muted">港股龙头涨幅榜</h2>
+          <span className="text-xs text-muted">{leaders.data?.length ?? 0} 只</span>
         </div>
-        {leaders.isLoading && <div className="text-xs text-fg-muted py-2">加载中...</div>}
+        {leaders.isLoading && <div className="text-xs text-muted py-2">加载中...</div>}
         {leaders.data && (
           <div className="space-y-1">
             {leaders.data.slice(0, 10).map((s) => (
@@ -131,17 +131,17 @@ export function HKMarketWidget() {
                 className="flex items-center justify-between border-b border-border/40 last:border-0 py-1.5 hover:bg-elevated/30 -mx-2 px-2 rounded"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm text-fg truncate">{s.name}</div>
-                  <div className="text-xs text-fg-muted font-mono">{s.symbol}</div>
+                  <div className="text-sm text-foreground truncate">{s.name}</div>
+                  <div className="text-xs text-muted font-mono">{s.symbol}</div>
                 </div>
                 <div className="text-right flex-shrink-0 ml-2">
-                  <div className="text-sm text-fg">
+                  <div className="text-sm text-foreground">
                     {s.price != null ? s.price.toFixed(2) : '--'}
                   </div>
                   <div
                     className={`text-xs font-medium ${
                       s.change_pct == null
-                        ? 'text-fg-muted'
+                        ? 'text-muted'
                         : s.change_pct >= 0
                           ? 'text-rose-500'
                           : 'text-emerald-500'

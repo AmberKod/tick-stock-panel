@@ -63,7 +63,7 @@ function pctSigned(v: number | null | undefined, digits = 2): string {
 
 /** 美股惯例: **绿涨红跌**(与 A股相反), 所以增持用绿、减持用红。 */
 function deltaClass(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v) || v === 0) return 'text-fg-muted'
+  if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'
   return v > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-500'
 }
 
@@ -80,10 +80,10 @@ const RATING_STYLE: Record<string, { label: string; cls: string }> = {
 }
 
 function RatingBadge({ rec }: { rec: string | null | undefined }) {
-  if (!rec) return <span className="text-fg-muted text-xs">—</span>
+  if (!rec) return <span className="text-muted text-xs">—</span>
   const key = rec.toLowerCase().trim()
   const s = RATING_STYLE[key]
-  if (!s) return <span className="text-xs text-fg-secondary">{rec}</span>
+  if (!s) return <span className="text-xs text-secondary">{rec}</span>
   return (
     <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${s.cls}`}>{s.label}</span>
   )
@@ -91,7 +91,7 @@ function RatingBadge({ rec }: { rec: string | null | undefined }) {
 
 function StateLine({ loading, warn, text }: { loading?: boolean; warn?: boolean; text: string }) {
   return (
-    <div className={`flex items-center gap-2 py-3 text-xs ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-fg-muted'}`}>
+    <div className={`flex items-center gap-2 py-3 text-xs ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-muted'}`}>
       {loading
         ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
         : warn
@@ -113,8 +113,8 @@ function PanelShell({ icon, title, subtitle, children }: {
     <section className="rounded-lg border border-border bg-surface/60 p-4">
       <div className="mb-3 flex items-center gap-2">
         {icon}
-        <h3 className="text-sm font-semibold text-fg">{title}</h3>
-        <span className="ml-auto text-xs text-fg-muted">{subtitle}</span>
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="ml-auto text-xs text-muted">{subtitle}</span>
       </div>
       {children}
     </section>
@@ -146,7 +146,7 @@ export function USEstimatesPanel({ symbol }: { symbol: string }) {
 
   return (
     <PanelShell
-      icon={<Target className="h-3.5 w-3.5 text-fg-muted" />}
+      icon={<Target className="h-3.5 w-3.5 text-muted" />}
       title="分析师一致预期"
       subtitle="OpenBB · yfinance 汇总"
     >
@@ -175,7 +175,7 @@ export function USEstimatesPanel({ symbol }: { symbol: string }) {
               consensus={d.target_median ?? d.target_consensus}
               current={d.current_price}
             />
-            <p className="text-xs text-fg-muted">
+            <p className="text-xs text-muted">
               现价 {money(d.current_price)}
               {d.recommendation_mean != null && ` · 评级均值 ${num(d.recommendation_mean)}（1=强力买入 … 5=强力卖出）`}
               {d.currency && ` · ${d.currency}`}
@@ -194,8 +194,8 @@ function Cell({ label, value, valueClass }: {
 }) {
   return (
     <div>
-      <div className="text-xs text-fg-muted">{label}</div>
-      <div className={`text-sm font-medium ${valueClass ?? 'text-fg'}`}>{value}</div>
+      <div className="text-xs text-muted">{label}</div>
+      <div className={`text-sm font-medium ${valueClass ?? 'text-foreground'}`}>{value}</div>
     </div>
   )
 }
@@ -215,7 +215,7 @@ function TargetRangeBar({ low, high, consensus, current }: {
   const pos = (v: number) => Math.max(0, Math.min(100, ((v - low) / span) * 100))
   const marks: { key: string; v: number; cls: string; label: string }[] = []
   if (consensus != null) {
-    marks.push({ key: 'cons', v: consensus, cls: 'bg-fg', label: '中位' })
+    marks.push({ key: 'cons', v: consensus, cls: 'bg-foreground', label: '中位' })
   }
   if (current != null) {
     marks.push({ key: 'cur', v: current, cls: 'bg-amber-500', label: '现价' })
@@ -232,11 +232,11 @@ function TargetRangeBar({ low, high, consensus, current }: {
             title={`${m.label} ${money(m.v)}`}
           >
             <span className={`h-4 w-0.5 rounded ${m.cls}`} />
-            <span className="mt-0.5 text-[10px] leading-none text-fg-muted">{m.label}</span>
+            <span className="mt-0.5 text-[10px] leading-none text-muted">{m.label}</span>
           </div>
         ))}
       </div>
-      <div className="flex justify-between text-[10px] text-fg-muted">
+      <div className="flex justify-between text-[10px] text-muted">
         <span>低 {money(low)}</span>
         <span>高 {money(high)}</span>
       </div>
@@ -258,7 +258,7 @@ export function USInstitutionalPanel({ symbol, limit = 20 }: {
 
   return (
     <PanelShell
-      icon={<Building2 className="h-3.5 w-3.5 text-fg-muted" />}
+      icon={<Building2 className="h-3.5 w-3.5 text-muted" />}
       title="机构持股"
       subtitle="OpenBB · Nasdaq"
     >
@@ -268,7 +268,7 @@ export function USInstitutionalPanel({ symbol, limit = 20 }: {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-xs text-fg-muted">
+                <tr className="text-xs text-muted">
                   <th className="py-1 pr-2 text-left font-normal">机构</th>
                   <th className="py-1 pr-2 text-left font-normal">报告期</th>
                   <th className="py-1 pr-2 text-right font-normal">持股</th>
@@ -283,10 +283,10 @@ export function USInstitutionalPanel({ symbol, limit = 20 }: {
                     <td className="py-1 pr-2">
                       {r.url
                         ? <a href={r.url} target="_blank" rel="noreferrer"
-                             className="text-fg hover:underline">{r.owner ?? '—'}</a>
+                             className="text-foreground hover:underline">{r.owner ?? '—'}</a>
                         : <span>{r.owner ?? '—'}</span>}
                     </td>
-                    <td className="py-1 pr-2 text-xs text-fg-muted">{r.date ?? '—'}</td>
+                    <td className="py-1 pr-2 text-xs text-muted">{r.date ?? '—'}</td>
                     <td className="py-1 pr-2 text-right font-mono text-xs">{shares(r.shares_held)}</td>
                     <td className={`py-1 pr-2 text-right font-mono text-xs ${deltaClass(r.shares_change)}`}>
                       {shares(r.shares_change, true)}
@@ -298,7 +298,7 @@ export function USInstitutionalPanel({ symbol, limit = 20 }: {
                 ))}
               </tbody>
             </table>
-            <p className="mt-1.5 text-[11px] text-fg-muted">
+            <p className="mt-1.5 text-[11px] text-muted">
               源站市值字段单位存疑（疑似千美元口径），故不展示；判断机构动向看持股数与变动%。
             </p>
           </div>
@@ -322,7 +322,7 @@ export function USInsiderPanel({ symbol, limit = 20 }: {
 
   return (
     <PanelShell
-      icon={<UserSquare2 className="h-3.5 w-3.5 text-fg-muted" />}
+      icon={<UserSquare2 className="h-3.5 w-3.5 text-muted" />}
       title="内部人交易"
       subtitle="OpenBB · Nasdaq (Form 4)"
     >
@@ -332,7 +332,7 @@ export function USInsiderPanel({ symbol, limit = 20 }: {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-xs text-fg-muted">
+                <tr className="text-xs text-muted">
                   <th className="py-1 pr-2 text-left font-normal">日期</th>
                   <th className="py-1 pr-2 text-left font-normal">姓名 / 身份</th>
                   <th className="py-1 pr-2 text-left font-normal">类型</th>
@@ -345,10 +345,10 @@ export function USInsiderPanel({ symbol, limit = 20 }: {
                 {rows.map((r, i) => (
                   <tr key={`${r.owner ?? 'ins'}-${r.transaction_date ?? i}-${i}`}
                       className="border-t border-border/60">
-                    <td className="py-1 pr-2 text-xs text-fg-muted">{r.transaction_date ?? '—'}</td>
+                    <td className="py-1 pr-2 text-xs text-muted">{r.transaction_date ?? '—'}</td>
                     <td className="py-1 pr-2">
                       <span className="block truncate">{r.owner ?? '—'}</span>
-                      {r.title && <span className="block text-[11px] text-fg-muted">{r.title}</span>}
+                      {r.title && <span className="block text-[11px] text-muted">{r.title}</span>}
                     </td>
                     <td className="py-1 pr-2 text-xs">
                       <span className={`rounded px-1.5 py-0.5 ${txClass(r.transaction_type)}`}>
@@ -362,7 +362,7 @@ export function USInsiderPanel({ symbol, limit = 20 }: {
                 ))}
               </tbody>
             </table>
-            <p className="mt-1.5 text-[11px] text-fg-muted">
+            <p className="mt-1.5 text-[11px] text-muted">
               Automatic Sell 多为薪酬行权后的自动卖出（非主动减持判断）；Award / Gift 类不计入买卖意向。
             </p>
           </div>
