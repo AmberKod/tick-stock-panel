@@ -71,6 +71,10 @@ const harness = [
   "  if (url.pathname.indexOf('/api/us/deep/statement/') === 0) {",
   "    if (mode === 'unavailable') return new Response(JSON.stringify(UNAVAILABLE), { status: 200, headers: { 'Content-Type': 'application/json' } })",
   "    if (mode === 'empty') return new Response(JSON.stringify(envelope([])), { status: 200, headers: { 'Content-Type': 'application/json' } })",
+  "    // 空壳变体 1: available=true 但 data 是 null",
+  "    if (mode === 'null') return new Response(JSON.stringify({ available: true, source: 'openbb', symbol: 'AAPL', market: 'US', data: null }), { status: 200, headers: { 'Content-Type': 'application/json' } })",
+  "    // 空壳变体 2: available=true 但响应体**没有 data 键**(后端失败契约的同形体)",
+  "    if (mode === 'nodata') return new Response(JSON.stringify({ available: true, source: 'openbb', symbol: 'AAPL', market: 'US' }), { status: 200, headers: { 'Content-Type': 'application/json' } })",
   "    return new Response(JSON.stringify(envelope(ROWS[url.searchParams.get('kind') || 'income'] || ROWS.income)), { status: 200, headers: { 'Content-Type': 'application/json' } })",
   "  }",
   "  if (url.pathname.indexOf('/api/us/deep/summary/') === 0) {",
@@ -248,6 +252,18 @@ try {
   await until(() => evaluate(text('p-statement') + ".includes('营业总收入')"), 'income/annual did not restore')
   await screenshot('us-deep-05-normal.png')
 
+  // ── 边缘: /statement 三种空壳响应 —— [] / null / 缺 data 键, 都不能渲染成 0
+  for (const mode of ['empty', 'null', 'nodata']) {
+    const label = mode === 'empty' ? 'data: []' : mode === 'null' ? 'data: null' : '缺 data 键'
+    await navigate('mode=' + mode)
+    await until(() => evaluate(text('p-statement') + ".includes('无报表数据') || " + text('p-statement') + ".includes('不可用')"), 'Shell statement state did not render: ' + mode)
+    console.log('  [诊断] ' + label + ' → 三表: ' + JSON.stringify(await evaluate(text('p-statement')).then(v => v.slice(0, 80))))
+    await check("(" + text('p-statement') + ".includes('无报表数据') || " + text('p-statement') + ".includes('不可用')) && !" + text('p-statement') + ".includes('营业总收入')", '边缘 ' + label + ': 落到空态/不可用，不渲染报表')
+    await check("!" + text('p-statement') + ".includes('$0.00') && !" + text('p-statement') + ".includes('0.00')", '边缘 ' + label + ': 不把缺失渲染成 0')
+    await check("window.__requests.some(r => r.url === '/api/us/deep/statement/AAPL?kind=income&period=annual&limit=4')", '边缘 ' + label + ': 请求 URL 仍是契约形态')
+  }
+  await screenshot('us-deep-08-statement-shells.png')
+
   // ── 哨兵态: available:true + 哨兵文本必须归一成不可用
   await navigate('mode=sentinel')
   await until(() => evaluate(text('p-summary') + ".includes('不可用')"), 'Sentinel state did not render')
@@ -259,9 +275,10 @@ try {
   await until(() => evaluate(text('p-statement') + ".includes('416.16B')"), 'AAPL statement did not render')
   await check(text('p-statement') + ".includes('416.16B') && " + text('p-summary') + ".includes('最新价 230.48')", '切换前: AAPL 数据已渲染')
   await clickText('切到 MSFT')
-  // 过渡态(三表延迟 1200ms): 必须清掉上一标的的数字, 不能靠 placeholderData 继续显示 AAPL
+  // 过渡态(三表延迟 1200ms): 必须**清空并进入 loading**, 不能挂着上一只票的数字
   console.log('  [诊断] 切换后 300ms 三表实际文本: ' + JSON.stringify(await evaluate(text('p-statement'))))
-  await check("!" + text('p-statement') + ".includes('416.16B') && !" + text('p-statement') + ".includes('2026-01-31')", '切换标的(过渡态): 三表立刻清掉上一标的数据，不靠 placeholderData 顶着')
+  await check("!" + text('p-statement') + ".includes('416.16B') && !" + text('p-statement') + ".includes('2026-01-31') && !" + text('p-statement') + ".includes('营业总收入')", '切换标的(过渡态): 三表清空上一标的数据，不靠 placeholderData 顶着')
+  await check(text('p-statement') + ".includes('加载中')", '切换标的(过渡态): 三表显式进入加载中')
   await until(() => evaluate(text('p-statement') + ".includes('不可用')"), 'MSFT unavailable state did not render')
   console.log('  [诊断] 切换后摘要面板实际文本: ' + JSON.stringify(await evaluate(text('p-summary'))))
   await check("!" + text('p-statement') + ".includes('416.16B') && !" + text('p-statement') + ".includes('2026-01-31')", '切换标的: 三表不残留上一标的的金额与期数')
