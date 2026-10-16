@@ -21,6 +21,7 @@ from app.api import (
     backtest,
     data,
     ext_data,
+    export as export_api,
     financials,
     hk_deep,
     hk_us_deep,
@@ -584,6 +585,9 @@ app.include_router(hk_us_deep.router_hk)
 app.include_router(hk_us_deep.router_us)
 app.include_router(astock_deep.router)
 app.include_router(macro.router)
+# 导出路由必须注册在文件末尾的 SPA 兜底 @app.get("/{full_path:path}") **之前**,
+# 否则 /api/export/* 会被兜底吃掉、返回 index.html。
+app.include_router(export_api.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(hotspots.router)

@@ -46,10 +46,16 @@ def _clear_cache():
     prov.clear_cache()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
     # ⚠️ client=("127.0.0.1", 5555) 不能省: 后端鉴权只放行可信来源, 用默认
     # TestClient 来源打 API 会拿到 **403**(不是 401), 与被测逻辑无关。
+    #
+    # ⚠️ scope 必须是 module 不能用 session: app lifespan 启动时会拿
+    # services/mining_process_lock.py 的文件锁, 而 Windows 上 msvcrt.locking 是
+    # **进程内互斥**的 —— session 级 TestClient 会把锁一直攥到整个 pytest
+    # 会话结束, 后面每个用到 TestClient 的测试模块都会在 setup 阶段
+    # PermissionError。改成 module 级, 本模块跑完就释放, 互不干扰。
     with TestClient(app, client=("127.0.0.1", 5555)) as c:
         yield c
 
