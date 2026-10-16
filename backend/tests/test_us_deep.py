@@ -96,7 +96,10 @@ class TestHappyPath:
             us_deep._provider, "filings",
             lambda s, limit=8, form_type=None: {
                 "source": "openbb",
-                "data": [{"form_type": "10-K", "filed_date": "2025-11-01",
+                # ⚠️ 日期字段是 filing_date, 不是 filed_date —— 2026-10-16 实测
+                # OpenBB /equity/fundamental/filings (provider=sec) 真实响应确认,
+                # 旧 mock 写成 filed_date 与真实口径不符, 会误导前端取值。
+                "data": [{"form_type": "10-K", "filing_date": "2025-11-01",
                           "report_date": "2025-09-27", "cik": 320193}],
             },
         )

@@ -2178,6 +2178,192 @@ export interface StrategyAlertEvent {
   [key: string]: unknown
 }
 
+// ===== 美股深度数据 (OpenBB / 九章融合 P1) =====
+//
+// 契约(**实测确认, 2026-10-16**): 7 个 /api/us/deep/* 端点**失败也是 HTTP 200**,
+// 绝不返回 4xx/5xx, 也不抛异常 —— 一律 ``{available: false, source: "openbb", reason}``。
+// ``reason`` 前缀:
+//   - ``provider_error: <异常>``  上游 OpenBB 没起 / 超时 / 连不上
+//   - ``no_data: …``              空数据或空壳(有 symbol 无值)
+//   - ``bad_kind:`` / ``bad_period:`` / ``bad_limit:``  参数越界(不调上游)
+// 前端必须按 ``available`` 分流显示 reason, **不能把缺失渲染成 0**
+// (项目纪律: components/panel/Panel.tsx)。
+
+/** 7 个深度端点共用的响应信封。 */
+export interface UsDeepEnvelope<T> {
+  available: boolean
+  source?: string
+  reason?: string
+  symbol?: string
+  market?: string
+  /** 上游原样透传; 无数据时为 null 或缺失 —— 不要假设一定有值。 */
+  data?: T | null
+}
+
+/**
+ * /quote 实时盘口 —— 上游(yfinance)原样透传, 字段集合随 provider 变化,
+ * 全部 optional。实测样本(2026-10-16 NVDA):
+ * ``{symbol, asset_type, name, exchange, bid, bid_size, ask, ask_size,
+ * last_price, open, high, low, volume, prev_close, year_high, year_low,
+ * ma_50d, ma_200d, volume_average, volume_average_10d, currency}``
+ */
+export interface UsDeepQuote {
+  symbol?: string | null
+  asset_type?: string | null
+  name?: string | null
+  exchange?: string | null
+  currency?: string | null
+  last_price?: number | null
+  bid?: number | null
+  ask?: number | null
+  bid_size?: number | null
+  ask_size?: number | null
+  open?: number | null
+  high?: number | null
+  low?: number | null
+  volume?: number | null
+  prev_close?: number | null
+  year_high?: number | null
+  year_low?: number | null
+  ma_50d?: number | null
+  ma_200d?: number | null
+  volume_average?: number | null
+  volume_average_10d?: number | null
+  [key: string]: unknown
+}
+
+/**
+ * /statement 三大报表的一期 —— 上游原样透传, **字段集合随 kind 变化**
+ * (实测 NVDA 年报: income ≈ 40 项 / balance ≈ 77 项 / cash ≈ 53 项),
+ * 且随 provider 版本增删。除 ``period_ending`` 外一律走索引签名,
+ * 展示层必须防御性取值 + 缺值显示 "—"。
+ */
+export interface UsDeepStatementRow {
+  /** 报告期截止日, 如 "2026-01-31" */
+  period_ending?: string | null
+  fiscal_year?: number | null
+  fiscal_period?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * /filings SEC EDGAR 报送 —— 实测真实字段(2026-10-16 NVDA)。
+ *
+ * ⚠️ 日期字段是 ``filing_date``, **不是** ``filed_date``。backend 测试
+ * mock (backend/tests/test_us_deep.py:99) 用的是 ``filed_date``, 与真实
+ * 响应不符, 已按实测修正。
+ */
+export interface UsDeepFiling {
+  filing_date?: string | null
+  report_type?: string | null
+  report_date?: string | null
+  primary_doc_description?: string | null
+  primary_doc?: string | null
+  accession_number?: string | null
+  filing_detail_url?: string | null
+  complete_submission_url?: string | null
+  report_url?: string | null
+  items?: string | null
+  size?: string | null
+  accepted_date?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * /summary 中文摘要 —— 后端拼的一段盘口文本。
+ *
+ * ⚠️ 实测: 上游取不到盘口时后端返回 ``available:true`` + ``text: "OpenBB 无此标的数据"``
+ * (provider 里 quote 空 → 给哨兵文本, 不是抛异常)。故前端除判空串外,
+ * 还要把这段哨兵文本当"不可用"处理, 不能直接渲染成摘要。
+ */
+export interface UsDeepSummary {
+  text?: string | null
+}
+
+export const US_DEEP_NO_DATA_TEXT = 'OpenBB 无此标的数据'
+
+/** /institutional 机构持股 —— 谁在增减持。 */
+export interface UsDeepInstitutionalRow {
+  date?: string | null
+  owner?: string | null
+  shares_held?: number | null
+  shares_change?: number | null
+  /** ⚠️ **小数比例, 不是百分数**: 0.01919 表示 +1.919%, 展示层必须 ×100。 */
+  shares_change_pct?: number | null
+  /**
+   * ⚠️ 源站市值单位存疑(疑似千美元口径, 与 持股数×股价 差 1000 倍),
+   * 后端只透 ``_raw`` 留给核对 —— **禁止展示**。判断机构动向看
+   * ``shares_held`` + ``shares_change_pct`` 即可。
+   */
+  market_value_raw?: number | null
+  url?: string | null
+}
+
+/** /insider 内部人交易 (Form 4 明细)。 */
+export interface UsDeepInsiderRow {
+  transaction_date?: string | null
+  owner?: string | null
+  title?: string | null
+  ownership_type?: string | null
+  transaction_type?: string | null
+  shares?: number | null
+  price?: number | null
+  shares_held_after?: number | null
+  url?: string | null
+}
+
+/** /estimates 分析师一致预期 (yfinance 汇总, 真实值不合成)。 */
+export interface UsDeepEstimates {
+  symbol?: string
+  currency?: string | null
+  current_price?: number | null
+  target_high?: number | null
+  target_low?: number | null
+  target_consensus?: number | null
+  target_median?: number | null
+  /** buy / overweight / hold / sell / underweight ... */
+  recommendation?: string | null
+  /** 1=强力买入 … 5=强力卖出 */
+  recommendation_mean?: number | null
+  number_of_analysts?: number | null
+}
+
+/** /api/us/realtime 美股实时行情卡片(非 deep 域)。 */
+export interface UsRealtimeQuote {
+  symbol: string
+  name?: string
+  code?: string
+  price: number | null
+  pre_close: number | null
+  open: number | null
+  high: number | null
+  low: number | null
+  volume: number | null
+  amount: number | null
+  change_pct: number | null
+  source: string
+  market?: string
+}
+
+/** /api/us/financials SEC 财报序列的一个点(非 deep 域)。 */
+export interface UsFinancialPoint {
+  start?: string
+  end?: string
+  val: number | null
+}
+
+export interface UsFinancialsResponse {
+  available: boolean
+  source: string
+  reason?: string
+  cik?: string | number
+  count?: number
+  metrics?: {
+    revenue?: { unit?: string; quarterly?: UsFinancialPoint[] }
+    net_income?: { unit?: string; quarterly?: UsFinancialPoint[] }
+  }
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -4016,6 +4202,67 @@ export const api = {
     request<HotspotRefreshResult>(`/api/v1/hotspots/refresh?market=${market}`, { method: 'POST' }),
 
   hotspotJobState: () => request<HotspotJobState>('/api/v1/hotspots/job-state'),
+
+  // ===== 美股深度数据 (OpenBB / 九章融合 P1) =====
+  // 后端: backend/app/api/us_deep.py, 前缀 /api/us/deep。
+  // 失败恒为 HTTP 200 + {available:false, reason}, 不抛异常。
+  // 只有 /quote 与 /summary 认 market 参数(非法值静默归一为 US);
+  // 其余 5 个端点后端硬编码 US, 传 market 无效 —— 这里也就不再暴露该参数。
+
+  usDeepQuote: (symbol: string, market: 'US' | 'HK' = 'US') =>
+    request<UsDeepEnvelope<UsDeepQuote>>(
+      `/api/us/deep/quote/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
+
+  /** kind=income|balance|cash (默认 income); period=annual|quarter (默认 annual); limit 1..12 (默认 3)。 */
+  usDeepStatement: (symbol: string, params?: {
+    kind?: 'income' | 'balance' | 'cash'
+    period?: 'annual' | 'quarter'
+    limit?: number
+  }) => {
+    const qs = new URLSearchParams()
+    if (params?.kind) qs.set('kind', params.kind)
+    if (params?.period) qs.set('period', params.period)
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const s = qs.toString()
+    return request<UsDeepEnvelope<UsDeepStatementRow[]>>(
+      `/api/us/deep/statement/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`)
+  },
+
+  /** limit 1..50 (默认 8); form_type 传空串/不传 = 不过滤(如 '10-K')。 */
+  usDeepFilings: (symbol: string, params?: { limit?: number; form_type?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    if (params?.form_type) qs.set('form_type', params.form_type)
+    const s = qs.toString()
+    return request<UsDeepEnvelope<UsDeepFiling[]>>(
+      `/api/us/deep/filings/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`)
+  },
+
+  usDeepSummary: (symbol: string, market: 'US' | 'HK' = 'US') =>
+    request<UsDeepEnvelope<UsDeepSummary>>(
+      `/api/us/deep/summary/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
+
+  /** limit 1..100 (默认 20)。 */
+  usDeepInstitutional: (symbol: string, limit = 20) =>
+    request<UsDeepEnvelope<UsDeepInstitutionalRow[]>>(
+      `/api/us/deep/institutional/${encodeURIComponent(symbol)}?limit=${limit}`),
+
+  /** limit 1..100 (默认 20)。 */
+  usDeepInsider: (symbol: string, limit = 20) =>
+    request<UsDeepEnvelope<UsDeepInsiderRow[]>>(
+      `/api/us/deep/insider/${encodeURIComponent(symbol)}?limit=${limit}`),
+
+  usDeepEstimates: (symbol: string) =>
+    request<UsDeepEnvelope<UsDeepEstimates>>(
+      `/api/us/deep/estimates/${encodeURIComponent(symbol)}`),
+
+  /** 美股实时行情卡片(非 deep 域) —— 收编 USStockAnalysis 里自写的 fetchJson。 */
+  usRealtime: (symbol: string) =>
+    request<UsRealtimeQuote>(`/api/us/realtime/${encodeURIComponent(symbol)}`),
+
+  /** SEC 财报 (sec-edgar, 非 deep 域) —— 同上。 */
+  usFinancials: (symbol: string) =>
+    request<UsFinancialsResponse>(`/api/us/financials/${encodeURIComponent(symbol)}`),
 }
 
 // ===== Pipeline =====

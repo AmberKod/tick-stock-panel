@@ -18,83 +18,20 @@ import {
   USEstimatesPanel,
   USInstitutionalPanel,
   USInsiderPanel,
+  USStatementPanel,
+  USSummaryPanel,
 } from '@/components/us/USDeepPanels'
+import { api } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { PERIOD_DEFAULT_BARS, type KPeriod } from '@/lib/klinePeriod'
 import type { OHLC } from '@/components/EChartsCandlestick'
-
-interface USRealtime {
-  symbol: string
-  name?: string
-  code?: string
-  price: number | null
-  pre_close: number | null
-  open: number | null
-  high: number | null
-  low: number | null
-  volume: number | null
-  amount: number | null
-  change_pct: number | null
-  source: string
-  market?: string
-}
+import type { UsDeepQuote as DeepQuote } from '@/lib/api'
 
 // --- 九章融合 P0/P1: OpenBB 深度盘口 / SEC 财报 / SEC 报送 ---
 // 失败契约: HTTP 200 + { available: false, reason } — 面板必须 fail-closed 展示 reason, 绝不显示假数据
-
-interface DeepQuote {
-  symbol?: string
-  name?: string
-  exchange?: string
-  last_price?: number | null
-  bid?: number | null
-  ask?: number | null
-  bid_size?: number | null
-  ask_size?: number | null
-  ma_50d?: number | null
-  ma_200d?: number | null
-  year_high?: number | null
-  year_low?: number | null
-  volume_average?: number | null
-  currency?: string
-}
-
-interface DeepQuoteResp {
-  available: boolean
-  source: string
-  reason?: string
-  data?: DeepQuote
-}
-
-interface FinancialPoint {
-  start?: string
-  end?: string
-  val: number | null
-}
-
-interface FinancialsResp {
-  available: boolean
-  source: string
-  reason?: string
-  cik?: string | number
-  count?: number
-  metrics?: {
-    revenue?: { unit?: string; quarterly?: FinancialPoint[] }
-    net_income?: { unit?: string; quarterly?: FinancialPoint[] }
-  }
-}
-
-interface FilingsResp {
-  available: boolean
-  source: string
-  reason?: string
-  data?: { form_type?: string | null; form?: string | null; report_type?: string | null; filing_date?: string | null }[]
-}
-
-async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(path)
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json() as Promise<T>
-}
+//
+// 所有请求一律走 api.usDeep* / api.us* (frontend/src/lib/api.ts) + QK.* (queryKeys.ts),
+// 不在页面里手拼 URL、不自写 fetchJson —— 后端契约改动只需改 api.ts 一处。
 
 /**
  * 美股个股页 — 实时行情卡片 + 深度数据三面板 + A股同款日K蜡烛图。
@@ -116,30 +53,26 @@ export function USStockAnalysisPage() {
   const ticker = symbol.replace(/\.US$/, '')
 
   const realtime = useQuery({
-    queryKey: ['us', 'realtime', symbol],
-    queryFn: () => fetchJson<USRealtime>(`/api/us/realtime/${encodeURIComponent(symbol)}`),
+    queryKey: QK.usRealtime(symbol),
+    queryFn: () => api.usRealtime(symbol),
     refetchInterval: 60_000,
   })
 
   const deepQuote = useQuery({
-    queryKey: ['us', 'deep-quote', ticker],
-    queryFn: () =>
-      fetchJson<DeepQuoteResp>(
-        `/api/us/deep/quote/${encodeURIComponent(ticker)}?market=US`,
-      ),
+    queryKey: QK.usDeepQuote(ticker),
+    queryFn: () => api.usDeepQuote(ticker, 'US'),
     staleTime: 30_000,
   })
 
   const financials = useQuery({
-    queryKey: ['us', 'financials', ticker],
-    queryFn: () => fetchJson<FinancialsResp>(`/api/us/financials/${encodeURIComponent(ticker)}`),
+    queryKey: QK.usFinancials(ticker),
+    queryFn: () => api.usFinancials(ticker),
     staleTime: 600_000,
   })
 
   const filings = useQuery({
-    queryKey: ['us', 'filings', ticker],
-    queryFn: () =>
-      fetchJson<FilingsResp>(`/api/us/deep/filings/${encodeURIComponent(ticker)}?limit=8`),
+    queryKey: QK.usDeepFilings(ticker, 8),
+    queryFn: () => api.usDeepFilings(ticker, { limit: 8 }),
     staleTime: 600_000,
   })
 
@@ -356,7 +289,9 @@ export function USStockAnalysisPage() {
           )}
           <ul>
             {filingList.map((f, i) => {
-              const raw = f.form_type || f.report_type || f.form || ''
+              // 上游原样透传: form 只在极少数 provider 版本出现(类型是 unknown),
+              // 统一收敛成字符串再进 filingMeta
+              const raw = String(f.form_type ?? f.report_type ?? f.form ?? '')
               const meta = filingMeta(raw)
               return (
                 <li
@@ -391,6 +326,13 @@ export function USStockAnalysisPage() {
         <USInstitutionalPanel symbol={ticker} limit={20} />
         <USInsiderPanel symbol={ticker} limit={20} />
       </div>
+
+      {/* 财报三表 (OpenBB, 2026-10-16): 利润表 / 资产负债表 / 现金流量表,
+          年度·季度可切。上游原样透传, 只列核心科目, 全部字段折叠展开。 */}
+      <USStatementPanel symbol={ticker} limit={4} />
+
+      {/* 盘口摘要 (OpenBB): 由实时盘口拼的一段中文文本, 给快速扫读/喂大模型用。 */}
+      <USSummaryPanel symbol={ticker} />
 
       {/* 日K蜡烛图 (A股同款组件, 本地 enriched 全指标) —— 主图四类 / 标注 / 画图全开;
           美股无涨跌停(limitMarkers 关), 复权固定「不复权」: hfq/不复权腾讯都不给, 不猜。 */}

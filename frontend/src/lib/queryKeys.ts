@@ -205,6 +205,27 @@ export const QK = {
   // 免责声明是全局常量，但端点挂在 book 路径下；key 带 bookId 保持一致，
   // 实际由 staleTime: Infinity 保证只取一次。
   novelRewriteDisclaimer: (bookId: string) => ['novel', 'rewrite-disclaimer', bookId] as const,
+
+  // ===== 美股深度数据 (OpenBB / 九章融合 P1) =====
+  // **故意不进 SSE_INVALIDATE_PREFIXES** —— 三大报表 / 报送 / 机构持股都是 T3 慢数据,
+  // 上游 OpenBB 单次冷拉取可达 30s+; 若被 1s/次的行情推送失效会把上游缓存打穿。
+  // 刷新点只有 staleTime 过期与切换标的(kind/period/limit 都进 key, 切档位会重新取)。
+  usDeepQuote:         (symbol: string, market?: string) =>
+                         ['us-deep-quote', symbol, market ?? 'US'] as const,
+  usDeepStatement:     (symbol: string, kind?: string, period?: string, limit?: number) =>
+                         ['us-deep-statement', symbol, kind ?? 'income', period ?? 'annual', limit ?? 3] as const,
+  usDeepFilings:       (symbol: string, limit?: number, formType?: string) =>
+                         ['us-deep-filings', symbol, limit ?? 8, formType ?? ''] as const,
+  usDeepSummary:       (symbol: string, market?: string) =>
+                         ['us-deep-summary', symbol, market ?? 'US'] as const,
+  usDeepInstitutional: (symbol: string, limit?: number) =>
+                         ['us-deep-institutional', symbol, limit ?? 20] as const,
+  usDeepInsider:       (symbol: string, limit?: number) =>
+                         ['us-deep-insider', symbol, limit ?? 20] as const,
+  usDeepEstimates:     (symbol: string) => ['us-deep-estimates', symbol] as const,
+  /** 美股实时行情 / SEC 财报 —— 随标的变, 同样不进 SSE 列表(财报是季频慢数据)。 */
+  usRealtime:          (symbol: string) => ['us-realtime', symbol] as const,
+  usFinancials:        (symbol: string) => ['us-financials', symbol] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
