@@ -152,6 +152,17 @@ class Settings(BaseSettings):
     # 容器内指向宿主代理要用 host.docker.internal, 不能用 127.0.0.1。
     sec_proxy: str = ""
 
+    # 中国宏观 8 指标 (akshare, 九章融合)。默认 false —— 与 tsp_postgres_enabled
+    # 同范式: 新子系统默认关闭, 由用户显式开启后才生效(本项目铁律 —— 未经演练的
+    # 路径不静默上线)。开启前还需确认容器装了 extra multi-market (BACKEND_EXTRAS)。
+    cn_macro_enabled: bool = False
+    # 宏观源**专属**代理 —— 只给这一个数据源用, 绝不设全局 HTTP_PROXY/HTTPS_PROXY。
+    #   - 容器内必须填 http://host.docker.internal:7897 (**不能用 127.0.0.1**,
+    #     那是容器自己, 不是宿主的代理端口);
+    #   - 后端在宿主直跑时填 http://127.0.0.1:7897;
+    #   - 留空 = 强制直连(显式清空代理, 不继承进程环境)。
+    cn_macro_proxy: str | None = None
+
     # OpenBB 本地 API (九章融合 P1)。宿主常驻服务, 由 D:\OpenBB\start-openbb-api.ps1
     # 启动 (与 sec_relay 同级的运维依赖)。默认值是容器视角 —— 容器经
     # host.docker.internal 访问宿主 6900; 后端在宿主直跑时改为

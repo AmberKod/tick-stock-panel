@@ -28,6 +28,7 @@ from app.api import (
     indices,
     intraday,
     kline,
+    macro,
     market_recap,
     mining,
     monitor_rules,
@@ -582,6 +583,7 @@ app.include_router(us_deep.router)
 app.include_router(hk_us_deep.router_hk)
 app.include_router(hk_us_deep.router_us)
 app.include_router(astock_deep.router)
+app.include_router(macro.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(hotspots.router)
